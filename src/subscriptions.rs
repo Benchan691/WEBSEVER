@@ -1,4 +1,4 @@
-use crate::{AppState, ReqCtx, db, mail, render, reviews, view};
+use crate::{AppState, ReqCtx, db, mail, render, reviews, vendor_matcher, view};
 use axum::{
     body::Bytes,
     http::{Method, StatusCode, header},
@@ -49,6 +49,7 @@ async fn profile(state: &AppState, kind: &str, input: &Value) -> Result<Value, S
     if !filters.is_object() {
         return Err("Filters must be an object.".into());
     }
+    vendor_matcher::validate(&filters["vendor_product_filter"])?;
     let collections = filters["collections"]
         .as_array()
         .ok_or("Filter collections must be a list.")?;
@@ -451,24 +452,7 @@ fn inventory_match(document: &Document, filters: &Value) -> bool {
     if inventory["enabled"] != true {
         return true;
     }
-    let haystack = flatten_json(&db::bson_json(document)).to_lowercase();
-    let rows = inventory["rows"].as_array().cloned().unwrap_or_default();
-    rows.iter().any(|row| {
-        let vendor = row["vendor"].as_str().unwrap_or("").to_lowercase();
-        let product = row["product"].as_str().unwrap_or("").to_lowercase();
-        !vendor.is_empty()
-            && !product.is_empty()
-            && haystack.contains(&vendor)
-            && haystack.contains(&product)
-    })
-}
-fn flatten_json(value: &Value) -> String {
-    match value {
-        Value::String(s) => s.clone(),
-        Value::Array(a) => a.iter().map(flatten_json).collect::<Vec<_>>().join(" "),
-        Value::Object(m) => m.values().map(flatten_json).collect::<Vec<_>>().join(" "),
-        _ => value.to_string(),
-    }
+    vendor_matcher::classify(&db::bson_json(document), inventory).is_some()
 }
 pub(crate) async fn match_profile(state: &AppState, profile: &Value, limit: i64) -> Vec<Value> {
     let mut output = Vec::new();

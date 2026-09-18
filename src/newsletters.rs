@@ -5,116 +5,11 @@ use axum::{
 };
 use serde_json::{Value, json};
 
-fn strings(value: &Value) -> Vec<String> {
-    match value {
-        Value::String(s) => {
-            if s.trim().is_empty() {
-                vec![]
-            } else {
-                vec![s.trim().to_owned()]
-            }
-        }
-        Value::Array(a) => a.iter().flat_map(strings).collect(),
-        Value::Object(m) => m.values().flat_map(strings).collect(),
-        _ => vec![],
-    }
-}
-fn first(record: &Value, details: &Value, keys: &[&str]) -> String {
-    for root in [record, details] {
-        for key in keys {
-            if let Some(v) = strings(&root[*key]).into_iter().next() {
-                return v;
-            }
-        }
-    }
-    String::new()
-}
-fn all(record: &Value, details: &Value, keys: &[&str]) -> Vec<String> {
-    let mut values = Vec::new();
-    for root in [record, details] {
-        for key in keys {
-            for item in strings(&root[*key]) {
-                if !values
-                    .iter()
-                    .any(|v: &String| v.eq_ignore_ascii_case(&item))
-                {
-                    values.push(item)
-                }
-            }
-        }
-    }
-    values
-}
 pub fn normalize(record: &Value, source: &str, config: &Value) -> Value {
-    let details = record
-        .get("details")
-        .filter(|v| v.is_object())
-        .unwrap_or(&Value::Null);
-    let title = first(
-        record,
-        details,
-        &["title", "vulName", "advisory_title", "code", "cve"],
-    );
-    let title = if title.is_empty() {
-        "Security Advisory".into()
-    } else {
-        title
-    };
-    let overview = first(record, details, &["overview", "summary", "description"]);
-    let severity = all(record, details, &["severity", "risk", "priority"]);
-    let affected = all(
-        record,
-        details,
-        &[
-            "affected",
-            "affected_products",
-            "systems_affected",
-            "products",
-        ],
-    );
-    let impacts = all(record, details, &["impacts", "impact"]);
-    let cves = all(record, details, &["cve_ids", "cve", "code"]);
-    let recommendations = all(
-        record,
-        details,
-        &[
-            "recommendations",
-            "recommendation",
-            "solution",
-            "solutions",
-            "mitigation",
-        ],
-    );
-    let references = all(record, details, &["references", "reference_links", "urls"]);
-    let related_links = all(record, details, &["related_links", "related_link"]);
-    let order = config
-        .pointer(&format!("/sources/{source}/fields"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_else(|| {
-            [
-                "title",
-                "collection",
-                "overview",
-                "table",
-                "severity",
-                "impacts",
-                "affected",
-                "cves",
-                "recommendations",
-                "references",
-                "related_links",
-            ]
-            .iter()
-            .map(|v| json!(v))
-            .collect()
-        });
-    let subject = config
-        .pointer("/common/subject")
-        .and_then(Value::as_str)
-        .unwrap_or("Security newsletter: {{title}}")
-        .replace("{{title}}", &title);
-    json!({"title":title,"subject":subject,"collection":source,"language":"en","overview":overview,"severity":severity,"affected":affected,"impacts":impacts,"cves":cves,"recommendations":recommendations,"references":references,"related_links":related_links,"cvss":"","field_order":order,"extra":config.pointer("/common/extra").and_then(Value::as_str).unwrap_or(""),"footer":config.pointer("/common/footer").and_then(Value::as_str).unwrap_or("Should you have any queries, please contact the Security Operation Centre. Thank you."),"show_severity":!severity.is_empty(),"show_affected":!affected.is_empty(),"show_impacts":!impacts.is_empty(),"show_recommendations":true,"labels":{"greeting":"Dear Valued Customer,","collection":"Source collection:","overview":"Overview:","severity":"Severity:","cvss":"CVSS:","impacts":"Impacts:","affected":"Affected system:","cves":"CVEs:","recommendations":"Recommendations:","references":"References:","related_links":"Related Links:","not_specified":"Not specified","default_recommendation":"Refer to the vendor guidance and apply available fixes."}})
+    crate::newsletter_normalizer::normalize(record, source, config)
+}
+pub fn template_name(source: &str) -> &'static str {
+    crate::newsletter_normalizer::template_name(source)
 }
 pub async fn template_config(state: &AppState) -> Value {
     let saved = db::find_one(
@@ -159,7 +54,7 @@ pub async fn preview(
     render(
         state,
         ctx,
-        "newsletters/generated.html",
+        template_name(source),
         json!({"newsletter":newsletter}),
     )
 }

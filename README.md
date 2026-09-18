@@ -15,10 +15,10 @@ The app creates or repairs the configured local bootstrap administrator at start
 ## Features
 
 - Signed login sessions, local and Account Hub login, account administration, and role based access.
-- Subscription profiles, email recipients, vendor/product CSV import, previews, and MongoDB storage.
+- Subscription profiles, email recipients, vendor/product CSV import, structured vendor/product matching, previews, and MongoDB storage.
 - Review collection browsing, search, selection scoring, and JSON export.
 - Fixed template and enriched report jobs, progress, preview/download, cancellation, and translation.
-- Newsletter rendering and operations pages. Scheduled reports and newsletter delivery are available behind `RUST_SCHEDULER_ENABLED`.
+- Source specific newsletter rendering, including HPE and Zimbra layouts, and operations pages. Scheduled reports and newsletter delivery are available behind `RUST_SCHEDULER_ENABLED`.
 - SMTP delivery configured through the same `SMTP_*` environment variables as the Python app.
 
 ## Validation
@@ -27,4 +27,4 @@ Run `cargo check` and `cargo test`. For an end to end check, use separate `WEB_D
 
 ## Source compatibility
 
-The frontend assets are carried over from the current Python working tree. The Rust service uses the existing `web` and `vulnerabilities` collection names and does not migrate data. Some advanced source specific normalization, confidence aware vendor matching, and AI evidence caching are not yet equivalent to the Python implementation; review those paths before replacing a production deployment.
+The frontend assets are carried over from the current Python working tree. The Rust service uses the existing `web` and `vulnerabilities` collection names and does not migrate data. The Rust code covers the browser and API routes, but its enriched report pipeline, cache behavior, and some source formatting and scheduled delivery details are still simpler than the Python implementation. Compare those outputs with your production data before replacing a deployment. Scheduled delivery is disabled by default.

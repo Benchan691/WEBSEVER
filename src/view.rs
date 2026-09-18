@@ -208,4 +208,33 @@ mod tests {
         env.get_template("reports/generated.html").unwrap().render(json!({"html_language":"en","generated_label":"Generated now","source_count":1,"labels":{},"report":{"title":"Report","template_mode":true,"highlights":[],"trends":[],"recommendations":[],"executive_summary":""}})).unwrap();
         env.get_template("reports/enriched.html").unwrap().render(json!({"html_language":"en","generated_label":"Generated now","source_count":1,"labels":{},"report":{"title":"Report","executive_summary":{"key_findings":[]},"vulnerability_detail_table":{"rows":[]}}})).unwrap();
     }
+    #[test]
+    fn source_newsletter_templates_render() {
+        let env = environment(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
+        for (source, record, expected) in [
+            (
+                "hpe",
+                json!({"title":"HPE Bulletin","severity":"Critical","details":{"bulletin_id":"HPESB1","cvss_text":"VULNERABILITY SUMMARY\nA security issue.","resolution":"RESOLUTION\nUpgrade now."}}),
+                "Bulletin Information",
+            ),
+            (
+                "zimbra",
+                json!({"title":"Patch release","details":{"security_fixes":["Fixed injection"],"packages":{"zimbra-patch":"10.1"}}}),
+                "Security Fixes",
+            ),
+            (
+                "hkcert",
+                json!({"title":"HKCERT Advisory","details":{"risk_level":"High","impact":["Remote execution"]}}),
+                "Impacts:",
+            ),
+        ] {
+            let newsletter = crate::newsletters::normalize(&record, source, &json!({}));
+            let html = env
+                .get_template(crate::newsletters::template_name(source))
+                .unwrap()
+                .render(json!({"newsletter":newsletter}))
+                .unwrap();
+            assert!(html.contains(expected), "{source} missing {expected}");
+        }
+    }
 }

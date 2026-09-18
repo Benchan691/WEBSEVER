@@ -271,7 +271,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         let newsletter = newsletters::normalize(&record, &source, &config);
         let html = state
             .templates
-            .get_template("newsletters/generated.html")
+            .get_template(newsletters::template_name(&source))
             .and_then(|t| t.render(json!({"newsletter":newsletter})))
             .unwrap_or_default();
         return Some(view::json_response(

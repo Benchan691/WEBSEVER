@@ -2,12 +2,14 @@ mod auth;
 mod config;
 mod db;
 mod mail;
+mod newsletter_normalizer;
 mod newsletters;
 mod operations;
 mod reports;
 mod reviews;
 mod scheduler;
 mod subscriptions;
+mod vendor_matcher;
 mod view;
 
 use axum::{

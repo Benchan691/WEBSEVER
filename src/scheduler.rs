@@ -292,7 +292,7 @@ async fn newsletters_tick(state: &AppState, sub: &Document) {
         let newsletter = newsletters::normalize(record, source, &config);
         let html = state
             .templates
-            .get_template("newsletters/generated.html")
+            .get_template(newsletters::template_name(source))
             .and_then(|t| t.render(json!({"newsletter":newsletter})))
             .unwrap_or_default();
         let subject = newsletter["subject"]
