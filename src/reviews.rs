@@ -272,29 +272,33 @@ pub(crate) async fn query_rows(
         }
     }
     pipeline.push(doc! {"$match":filter});
+    let mut count_pipeline = pipeline.clone();
+    count_pipeline.push(doc! {"$count":"total"});
+    let mut count_cursor = db::collection(&state.vuln, &source_name)
+        .aggregate(count_pipeline)
+        .await?;
+    let count = count_cursor
+        .try_next()
+        .await?
+        .and_then(|document| document.get("total").cloned())
+        .and_then(|value| match value {
+            Bson::Int32(value) => Some(value as u64),
+            Bson::Int64(value) if value >= 0 => Some(value as u64),
+            Bson::Double(value) if value >= 0.0 => Some(value as u64),
+            _ => None,
+        })
+        .unwrap_or(0);
+
     pipeline.push(doc! {"$sort":{"observed_at":-1,"_id":-1}});
-    pipeline.push(doc!{"$facet":{"documents":[{"$skip":skip as i64},{"$limit":limit}],"metadata":[{"$count":"total"}]}});
+    pipeline.push(doc! {"$skip":skip.min(i64::MAX as u64) as i64});
+    pipeline.push(doc! {"$limit":limit.max(0)});
     let mut cursor = db::collection(&state.vuln, &source_name)
         .aggregate(pipeline)
         .await?;
-    let facet = cursor.try_next().await?.unwrap_or_default();
-    let rows = facet
-        .get_array("documents")
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|v| v.as_document().cloned())
-                .collect()
-        })
-        .unwrap_or_default();
-    let count = facet
-        .get_array("metadata")
-        .ok()
-        .and_then(|items| items.first())
-        .and_then(|v| v.as_document())
-        .and_then(|d| d.get("total"))
-        .and_then(|v| v.as_i64().or_else(|| v.as_i32().map(i64::from)))
-        .unwrap_or(0) as u64;
+    let mut rows = Vec::new();
+    while let Some(document) = cursor.try_next().await? {
+        rows.push(document);
+    }
     Ok((count, rows))
 }
 pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
@@ -352,10 +356,14 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             .parse::<u64>()
             .unwrap_or(25)
             .clamp(1, 100);
+        let offset = (page - 1).saturating_mul(size);
+        let window = offset.saturating_add(size).min(i64::MAX as u64);
         let mut rows = Vec::new();
+        let mut total = 0_u64;
         for name in names {
-            match query_rows(state, &name, filter.clone(), 0, 10_000).await {
-                Ok((_, documents)) => {
+            match query_rows(state, &name, filter.clone(), 0, window as i64).await {
+                Ok((name_total, documents)) => {
+                    total = total.saturating_add(name_total);
                     for document in documents {
                         rows.push((name.clone(), document));
                     }
@@ -371,16 +379,15 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         rows.sort_by(|a, b| {
             format!("{:?}", b.1.get("observed_at")).cmp(&format!("{:?}", a.1.get("observed_at")))
         });
-        let total = rows.len();
         let data: Vec<Value> = rows
             .into_iter()
-            .skip(((page - 1) * size) as usize)
+            .skip(offset as usize)
             .take(size as usize)
             .map(|(name, document)| response_row(&name, &document))
             .collect();
         return Some(view::json_response(
             StatusCode::OK,
-            json!({"data":data,"page":page,"page_size":size,"total":total,"pages":((total as u64+size-1)/size).max(1)}),
+            json!({"data":data,"page":page,"page_size":size,"total":total,"pages":((total+size-1)/size).max(1)}),
         ));
     }
     if ctx.path == "/api/reviews/auto-select" && ctx.method == Method::POST {
