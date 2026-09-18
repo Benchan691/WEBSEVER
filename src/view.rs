@@ -54,9 +54,12 @@ pub fn environment(root: &Path) -> Environment<'static> {
                 "auth.settings" => "/settings".into(),
                 "auth.sub_admins" => "/admin/sub-admins".into(),
                 "auth.account_users" => "/admin/account-users".into(),
+                "auth.organization_members" => "/organization/members".into(),
                 "auth.get_sub_admins" => "/api/admin/sub-admins".into(),
                 "auth.get_account_users" => "/api/admin/account-users".into(),
+                "auth.get_organization_members" => "/api/organization/members".into(),
                 "auth.change_password" => "/api/auth/password".into(),
+                "auth.update_profile" => "/api/auth/profile".into(),
                 "subscription.subscriptions" => "/subscriptions".into(),
                 "subscription.get_subscriptions" => "/api/subscriptions".into(),
                 "subscription.get_subscription_collections" => {
@@ -179,10 +182,11 @@ mod tests {
     #[test]
     fn browser_pages_render_with_rust_template_functions() {
         let env = environment(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
-        let context = json!({"locale":"ch","html_lang":"zh-Hans","i18n_catalog":{},"current_user":{"username":"admin","role":"admin","auth_source":"local","email":""},"is_admin":true,"is_top_admin":true,"config":{"ACCOUNT_HUB_ENABLED":false},"request":{"path":"/reviews","full_path":"/reviews","blueprint":"review","endpoint":""},"collection_name":"cve_review","initial_error":null});
+        let context = json!({"locale":"ch","html_lang":"zh-Hans","i18n_catalog":{},"current_user":{"username":"admin","role":"admin","auth_source":"local","email":"","organization":""},"is_admin":true,"is_top_admin":true,"is_organization_admin":false,"config":{"ACCOUNT_HUB_ENABLED":false},"request":{"path":"/reviews","full_path":"/reviews","blueprint":"review","endpoint":""},"collection_name":"cve_review","initial_error":null});
         for name in [
             "auth/login.html",
             "auth/settings.html",
+            "auth/organization_members.html",
             "auth/sub_admins_legacy.html",
             "subscriptions/index.html",
             "reviews/index.html",

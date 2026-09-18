@@ -89,6 +89,11 @@ impl ReqCtx {
             .as_ref()
             .is_some_and(|user| auth::is_top_admin(user, &state.cfg))
     }
+    pub fn is_organization_admin(&self, state: &AppState) -> bool {
+        self.user
+            .as_ref()
+            .is_some_and(|user| auth::is_organization_admin(user, &state.cfg))
+    }
     pub fn user_id(&self) -> Option<mongodb::bson::oid::ObjectId> {
         self.user
             .as_ref()
@@ -148,6 +153,7 @@ fn page_context(ctx: &ReqCtx, state: &AppState, extras: Value) -> Value {
         "i18n_catalog": serde_json::from_str::<Value>(include_str!("../config/translations.json")).unwrap_or(json!({})).get(&locale).cloned().unwrap_or(json!({})),
         "current_user": ctx.user.as_ref().map(auth::public_user),
         "is_admin": ctx.is_admin(state), "is_top_admin": ctx.is_top_admin(state),
+        "is_organization_admin": ctx.is_organization_admin(state),
         "config": {"ACCOUNT_HUB_ENABLED": state.cfg.account_hub_enabled},
         "request": request_context(ctx)
     });
@@ -214,15 +220,23 @@ fn guard(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         || ctx.path.starts_with("/reports")
         || ctx.path.starts_with("/api/operations")
         || ctx.path.starts_with("/generated-newsletters/");
+    let member_admin = ctx.path == "/organization/members"
+        || ctx.path.starts_with("/api/organization/members")
+        || ctx.path == "/admin/account-users"
+        || ctx.path.starts_with("/api/admin/account-users");
     let top = matches!(
         ctx.path.as_str(),
-        "/admin/sub-admins" | "/admin/account-users" | "/operations" | "/set-news"
-    ) || ctx.path.starts_with("/api/admin/")
+        "/admin/sub-admins" | "/operations" | "/set-news"
+    ) || (ctx.path.starts_with("/api/admin/")
+        && !ctx.path.starts_with("/api/admin/account-users"))
         || ctx.path.starts_with("/api/reports/evidence-cache/")
         || ctx.path.starts_with("/api/reports/search-cache/")
         || ctx.path.starts_with("/api/operations/newsletter-")
         || ctx.path == "/api/operations/source-list";
-    if top && !ctx.is_top_admin(state) || admin && !ctx.is_admin(state) {
+    if top && !ctx.is_top_admin(state)
+        || member_admin && !ctx.is_organization_admin(state)
+        || admin && !ctx.is_admin(state)
+    {
         return Some(if ctx.is_api() {
             view::error(StatusCode::FORBIDDEN, "Administrator access required.")
         } else {
@@ -269,12 +283,10 @@ async fn dispatch(State(state): State<AppState>, request: Request<Body>) -> Resp
         return response;
     }
     if ctx.path == "/" {
-        return view::redirect(if ctx.is_top_admin(&state) {
-            if state.cfg.account_hub_enabled {
-                "/admin/account-users"
-            } else {
-                "/admin/sub-admins"
-            }
+        return view::redirect(if ctx.is_organization_admin(&state) {
+            "/organization/members"
+        } else if ctx.is_top_admin(&state) && !state.cfg.account_hub_enabled {
+            "/admin/sub-admins"
         } else {
             "/subscriptions"
         });

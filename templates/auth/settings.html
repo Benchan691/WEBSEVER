@@ -17,7 +17,7 @@
 
     <div class="card border-0 shadow-sm">
         <div class="card-body p-4">
-            <h3 class="h5 mb-3">{{ t('Account details') if current_user.auth_source == 'account_hub' else t('Change password') }}</h3>
+            <h3 class="h5 mb-3">{{ t('Account details') }}</h3>
             <dl class="row small mb-4">
                 <dt class="col-sm-4">{{ t('Username') }}</dt>
                 <dd class="col-sm-8">{{ current_user.username }}</dd>
@@ -26,11 +26,28 @@
                 {% if current_user.auth_source == 'account_hub' %}
                 <dt class="col-sm-4">{{ t('Sign-in provider') }}</dt>
                 <dd class="col-sm-8">{{ t('Account Hub') }}</dd>
+                {% if current_user.organization %}
+                <dt class="col-sm-4">{{ t('Organization') }}</dt>
+                <dd class="col-sm-8">{{ current_user.organization }}</dd>
+                {% endif %}
+                {% if current_user.organization_admin %}
+                <dt class="col-sm-4">{{ t('Organization role') }}</dt>
+                <dd class="col-sm-8">{{ t('Organization administrator') }}</dd>
+                {% endif %}
                 {% endif %}
             </dl>
+            <form id="profile-form" class="mb-4">
+                <div class="mb-3">
+                    <label for="profile-email" class="form-label">{{ t('Email (optional)') }}</label>
+                    <input id="profile-email" type="email" class="form-control" autocomplete="email" value="{{ current_user.email }}">
+                    <div class="form-text">{{ t('This email is used by the portal for your profile and notifications.') }}</div>
+                </div>
+                <button class="btn btn-outline-primary" type="submit"><i class="bi bi-person-check me-1"></i>{{ t('Save profile') }}</button>
+            </form>
             {% if current_user.auth_source == 'account_hub' %}
             <p class="text-muted mb-0">{{ t('Your password and access permissions are managed by Account Hub.') }}</p>
             {% else %}
+            <h3 class="h5 mb-3">{{ t('Change password') }}</h3>
             <form id="password-form">
                 <div class="mb-3">
                     <label for="current-password" class="form-label">{{ t('Current password') }}</label>
@@ -52,11 +69,32 @@
 </div>
 {% endblock %}
 {% block script %}
-{% if current_user.auth_source != 'account_hub' %}
 <script>
 (function () {
+    const profile = document.getElementById('profile-form');
     const form = document.getElementById('password-form');
     const message = document.getElementById('message');
+    profile.addEventListener('submit', function (event) {
+        event.preventDefault();
+        message.className = 'alert d-none';
+        fetch('{{ url_for('auth.update_profile') }}', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+            body: JSON.stringify({email: document.getElementById('profile-email').value.trim()})
+        }).then(function (response) {
+            return response.json().then(function (body) {
+                if (!response.ok) throw new Error(body.error || '{{ t('Request failed.') }}');
+                return body;
+            });
+        }).then(function () {
+            message.textContent = '{{ t('Profile saved successfully.') }}';
+            message.className = 'alert alert-success';
+        }).catch(function (error) {
+            message.textContent = error.message;
+            message.className = 'alert alert-danger';
+        });
+    });
+    if (!form) return;
     form.addEventListener('submit', function (event) {
         event.preventDefault();
         message.className = 'alert d-none';
@@ -84,5 +122,4 @@
     });
 }());
 </script>
-{% endif %}
 {% endblock %}

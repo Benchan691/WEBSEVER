@@ -8,7 +8,7 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use hmac::{Hmac, Mac};
-use mongodb::bson::{self, Document, doc, oid::ObjectId};
+use mongodb::bson::{self, Bson, Document, doc, oid::ObjectId};
 use serde_json::{Value, json};
 use sha2::Sha256;
 
@@ -112,12 +112,140 @@ pub fn is_top_admin(user: &Document, cfg: &crate::config::Config) -> bool {
 pub fn is_admin(user: &Document, cfg: &crate::config::Config) -> bool {
     db::string(user, "role") == "sub_admin" || is_top_admin(user, cfg)
 }
+
+/// Account Hub organization administrators are identified by the system role
+/// assigned to the configured portal system (for example
+/// `CVE-SYSTEM-admin`).  This is deliberately separate from the portal's
+/// local `role` field: organization administrators may manage their Hub
+/// members, but they do not become local portal administrators.
+pub fn is_organization_admin(user: &Document, _cfg: &crate::config::Config) -> bool {
+    db::string(user, "auth_source") == "account_hub"
+        && db::bool_field(user, "account_hub_is_organization_admin")
+        && !db::string(user, "account_hub_organization_id").is_empty()
+}
+
+fn value_text(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| value.as_i64().map(|number| number.to_string()))
+        .or_else(|| value.as_u64().map(|number| number.to_string()))
+        .or_else(|| value.as_f64().map(|number| number.to_string()))
+}
+
+fn role_name(value: &Value) -> Option<String> {
+    value_text(value).or_else(|| {
+        value
+            .get("roleName")
+            .or_else(|| value.get("name"))
+            .or_else(|| value.get("label"))
+            .and_then(value_text)
+    })
+}
+
+fn role_names(data: &Value, fields: &[&str]) -> Vec<String> {
+    fields
+        .iter()
+        .flat_map(|field| data.get(*field).into_iter())
+        .flat_map(|value| value.as_array().into_iter().flatten())
+        .filter_map(role_name)
+        .map(|role| role.trim().to_owned())
+        .filter(|role| !role.is_empty())
+        .collect()
+}
+
+fn organization_admin_role(role: &str, required: &str) -> bool {
+    let role = key(role);
+    let required = key(required);
+    if role.is_empty() || required.is_empty() {
+        return false;
+    }
+    [
+        format!("{required}-admin"),
+        format!("{required}_admin"),
+        format!("{required}/admin"),
+        format!("{required}:admin"),
+    ]
+    .iter()
+    .any(|candidate| role == *candidate)
+}
+
+fn account_hub_organization(data: &Value) -> (String, String) {
+    let name = ["organization", "organizationName", "orgName"]
+        .iter()
+        .find_map(|field| data.get(*field).and_then(value_text))
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let id = ["organizationId", "organizationID", "orgId"]
+        .iter()
+        .find_map(|field| data.get(*field).and_then(value_text))
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    (name, id)
+}
+
+fn bson_strings(values: &[String]) -> Bson {
+    Bson::Array(values.iter().cloned().map(Bson::String).collect())
+}
+
+fn account_hub_profile_fields(data: &Value, required_role: &str) -> Document {
+    let (organization, organization_id) = account_hub_organization(data);
+    let roles = role_names(data, &["roles", "role_names"]);
+    let system_roles = role_names(data, &["systemRole", "systemRoles"]);
+    let organization_admin = system_roles
+        .iter()
+        .any(|role| organization_admin_role(role, required_role));
+    doc! {
+        "account_hub_organization": organization,
+        "account_hub_organization_id": organization_id,
+        "account_hub_roles": bson_strings(&roles),
+        "account_hub_system_roles": bson_strings(&system_roles),
+        "account_hub_is_organization_admin": organization_admin,
+    }
+}
+
+fn stored_role_names(user: &Document, field: &str) -> Vec<String> {
+    user.get_array(field)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str().map(str::to_owned))
+        .collect()
+}
+
+fn organization_filter(user: &Document) -> Option<Document> {
+    let organization_id = db::string(user, "account_hub_organization_id");
+    if !organization_id.is_empty() {
+        return Some(doc! {"account_hub_organization_id": organization_id});
+    }
+    let organization = db::string(user, "account_hub_organization");
+    (!organization.is_empty()).then(|| doc! {"account_hub_organization": organization})
+}
+
+fn same_organization(manager: &Document, member: &Document) -> bool {
+    let manager_id = db::string(manager, "account_hub_organization_id");
+    let member_id = db::string(member, "account_hub_organization_id");
+    if !manager_id.is_empty() || !member_id.is_empty() {
+        return !manager_id.is_empty() && manager_id == member_id;
+    }
+    let manager_name = db::string(manager, "account_hub_organization");
+    let member_name = db::string(member, "account_hub_organization");
+    !manager_name.is_empty() && key(&manager_name) == key(&member_name)
+}
+
 pub fn public_user(user: &Document) -> Value {
     json!({"id":db::id_string(user),"username":db::string(user,"username"),"email":db::string(user,"email"),
         "role":user.get_str("role").unwrap_or("user"),"must_change_password":db::bool_field(user,"must_change_password"),
         "disabled":db::bool_field(user,"disabled"),"pause_managed_subscriptions_when_disabled":db::bool_field(user,"pause_managed_subscriptions_when_disabled"),
         "auth_source":user.get_str("auth_source").unwrap_or("local"),"account_hub_uid":db::string(user,"account_hub_uid"),
         "account_hub_username":db::string(user,"account_hub_username"),"account_hub_bound":!db::string(user,"account_hub_uid").is_empty(),
+        "organization":db::string(user,"account_hub_organization"),
+        "organization_id":db::string(user,"account_hub_organization_id"),
+        "organization_admin":db::bool_field(user,"account_hub_is_organization_admin"),
+        "account_hub_roles":stored_role_names(user,"account_hub_roles"),
+        "account_hub_system_roles":stored_role_names(user,"account_hub_system_roles"),
         "role_source":"local"})
 }
 pub async fn ensure_bootstrap(state: &AppState) -> Result<(), Box<dyn std::error::Error>> {
@@ -146,7 +274,7 @@ pub async fn ensure_bootstrap(state: &AppState) -> Result<(), Box<dyn std::error
                 bcrypt::hash(&state.cfg.bootstrap_password, bcrypt::DEFAULT_COST)?,
             );
         }
-        coll.update_one(doc!{"_id":id},doc!{"$set":set,"$unset":{"account_hub_uid":"","account_hub_username":"","last_account_hub_sync_at":""}}).await?;
+        coll.update_one(doc!{"_id":id},doc!{"$set":set,"$unset":{"account_hub_uid":"","account_hub_username":"","last_account_hub_sync_at":"","account_hub_organization":"","account_hub_organization_id":"","account_hub_roles":"","account_hub_system_roles":"","account_hub_is_organization_admin":""}}).await?;
     } else if !state.cfg.bootstrap_password.is_empty() {
         valid_password(&state.cfg.bootstrap_password)?;
         let hash = bcrypt::hash(&state.cfg.bootstrap_password, bcrypt::DEFAULT_COST)?;
@@ -414,6 +542,7 @@ async fn hub_login(state: &AppState, ctx: &ReqCtx) -> Response {
             StatusCode::UNAUTHORIZED,
         );
     }
+    let hub_profile = account_hub_profile_fields(data, &state.cfg.account_hub_required_role);
     let coll = db::collection(&state.web, "auth");
     let by_uid = coll
         .find_one(doc! {"account_hub_uid":&uid})
@@ -444,6 +573,9 @@ async fn hub_login(state: &AppState, ctx: &ReqCtx) -> Response {
     } else {
         let now = bson::DateTime::now();
         let mut document = doc! {"username":hub_username,"username_key":key(hub_username),"auth_source":"account_hub","role":"user","disabled":false,"must_change_password":false,"created_at":now,"updated_at":now};
+        for (field, value) in &hub_profile {
+            document.insert(field, value.clone());
+        }
         if let Some(email) = data
             .get("email")
             .and_then(Value::as_str)
@@ -497,9 +629,42 @@ async fn hub_login(state: &AppState, ctx: &ReqCtx) -> Response {
             StatusCode::FORBIDDEN,
         );
     }
+    let incoming_organization_id = db::string(&hub_profile, "account_hub_organization_id");
+    let stored_organization_id = db::string(&user, "account_hub_organization_id");
+    if !stored_organization_id.is_empty() && stored_organization_id != incoming_organization_id {
+        return hub_error(
+            state,
+            ctx,
+            "Account Hub organization does not match the portal member.",
+            StatusCode::FORBIDDEN,
+        );
+    }
     let id = user.get_object_id("_id").unwrap();
     let now = bson::DateTime::now();
-    if coll.update_one(doc!{"_id":id},doc!{"$set":{"auth_source":"account_hub","account_hub_uid":&uid,"account_hub_username":hub_username,"role":if db::string(&user,"role")=="sub_admin"{"sub_admin"}else{"user"},"must_change_password":false,"last_account_hub_sync_at":now,"updated_at":now},"$unset":{"password":""}}).await.is_err(){return hub_error(state,ctx,"Unable to establish the Account Hub session.",StatusCode::SERVICE_UNAVAILABLE)}
+    let mut set = doc! {
+        "auth_source":"account_hub",
+        "account_hub_uid":&uid,
+        "account_hub_username":hub_username,
+        "role":if db::string(&user,"role")=="sub_admin"{"sub_admin"}else{"user"},
+        "must_change_password":false,
+        "last_account_hub_sync_at":now,
+        "updated_at":now,
+    };
+    for (field, value) in &hub_profile {
+        set.insert(field, value.clone());
+    }
+    if coll
+        .update_one(doc! {"_id":id}, doc! {"$set":set,"$unset":{"password":""}})
+        .await
+        .is_err()
+    {
+        return hub_error(
+            state,
+            ctx,
+            "Unable to establish the Account Hub session.",
+            StatusCode::SERVICE_UNAVAILABLE,
+        );
+    }
     let Some(user) = coll.find_one(doc! {"_id":id}).await.ok().flatten() else {
         return hub_error(
             state,
@@ -603,20 +768,28 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         }
         (Method::GET, "/admin/account-users") => {
             return Some(if state.cfg.account_hub_enabled {
-                render(
-                    state,
-                    ctx,
-                    "auth/sub_admins.html",
-                    json!({"account_hub_enabled":true}),
-                )
+                view::redirect("/organization/members")
             } else {
                 view::redirect("/admin/sub-admins")
             });
         }
+        (Method::GET, "/organization/members") => {
+            return Some(if state.cfg.account_hub_enabled {
+                render(
+                    state,
+                    ctx,
+                    "auth/organization_members.html",
+                    json!({"account_hub_enabled":true}),
+                )
+            } else {
+                view::error(StatusCode::GONE, "Account Hub is disabled.")
+            });
+        }
         (Method::POST, "/api/auth/password") => return Some(change_password(state, ctx).await),
+        (Method::PUT, "/api/auth/profile") => return Some(update_profile(state, ctx).await),
         _ => {}
     }
-    if ctx.path.starts_with("/api/admin/") {
+    if ctx.path.starts_with("/api/admin/") || ctx.path.starts_with("/api/organization/members") {
         return Some(admin_api(state, ctx).await);
     }
     None
@@ -655,8 +828,59 @@ async fn change_password(state: &AppState, ctx: &ReqCtx) -> Response {
     view::json_response(StatusCode::OK, json!({"success":true}))
 }
 
+async fn update_profile(state: &AppState, ctx: &ReqCtx) -> Response {
+    let Some(user_id) = ctx.user_id() else {
+        return view::error(StatusCode::UNAUTHORIZED, "Authentication required");
+    };
+    if !ctx.json.is_object() {
+        return view::error(StatusCode::BAD_REQUEST, "Profile update must be an object.");
+    }
+    if ctx
+        .json
+        .as_object()
+        .is_some_and(|fields| fields.keys().any(|field| field != "email"))
+    {
+        return view::error(
+            StatusCode::BAD_REQUEST,
+            "Only your email address can be changed here.",
+        );
+    }
+    let email = ctx
+        .json
+        .get("email")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    if !valid_email(&email) {
+        return view::error(StatusCode::BAD_REQUEST, "Invalid email address.");
+    }
+    let coll = db::collection(&state.web, "auth");
+    if coll
+        .update_one(
+            doc! {"_id":user_id},
+            doc! {"$set":{"email":email,"updated_at":bson::DateTime::now()}},
+        )
+        .await
+        .is_err()
+    {
+        return view::error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Unable to update your profile.",
+        );
+    }
+    let Some(user) = coll.find_one(doc! {"_id":user_id}).await.ok().flatten() else {
+        return view::error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Unable to load your profile.",
+        );
+    };
+    view::json_response(StatusCode::OK, json!({"data":public_user(&user)}))
+}
+
 async fn admin_api(state: &AppState, ctx: &ReqCtx) -> Response {
-    let hub = ctx.path.starts_with("/api/admin/account-users");
+    let organization_members = ctx.path.starts_with("/api/organization/members");
+    let hub = organization_members || ctx.path.starts_with("/api/admin/account-users");
     if hub != state.cfg.account_hub_enabled {
         return view::error(
             StatusCode::GONE,
@@ -667,8 +891,18 @@ async fn admin_api(state: &AppState, ctx: &ReqCtx) -> Response {
             },
         );
     }
+    if hub && !ctx.is_organization_admin(state) {
+        return view::error(
+            StatusCode::FORBIDDEN,
+            "Organization administrator access required.",
+        );
+    }
     let base = if hub {
-        "/api/admin/account-users"
+        if organization_members {
+            "/api/organization/members"
+        } else {
+            "/api/admin/account-users"
+        }
     } else {
         "/api/admin/sub-admins"
     };
@@ -679,7 +913,19 @@ async fn admin_api(state: &AppState, ctx: &ReqCtx) -> Response {
         .and_then(db::object_id);
     if ctx.method == Method::GET && ctx.path == base {
         let filter = if hub {
-            doc! {"auth_source":"account_hub"}
+            let Some(organization) = ctx.user.as_ref().and_then(organization_filter) else {
+                return view::error(
+                    StatusCode::FORBIDDEN,
+                    "Your Account Hub organization is not available.",
+                );
+            };
+            doc! {
+                "$and":[
+                    {"auth_source":"account_hub"},
+                    organization,
+                    {"_id":{"$ne":ctx.user_id().unwrap()}},
+                ]
+            }
         } else {
             doc! {"role":"sub_admin"}
         };
@@ -693,6 +939,12 @@ async fn admin_api(state: &AppState, ctx: &ReqCtx) -> Response {
         };
     }
     if ctx.method == Method::POST && ctx.path == base {
+        if hub {
+            return view::error(
+                StatusCode::METHOD_NOT_ALLOWED,
+                "Account Hub members must be created in Account Hub.",
+            );
+        }
         let username = ctx.field("username").trim().to_owned();
         let email = ctx.field("email").trim().to_lowercase();
         if username.is_empty() {
@@ -717,32 +969,17 @@ async fn admin_api(state: &AppState, ctx: &ReqCtx) -> Response {
             return view::error(StatusCode::CONFLICT, "Username is already in use.");
         }
         let now = bson::DateTime::now();
-        let mut document = doc! {"username":&username,"username_key":key(&username),"email":&email,"role":if hub{"user"}else{"sub_admin"},"auth_source":if hub{"account_hub"}else{"local"},"disabled":ctx.json_field("disabled").as_bool().unwrap_or(false),"pause_managed_subscriptions_when_disabled":ctx.json_field("pause_managed_subscriptions_when_disabled").as_bool().unwrap_or(false),"must_change_password":false,"created_at":now,"updated_at":now};
-        if hub {
-            if ctx.json.get("password").is_some() {
-                return view::error(
-                    StatusCode::BAD_REQUEST,
-                    "Account Hub users do not use local passwords.",
-                );
-            }
-            if ctx.json.get("role").is_some() {
-                return view::error(
-                    StatusCode::BAD_REQUEST,
-                    "Assign a local role after creating the user.",
-                );
-            }
-        } else {
-            let password = ctx.field("password");
-            if let Err(e) = valid_password(&password) {
-                return view::error(StatusCode::BAD_REQUEST, &e);
-            };
-            document.insert(
-                "password",
-                bcrypt::hash(password, bcrypt::DEFAULT_COST).unwrap(),
-            );
-            if let Some(owner) = ctx.user_id() {
-                document.insert("parent_admin_id", owner);
-            }
+        let mut document = doc! {"username":&username,"username_key":key(&username),"email":&email,"role":"sub_admin","auth_source":"local","disabled":ctx.json_field("disabled").as_bool().unwrap_or(false),"pause_managed_subscriptions_when_disabled":ctx.json_field("pause_managed_subscriptions_when_disabled").as_bool().unwrap_or(false),"must_change_password":false,"created_at":now,"updated_at":now};
+        let password = ctx.field("password");
+        if let Err(e) = valid_password(&password) {
+            return view::error(StatusCode::BAD_REQUEST, &e);
+        };
+        document.insert(
+            "password",
+            bcrypt::hash(password, bcrypt::DEFAULT_COST).unwrap(),
+        );
+        if let Some(owner) = ctx.user_id() {
+            document.insert("parent_admin_id", owner);
         }
         return match coll.insert_one(document.clone()).await {
             Ok(result) => {
@@ -762,6 +999,19 @@ async fn admin_api(state: &AppState, ctx: &ReqCtx) -> Response {
         || !hub && db::string(&user, "role") != "sub_admin"
     {
         return view::error(StatusCode::NOT_FOUND, "User not found.");
+    }
+    if hub {
+        let Some(manager) = ctx.user.as_ref() else {
+            return view::error(StatusCode::UNAUTHORIZED, "Authentication required");
+        };
+        if ctx.user_id().is_some_and(|manager_id| manager_id == id)
+            || !same_organization(manager, &user)
+        {
+            return view::error(
+                StatusCode::FORBIDDEN,
+                "You can only manage members of your organization.",
+            );
+        }
     }
     if ctx.method == Method::DELETE && !hub {
         if let Some(owner) = ctx.user_id() {
@@ -808,11 +1058,11 @@ async fn admin_api(state: &AppState, ctx: &ReqCtx) -> Response {
             }
         }
         if hub {
-            if let Some(role) = ctx.json.get("role").and_then(Value::as_str) {
-                if !matches!(role, "user" | "sub_admin") {
-                    return view::error(StatusCode::BAD_REQUEST, "Invalid user role.");
-                };
-                update.insert("role", role);
+            if ctx.json.get("role").is_some() {
+                return view::error(
+                    StatusCode::FORBIDDEN,
+                    "Account Hub roles are managed by Account Hub.",
+                );
             }
         } else if let Some(password) = ctx
             .json
@@ -865,5 +1115,36 @@ mod tests {
     fn account_hub_success_code_includes_current_api() {
         assert!(business_success(&json!({"code":1000})));
         assert!(!business_success(&json!({"code":2010})));
+    }
+
+    #[test]
+    fn organization_admin_role_is_scoped_to_required_system() {
+        assert!(organization_admin_role("CVE-SYSTEM-admin", "CVE-SYSTEM"));
+        assert!(organization_admin_role("cve-system/admin", "CVE-SYSTEM"));
+        assert!(!organization_admin_role("CVE-SYSTEM-user", "CVE-SYSTEM"));
+        assert!(!organization_admin_role("OTHER-SYSTEM-admin", "CVE-SYSTEM"));
+    }
+
+    #[test]
+    fn account_hub_profile_persists_organization_and_roles() {
+        let profile = account_hub_profile_fields(
+            &json!({
+                "organization": "SW-ENG",
+                "organizationId": 1,
+                "roles": ["user", "admin"],
+                "systemRole": ["accounthub-user", "CVE-SYSTEM-admin"]
+            }),
+            "CVE-SYSTEM",
+        );
+        assert_eq!(db::string(&profile, "account_hub_organization"), "SW-ENG");
+        assert_eq!(db::string(&profile, "account_hub_organization_id"), "1");
+        assert!(db::bool_field(
+            &profile,
+            "account_hub_is_organization_admin"
+        ));
+        assert_eq!(
+            profile.get_array("account_hub_system_roles").unwrap().len(),
+            2
+        );
     }
 }
