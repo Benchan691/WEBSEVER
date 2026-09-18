@@ -35,10 +35,6 @@
                     <label class="form-label" for="organization-member-username">{{ t('Account Hub username') }}</label>
                     <input id="organization-member-username" class="form-control" type="text" readonly>
                 </div>
-                <div class="mb-3">
-                    <label class="form-label" for="organization-member-email">{{ t('Email (optional)') }}</label>
-                    <input id="organization-member-email" class="form-control" type="email" autocomplete="email">
-                </div>
                 <div class="form-check form-switch mb-2">
                     <input id="organization-member-disabled" class="form-check-input" type="checkbox">
                     <label class="form-check-label" for="organization-member-disabled">{{ t('Disabled') }}</label>
@@ -59,5 +55,5 @@
 {% endblock %}
 {% block script %}
 <script id="organization-members-page-config" type="application/json">{{ {'membersUrl': url_for('auth.get_organization_members')}|tojson }}</script>
-<script src="{{ url_for('static', filename='js/auth/organization_members.js', v='20260918-1') }}"></script>
+<script src="{{ url_for('static', filename='js/auth/organization_members.js', v='20260918-2') }}"></script>
 {% endblock %}

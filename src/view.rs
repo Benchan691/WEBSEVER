@@ -271,6 +271,36 @@ mod tests {
     }
 
     #[test]
+    fn organization_member_editor_hides_optional_email_field() {
+        let env = environment(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
+        let html = env
+            .get_template("auth/organization_members.html")
+            .unwrap()
+            .render(json!({
+                "locale":"ch",
+                "html_lang":"zh-Hans",
+                "i18n_catalog":{},
+                "current_user":{
+                    "username":"s2487",
+                    "role":"user",
+                    "auth_source":"account_hub",
+                    "organization":"SW-ENG",
+                    "organization_admin":true
+                },
+                "is_admin":false,
+                "is_top_admin":false,
+                "is_organization_admin":true,
+                "config":{"ACCOUNT_HUB_ENABLED":true},
+                "request":{"path":"/organization/members","full_path":"/organization/members","blueprint":"auth","endpoint":"auth.organization_members"}
+            }))
+            .unwrap();
+        assert!(html.contains("organization-member-username"));
+        assert!(html.contains("organization-member-disabled"));
+        assert!(!html.contains("organization-member-email"));
+        assert!(!html.contains("邮箱（可选）"));
+    }
+
+    #[test]
     fn organization_subscription_dashboard_renders() {
         let env = environment(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
         let html = env

@@ -914,6 +914,10 @@ fn profile_email_editable(user: &Document) -> bool {
     db::string(user, "auth_source") != "account_hub"
 }
 
+fn account_hub_email_change_requested(hub: bool, payload: &Value) -> bool {
+    hub && payload.get("email").is_some()
+}
+
 async fn update_profile(state: &AppState, ctx: &ReqCtx) -> Response {
     let Some(user_id) = ctx.user_id() else {
         return view::error(StatusCode::UNAUTHORIZED, "Authentication required");
@@ -1129,6 +1133,12 @@ async fn admin_api(state: &AppState, ctx: &ReqCtx) -> Response {
         };
     }
     if ctx.method == Method::PUT {
+        if account_hub_email_change_requested(hub, &ctx.json) {
+            return view::error(
+                StatusCode::FORBIDDEN,
+                "Account Hub email is managed by Account Hub.",
+            );
+        }
         if ctx.json.get("username").is_some()
             || hub
                 && (ctx.json.get("password").is_some() || ctx.json.get("account_hub_uid").is_some())
@@ -1297,5 +1307,21 @@ mod tests {
         assert!(!profile_email_editable(&doc! {"auth_source":"account_hub"}));
         assert!(profile_email_editable(&doc! {"auth_source":"local"}));
         assert!(profile_email_editable(&doc! {"role":"admin"}));
+    }
+
+    #[test]
+    fn organization_member_email_changes_are_account_hub_managed() {
+        assert!(account_hub_email_change_requested(
+            true,
+            &json!({"email":"member@example.com"})
+        ));
+        assert!(!account_hub_email_change_requested(
+            true,
+            &json!({"disabled":true})
+        ));
+        assert!(!account_hub_email_change_requested(
+            false,
+            &json!({"email":"local@example.com"})
+        ));
     }
 }

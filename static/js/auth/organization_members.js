@@ -61,7 +61,6 @@
     function openEditor(item) {
         editingId = item.id;
         document.getElementById('organization-member-username').value = item.username || '';
-        document.getElementById('organization-member-email').value = item.email || '';
         document.getElementById('organization-member-disabled').checked = Boolean(item.disabled);
         document.getElementById('organization-member-pause').checked = Boolean(item.pause_managed_subscriptions_when_disabled);
         setMessage(modalMessage, '', '');
@@ -83,7 +82,6 @@
         event.preventDefault();
         if (!editingId) return;
         const payload = {
-            email: document.getElementById('organization-member-email').value.trim(),
             disabled: document.getElementById('organization-member-disabled').checked,
             pause_managed_subscriptions_when_disabled: document.getElementById('organization-member-pause').checked,
         };
