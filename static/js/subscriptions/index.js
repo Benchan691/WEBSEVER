@@ -630,7 +630,8 @@
         username.value = subscription ? (subscription.username || '') : '';
         username.readOnly = !isAdmin;
         renderRecipientInputs(subscription ? (subscription.emails || (subscription.email ? [subscription.email] : [''])) : ['']);
-        document.getElementById('team').value = subscription ? (subscription.team || '') : '';
+        const team = document.getElementById('team');
+        if (team) team.value = subscription ? (subscription.team || '') : '';
         document.getElementById('delivery-mode').value = subscription ? (subscription.delivery_mode || 'individual') : 'individual';
         if (isAdmin && !accountHubEnabled) {
             document.getElementById('password').value = '';
@@ -684,6 +685,7 @@
             tr.children[0].querySelector('strong').textContent = item.username || t('Unnamed user');
             tr.children[0].querySelector('.recipients').textContent = emails.filter(Boolean).join(', ');
             tr.children[0].querySelector('.team').textContent = item.team || '';
+            tr.children[0].querySelector('.team').classList.toggle('d-none', selfManagement);
             tr.children[0].querySelector('.delivery-mode').textContent = t('Delivery: {mode}', {
                 mode: item.delivery_mode === 'grouped' ? t('Grouped') : t('Individual'),
             });
@@ -866,7 +868,8 @@
             showModalMessage(t('Password is required.'), 'danger');
             return;
         }
-        const payload = { team:document.getElementById('team').value,
+        const team = document.getElementById('team');
+        const payload = {
             delivery_mode: document.getElementById('delivery-mode').value,
             newsletter_profile:{
                 enabled:document.getElementById('newsletter-enabled').checked,
@@ -874,6 +877,7 @@
                 statistic_schedule_enabled:document.getElementById('newsletter-statistic-schedule-enabled').checked
             },
             report_profile: buildReportProfilePayload().report_profile };
+        if (team) payload.team = team.value;
         if (isAdmin || (selfManagement && !editingId)) {
             payload.username = document.getElementById('username').value;
             payload.emails = recipientValues();

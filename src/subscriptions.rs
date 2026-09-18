@@ -791,7 +791,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             submitted_emails
         };
         let team = ctx.field("team");
-        if username.trim().is_empty() || team.trim().is_empty() {
+        if username.trim().is_empty() || (!self_only && team.trim().is_empty()) {
             return json_error(
                 StatusCode::BAD_REQUEST,
                 "Username, email, and team are required.",
@@ -1030,7 +1030,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             };
             let username = data["username"].as_str().unwrap_or("").trim();
             let team = data["team"].as_str().unwrap_or("").trim();
-            if username.is_empty() || team.is_empty() {
+            if username.is_empty() || (!is_self_manager(state, ctx) && team.is_empty()) {
                 return json_error(StatusCode::BAD_REQUEST, "Username and team are required.");
             }
             let mode = data["delivery_mode"].as_str().unwrap_or("individual");

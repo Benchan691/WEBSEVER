@@ -253,6 +253,7 @@ mod tests {
             .unwrap();
         assert!(html.contains("我的订阅"));
         assert!(html.contains("仅管理您自己的订阅。"));
+        assert!(!html.contains("for=\"team\""));
         assert!(html.contains("\"selfManagement\":true"));
         assert!(html.contains("\"currentUsername\":\"member\""));
     }
