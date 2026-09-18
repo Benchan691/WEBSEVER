@@ -910,10 +910,24 @@ async fn change_password(state: &AppState, ctx: &ReqCtx) -> Response {
     view::json_response(StatusCode::OK, json!({"success":true}))
 }
 
+fn profile_email_editable(user: &Document) -> bool {
+    db::string(user, "auth_source") != "account_hub"
+}
+
 async fn update_profile(state: &AppState, ctx: &ReqCtx) -> Response {
     let Some(user_id) = ctx.user_id() else {
         return view::error(StatusCode::UNAUTHORIZED, "Authentication required");
     };
+    if ctx
+        .user
+        .as_ref()
+        .is_some_and(|user| !profile_email_editable(user))
+    {
+        return view::error(
+            StatusCode::FORBIDDEN,
+            "Account Hub email is managed by Account Hub.",
+        );
+    }
     if !ctx.json.is_object() {
         return view::error(StatusCode::BAD_REQUEST, "Profile update must be an object.");
     }
@@ -1276,5 +1290,12 @@ mod tests {
         let value = public_user(&user);
         assert_eq!(value["email"], "profile@example.com");
         assert_eq!(value["account_hub_email"], "hub@example.com");
+    }
+
+    #[test]
+    fn only_local_users_can_edit_profile_email() {
+        assert!(!profile_email_editable(&doc! {"auth_source":"account_hub"}));
+        assert!(profile_email_editable(&doc! {"auth_source":"local"}));
+        assert!(profile_email_editable(&doc! {"role":"admin"}));
     }
 }

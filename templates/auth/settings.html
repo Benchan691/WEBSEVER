@@ -36,6 +36,7 @@
                 {% endif %}
                 {% endif %}
             </dl>
+            {% if current_user.auth_source != 'account_hub' %}
             <form id="profile-form" class="mb-4">
                 <div class="mb-3">
                     <label for="profile-email" class="form-label">{{ t('Email (optional)') }}</label>
@@ -44,6 +45,7 @@
                 </div>
                 <button class="btn btn-outline-primary" type="submit"><i class="bi bi-person-check me-1"></i>{{ t('Save profile') }}</button>
             </form>
+            {% endif %}
             {% if current_user.auth_source == 'account_hub' %}
             <p class="text-muted mb-0">{{ t('Your password and access permissions are managed by Account Hub.') }}</p>
             {% else %}
@@ -71,9 +73,10 @@
 {% block script %}
 <script>
 (function () {
-    const profile = document.getElementById('profile-form');
     const form = document.getElementById('password-form');
     const message = document.getElementById('message');
+    {% if current_user.auth_source != 'account_hub' %}
+    const profile = document.getElementById('profile-form');
     profile.addEventListener('submit', function (event) {
         event.preventDefault();
         message.className = 'alert d-none';
@@ -94,6 +97,7 @@
             message.className = 'alert alert-danger';
         });
     });
+    {% endif %}
     if (!form) return;
     form.addEventListener('submit', function (event) {
         event.preventDefault();

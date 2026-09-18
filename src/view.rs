@@ -211,6 +211,66 @@ mod tests {
     }
 
     #[test]
+    fn account_hub_settings_hide_profile_email_editor() {
+        let env = environment(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
+        let html = env
+            .get_template("auth/settings.html")
+            .unwrap()
+            .render(json!({
+                "locale":"ch",
+                "html_lang":"zh-Hans",
+                "i18n_catalog":{},
+                "current_user":{
+                    "username":"s2487",
+                    "role":"user",
+                    "auth_source":"account_hub",
+                    "email":"hub@example.com",
+                    "organization":"SW-ENG",
+                    "organization_admin":true,
+                    "must_change_password":false
+                },
+                "config":{"ACCOUNT_HUB_ENABLED":true},
+                "request":{"path":"/settings","full_path":"/settings","blueprint":"auth","endpoint":"auth.settings"}
+            }))
+            .unwrap();
+        assert!(html.contains("s2487"));
+        assert!(html.contains("组织"));
+        assert!(html.contains("组织管理员"));
+        assert!(html.contains("您的密码和访问权限由 Account Hub 管理。"));
+        assert!(!html.contains("profile-form"));
+        assert!(!html.contains("profile-email"));
+        assert!(!html.contains("Save profile"));
+        assert!(!html.contains("/api/auth/profile"));
+    }
+
+    #[test]
+    fn local_settings_keep_profile_and_password_forms() {
+        let env = environment(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
+        let html = env
+            .get_template("auth/settings.html")
+            .unwrap()
+            .render(json!({
+                "locale":"en",
+                "html_lang":"en",
+                "i18n_catalog":{},
+                "current_user":{
+                    "username":"admin",
+                    "role":"admin",
+                    "auth_source":"local",
+                    "email":"admin@example.com",
+                    "must_change_password":false
+                },
+                "config":{"ACCOUNT_HUB_ENABLED":false},
+                "request":{"path":"/settings","full_path":"/settings","blueprint":"auth","endpoint":"auth.settings"}
+            }))
+            .unwrap();
+        assert!(html.contains("id=\"profile-form\""));
+        assert!(html.contains("id=\"profile-email\""));
+        assert!(html.contains("Save profile"));
+        assert!(html.contains("id=\"password-form\""));
+    }
+
+    #[test]
     fn organization_subscription_dashboard_renders() {
         let env = environment(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
         let html = env
