@@ -353,17 +353,14 @@ async fn hub_login(state: &AppState, ctx: &ReqCtx) -> Response {
         .get("roles")
         .and_then(Value::as_array)
         .is_some_and(|roles| {
-            roles
-                .iter()
-                .any(|role| role.get("roleName").and_then(Value::as_str) == Some("CVE_SYSTEM"))
+            roles.iter().any(|role| {
+                role.get("roleName").and_then(Value::as_str)
+                    == Some(state.cfg.account_hub_required_role.as_str())
+            })
         });
     if !role_ok {
-        return hub_error(
-            state,
-            ctx,
-            "CVE_SYSTEM role is required.",
-            StatusCode::FORBIDDEN,
-        );
+        let message = format!("{} role is required.", state.cfg.account_hub_required_role);
+        return hub_error(state, ctx, &message, StatusCode::FORBIDDEN);
     }
     if uid.is_empty()
         || hub_username.is_empty()

@@ -17,6 +17,7 @@ pub struct Config {
     pub account_hub_enabled: bool,
     pub account_hub_login_url: String,
     pub account_hub_token_check_url: String,
+    pub account_hub_required_role: String,
     pub newsletter_root: PathBuf,
     pub review_view_suffix: String,
     pub port: u16,
@@ -88,6 +89,16 @@ impl Config {
             "/account_hub/token_check_url",
             "",
         );
+        let account_hub_required_role = get(
+            "ACCOUNT_HUB_REQUIRED_ROLE",
+            "/account_hub/required_role",
+            "CVE-SYSTEM",
+        );
+        let account_hub_required_role = if account_hub_required_role.trim().is_empty() {
+            "CVE-SYSTEM".to_owned()
+        } else {
+            account_hub_required_role.trim().to_owned()
+        };
         let review_view_suffix = get(
             "REVIEW_VIEW_SUFFIX",
             "/mongodb/review_view_suffix",
@@ -106,6 +117,7 @@ impl Config {
             account_hub_enabled,
             account_hub_login_url,
             account_hub_token_check_url,
+            account_hub_required_role,
             newsletter_root,
             review_view_suffix,
             port: env::var("PORT")

@@ -13,6 +13,7 @@
     "enabled": false,
     "login_url": "",
     "token_check_url": "",
+    "required_role": "CVE-SYSTEM",
     "timeout_seconds": 5
   },
   "tavily": {

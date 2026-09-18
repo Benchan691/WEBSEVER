@@ -40,7 +40,7 @@
     "Account Hub users do not use local passwords.": "Account Hub 用户不使用本地密码。",
     "Assign a local role after creating the user.": "创建用户后再分配本地角色。",
     "Invalid user role.": "无效的用户角色。",
-    "CVE_SYSTEM role is required.": "需要 CVE_SYSTEM 角色。",
+    "CVE-SYSTEM role is required.": "需要 CVE-SYSTEM 角色。",
     "Invalid Account Hub username, password, or CAPTCHA.": "Account Hub 用户名、密码或验证码无效。",
     "CAPTCHA verification (when required)": "验证码凭证（需要时）",
     "After repeated failures, Account Hub may require a slider CAPTCHA verification token.": "连续登录失败后，Account Hub 可能要求滑块验证码凭证。",
