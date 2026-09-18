@@ -62,6 +62,9 @@ pub fn environment(root: &Path) -> Environment<'static> {
                 "auth.update_profile" => "/api/auth/profile".into(),
                 "subscription.subscriptions" => "/subscriptions".into(),
                 "subscription.get_subscriptions" => "/api/subscriptions".into(),
+                "subscription.get_organization_subscriptions" => {
+                    "/api/organization/subscriptions".into()
+                }
                 "subscription.get_subscription_collections" => {
                     "/api/subscriptions/collections".into()
                 }
@@ -205,6 +208,29 @@ mod tests {
             .render_str("{{ t('{n} per page', n=25) }}", json!({"locale":"en"}))
             .unwrap();
         assert_eq!(translated, "25 per page");
+    }
+
+    #[test]
+    fn organization_subscription_dashboard_renders() {
+        let env = environment(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
+        let html = env
+            .get_template("subscriptions/index.html")
+            .unwrap()
+            .render(json!({
+                "locale":"ch",
+                "html_lang":"zh-Hans",
+                "i18n_catalog":{},
+                "current_user":{"username":"manager","role":"user","auth_source":"account_hub","email":"manager@example.com","organization":"SW-ENG"},
+                "is_admin":false,
+                "is_top_admin":false,
+                "is_organization_admin":true,
+                "config":{"ACCOUNT_HUB_ENABLED":true},
+                "request":{"path":"/subscriptions","full_path":"/subscriptions","blueprint":"subscription","endpoint":""}
+            }))
+            .unwrap();
+        assert!(html.contains("组织订阅面板"));
+        assert!(html.contains("organization/subscriptions"));
+        assert!(html.contains("organizationDashboard"));
     }
     #[test]
     fn report_templates_render() {

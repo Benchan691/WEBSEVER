@@ -2,11 +2,13 @@
     const {
         subscriptionsUrl,
         previewUrl,
+        manageSubscriptionsUrl,
         reviewsUrl,
         vendorProductImportUrl,
         vendorProductTemplateUrl,
         isAdmin,
         accountHubEnabled,
+        organizationDashboard,
     } = JSON.parse(document.getElementById('page-config').textContent);
     const modal = new bootstrap.Modal(document.getElementById('subscription-modal'));
     const newsletterCollections = new CollectionPicker('newsletter', {emptySelectionMeansAll: true});
@@ -200,7 +202,7 @@
             });
         });
     }
-    function apiUrl(id, suffix) { return subscriptionsUrl + '/' + encodeURIComponent(id) + (suffix || ''); }
+    function apiUrl(id, suffix) { return manageSubscriptionsUrl + '/' + encodeURIComponent(id) + (suffix || ''); }
     function setReportPreview(summary, kind, examples) {
         const box = document.getElementById('report-preview');
         const target = document.getElementById('report-preview-summary');
@@ -612,22 +614,22 @@
         vendorProductImportRequestId += 1;
         setVendorProductImportBusy(false);
         showModalMessage('', '');
-        editingId = subscription ? subscription.id : null;
-        document.getElementById('modal-title').textContent = subscription ? t('Edit Subscription') : t('Add Subscription');
+        editingId = subscription && subscription.id ? subscription.id : null;
+        document.getElementById('modal-title').textContent = editingId ? t('Edit Subscription') : t('Add Subscription');
         const username = document.getElementById('username');
         username.value = subscription ? (subscription.username || '') : '';
         username.readOnly = !isAdmin;
-        renderRecipientInputs(subscription ? (subscription.emails || [subscription.email]) : ['']);
-        document.getElementById('team').value = subscription ? subscription.team : '';
+        renderRecipientInputs(subscription ? (subscription.emails || (subscription.email ? [subscription.email] : [''])) : ['']);
+        document.getElementById('team').value = subscription ? (subscription.team || '') : '';
         document.getElementById('delivery-mode').value = subscription ? (subscription.delivery_mode || 'individual') : 'individual';
         if (isAdmin && !accountHubEnabled) {
             document.getElementById('password').value = '';
-            document.getElementById('password-help').textContent = subscription
+            document.getElementById('password-help').textContent = editingId
                 ? t('Leave blank to keep the current password.')
                 : t('Required when creating a subscription.');
         }
-        const newsletter = subscription ? subscription.newsletter_profile : {enabled:false,filters:{}};
-        const report = subscription ? subscription.report_profile : {enabled:false,filters:{},generation_mode:'template',report_language:'en'};
+        const newsletter = subscription && subscription.newsletter_profile ? subscription.newsletter_profile : {enabled:false,filters:{}};
+        const report = subscription && subscription.report_profile ? subscription.report_profile : {enabled:false,filters:{},generation_mode:'template',report_language:'en'};
         document.getElementById('newsletter-enabled').checked = newsletter.enabled; setFilters('newsletter', newsletter.filters);
         document.getElementById('newsletter-statistic-schedule-enabled').checked = newsletter.statistic_schedule_enabled === true;
         document.getElementById('report-enabled').checked = report.enabled; setFilters('report', report.filters);
@@ -661,7 +663,7 @@
         }
         return '';
     }
-    function renderRows() {
+    function renderSubscriptionRows() {
         rows.replaceChildren(); document.getElementById('empty').classList.toggle('d-none', subscriptions.length !== 0);
         subscriptions.forEach(function (item) {
             const tr = document.createElement('tr');
@@ -718,7 +720,67 @@
             tr.children[3].append(actions); rows.append(tr);
         });
     }
-    function load() { return requestJson(subscriptionsUrl).then(function(body){subscriptions=body.data;renderRows();}).catch(function(e){showMessage(e.message,'danger');}).finally(function(){document.getElementById('loading').classList.add('d-none');}); }
+    function profileStatus(profile, kind) {
+        if (!profile || !profile.enabled) return t('Disabled');
+        if (kind === 'newsletter') {
+            const filters = profile.filters || {};
+            const collections = Array.isArray(filters.collections) ? filters.collections : [];
+            return collections.length
+                ? t('Enabled · {count} collection(s)', {count: collections.length})
+                : t('Enabled · all collection(s)');
+        }
+        return profile.schedule_enabled
+            ? t('Enabled · weekly {weekday} {time} HKT', {weekday: profile.schedule_weekday || '', time: profile.schedule_time || ''})
+            : t('Enabled');
+    }
+    function renderOrganizationRows() {
+        rows.replaceChildren(); document.getElementById('empty').classList.toggle('d-none', subscriptions.length !== 0);
+        subscriptions.forEach(function (item) {
+            const tr = document.createElement('tr');
+            tr.innerHTML = '<td><strong></strong><div class="text-muted small email"></div><div class="text-muted small role"></div></td><td></td><td></td><td></td><td></td>';
+            const subscription = item.subscription && item.subscription.id ? item.subscription : null;
+            tr.children[0].querySelector('strong').textContent = item.username || t('Unnamed user');
+            tr.children[0].querySelector('.email').textContent = item.email || '';
+            tr.children[0].querySelector('.role').textContent = item.organization_admin ? t('Organization administrator') : t('Organization member');
+            const status = document.createElement('span');
+            status.className = item.disabled ? 'badge text-bg-secondary' : 'badge text-bg-success';
+            status.textContent = item.disabled ? t('Disabled') : t('Active');
+            tr.children[1].append(status);
+            tr.children[2].textContent = subscription ? profileStatus(subscription.newsletter_profile, 'newsletter') : t('No subscription');
+            tr.children[3].textContent = subscription ? profileStatus(subscription.report_profile, 'report') : t('No subscription');
+            const actions = document.createElement('div'); actions.className = 'd-flex flex-wrap gap-1';
+            if (subscription) {
+                const edit = document.createElement('button'); edit.className = 'btn btn-outline-primary btn-sm'; edit.type = 'button'; edit.textContent = t('Edit');
+                edit.onclick = function () {
+                    openEditor(Object.assign({}, subscription, {
+                        username: item.username || subscription.username,
+                        email: item.email || subscription.email,
+                        emails: subscription.emails || (item.email ? [item.email] : [])
+                    }));
+                };
+                const remove = document.createElement('button'); remove.className = 'btn btn-outline-danger btn-sm'; remove.type = 'button'; remove.textContent = t('Delete');
+                remove.onclick = function () {
+                    if (confirm(t('Delete subscription for {username}?', {username: item.username || item.email}))) {
+                        requestJson(apiUrl(subscription.id), {method:'DELETE'}).then(load).catch(function(e){showMessage(e.message,'danger');});
+                    }
+                };
+                actions.append(edit, remove);
+            } else {
+                const add = document.createElement('button'); add.className = 'btn btn-outline-primary btn-sm'; add.type = 'button'; add.textContent = t('Add Subscription');
+                add.onclick = function () { openEditor({username:item.username, email:item.email, emails:item.email ? [item.email] : []}); };
+                actions.append(add);
+            }
+            tr.children[4].append(actions); rows.append(tr);
+        });
+    }
+    function renderRows() {
+        if (organizationDashboard) {
+            renderOrganizationRows();
+        } else {
+            renderSubscriptionRows();
+        }
+    }
+    function load() { return requestJson(subscriptionsUrl).then(function(body){subscriptions=body.data || [];renderRows();}).catch(function(e){showMessage(e.message,'danger');}).finally(function(){document.getElementById('loading').classList.add('d-none');}); }
     newsletterCollections.wire();
     document.getElementById('report-time-window').addEventListener('change', function () { toggleCustomWindow('report'); });
     ['newsletter', 'report'].forEach(function (prefix) {
@@ -805,7 +867,7 @@
             payload.emails = recipientValues();
             if (!accountHubEnabled) payload.password = password;
         }
-        requestJson(editingId ? apiUrl(editingId) : subscriptionsUrl, {method:editingId?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(){modal.hide();showMessage(t('Subscription saved.'),'success');return load();}).catch(function(e){showModalMessage(e.message,'danger');});
+        requestJson(editingId ? apiUrl(editingId) : manageSubscriptionsUrl, {method:editingId?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(){modal.hide();showMessage(t('Subscription saved.'),'success');return load();}).catch(function(e){showModalMessage(e.message,'danger');});
     };
     requestJson(reviewsUrl).then(function(body){collections=body.data.map(function(item){return item.name;});return load();}).catch(function(e){showMessage(e.message,'danger');});
 })();

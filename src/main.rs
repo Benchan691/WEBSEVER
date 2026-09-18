@@ -222,6 +222,7 @@ fn guard(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         || ctx.path.starts_with("/generated-newsletters/");
     let member_admin = ctx.path == "/organization/members"
         || ctx.path.starts_with("/api/organization/members")
+        || ctx.path == "/api/organization/subscriptions"
         || ctx.path == "/admin/account-users"
         || ctx.path.starts_with("/api/admin/account-users");
     let top = matches!(

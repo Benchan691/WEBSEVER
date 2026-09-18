@@ -215,7 +215,7 @@ fn stored_role_names(user: &Document, field: &str) -> Vec<String> {
         .collect()
 }
 
-fn organization_filter(user: &Document) -> Option<Document> {
+pub(crate) fn organization_filter(user: &Document) -> Option<Document> {
     let organization_id = db::string(user, "account_hub_organization_id");
     if !organization_id.is_empty() {
         return Some(doc! {"account_hub_organization_id": organization_id});
@@ -224,7 +224,7 @@ fn organization_filter(user: &Document) -> Option<Document> {
     (!organization.is_empty()).then(|| doc! {"account_hub_organization": organization})
 }
 
-fn same_organization(manager: &Document, member: &Document) -> bool {
+pub(crate) fn same_organization(manager: &Document, member: &Document) -> bool {
     let manager_id = db::string(manager, "account_hub_organization_id");
     let member_id = db::string(member, "account_hub_organization_id");
     if !manager_id.is_empty() || !member_id.is_empty() {

@@ -1,4 +1,4 @@
-use crate::{AppState, ReqCtx, db, mail, render, reviews, vendor_matcher, view};
+use crate::{AppState, ReqCtx, auth, db, mail, render, reviews, vendor_matcher, view};
 use axum::{
     body::Bytes,
     http::{Method, StatusCode, header},
@@ -7,7 +7,7 @@ use axum::{
 use futures::stream;
 use mongodb::bson::{self, Bson, Document, doc};
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 fn default_filters() -> Value {
     json!({"collections":[],"search":"","code":"","title":"","impact":"","affected":"","status":[],"severity_threshold":"","include_unknown":false,"source":"","keywords":[],"vendor_product_filter":{"enabled":false,"schema_version":1,"include_possible_matches":false,"rows":[]},"time_window":"all","start":"","end":"","source_timestamp":{},"report_scope":{}})
@@ -165,9 +165,38 @@ fn public(document: &Document) -> Value {
     }
     value
 }
-fn subscription_filter(state: &AppState, ctx: &ReqCtx, id: Option<&str>) -> Option<Document> {
+async fn organization_members(state: &AppState, ctx: &ReqCtx) -> Option<Vec<Document>> {
+    let manager = ctx.user.as_ref()?;
+    let mut filter = crate::auth::organization_filter(manager)?;
+    filter.insert("auth_source", "account_hub");
+    db::find_sorted(&state.web, "auth", filter, doc! {"username_key":1}, 5000)
+        .await
+        .ok()
+}
+
+async fn organization_member_ids(
+    state: &AppState,
+    ctx: &ReqCtx,
+) -> Option<Vec<mongodb::bson::oid::ObjectId>> {
+    Some(
+        organization_members(state, ctx)
+            .await?
+            .iter()
+            .filter_map(|user| user.get_object_id("_id").ok())
+            .collect(),
+    )
+}
+
+fn can_manage_subscriptions(state: &AppState, ctx: &ReqCtx) -> bool {
+    ctx.is_admin(state) || ctx.is_organization_admin(state)
+}
+
+async fn subscription_filter(state: &AppState, ctx: &ReqCtx, id: Option<&str>) -> Option<Document> {
     let owner = if ctx.is_top_admin(state) {
         doc! {}
+    } else if ctx.is_organization_admin(state) {
+        let ids = organization_member_ids(state, ctx).await?;
+        doc! {"owner_user_id":{"$in":ids}}
     } else if ctx.is_admin(state) {
         doc! {"managed_by_user_id":ctx.user_id()?}
     } else {
@@ -190,6 +219,67 @@ fn subscription_filter(state: &AppState, ctx: &ReqCtx, id: Option<&str>) -> Opti
     } else {
         Some(owner)
     }
+}
+
+fn public_organization_member(user: &Document, subscription: Option<&Document>) -> Value {
+    let mut value = auth::public_user(user);
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "account_status".into(),
+            json!(if db::bool_field(user, "disabled") {
+                "disabled"
+            } else {
+                "active"
+            }),
+        );
+        object.insert("has_subscription".into(), json!(subscription.is_some()));
+        object.insert(
+            "subscription".into(),
+            subscription.map(public).unwrap_or(Value::Null),
+        );
+    }
+    value
+}
+
+async fn organization_subscription_rows(
+    state: &AppState,
+    ctx: &ReqCtx,
+) -> Result<Vec<Value>, String> {
+    let members = organization_members(state, ctx)
+        .await
+        .ok_or_else(|| "Your Account Hub organization is not available.".to_owned())?;
+    let ids: Vec<Bson> = members
+        .iter()
+        .filter_map(|user| user.get_object_id("_id").ok().map(Bson::ObjectId))
+        .collect();
+    let subscriptions = if ids.is_empty() {
+        Vec::new()
+    } else {
+        db::find_many(
+            &state.web,
+            "sub_account",
+            doc! {"owner_user_id":{"$in":ids}},
+            5000,
+        )
+        .await
+        .map_err(|_| "Unable to load subscriptions.".to_owned())?
+    };
+    let mut by_owner = HashMap::new();
+    for subscription in subscriptions {
+        if let Ok(owner_id) = subscription.get_object_id("owner_user_id") {
+            by_owner.insert(owner_id, subscription);
+        }
+    }
+    Ok(members
+        .iter()
+        .map(|member| {
+            let subscription = member
+                .get_object_id("_id")
+                .ok()
+                .and_then(|owner_id| by_owner.get(&owner_id));
+            public_organization_member(member, subscription)
+        })
+        .collect())
 }
 fn recipients(data: &Value) -> Result<Vec<String>, String> {
     let raw = if let Some(items) = data.get("emails") {
@@ -511,8 +601,20 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             json!({"schema_version":1,"subscription":{"fields":["username","emails","team","delivery_mode"],"delivery_modes":["grouped","individual"],"default_delivery_mode":"individual"},"profile_types":["newsletter","report"],"review_collections":names,"filters":{"defaults":default_filters()},"profiles":{"newsletter":{"defaults":default_profile("newsletter")},"report":{"defaults":default_profile("report")}},"vendor_product_filter":{"schema_version":1,"defaults":{"enabled":false,"schema_version":1,"include_possible_matches":false,"rows":[]}},"allowed_values":{"severity":["Critical","High","Medium","Low"],"time_window":["all","daily","week","custom"],"generation_mode":["template","enriched_weekly"],"report_language":["en","zh","ch"]},"limits":{"report_scope_max_count":500}}),
         ));
     }
+    if ctx.path == "/api/organization/subscriptions" && ctx.method == Method::GET {
+        if !ctx.is_organization_admin(state) {
+            return json_error(
+                StatusCode::FORBIDDEN,
+                "Organization administrator access required.",
+            );
+        }
+        return Some(match organization_subscription_rows(state, ctx).await {
+            Ok(rows) => view::json_response(StatusCode::OK, json!({"data":rows})),
+            Err(error) => view::error(StatusCode::SERVICE_UNAVAILABLE, &error),
+        });
+    }
     if ctx.path == "/api/subscriptions" && ctx.method == Method::GET {
-        let Some(filter) = subscription_filter(state, ctx, None) else {
+        let Some(filter) = subscription_filter(state, ctx, None).await else {
             return json_error(StatusCode::FORBIDDEN, "Access denied.");
         };
         return Some(
@@ -536,7 +638,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 "Preview mode must be create or update.",
             );
         }
-        if mode == "create" && !ctx.is_admin(state) {
+        if mode == "create" && !can_manage_subscriptions(state, ctx) {
             return json_error(StatusCode::FORBIDDEN, "Access denied.");
         }
         let mut data = ctx.json.clone();
@@ -549,7 +651,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             if identifier.is_empty() {
                 identifier = ctx.field("email")
             }
-            let Some(filter) = subscription_filter(state, ctx, Some(&identifier)) else {
+            let Some(filter) = subscription_filter(state, ctx, Some(&identifier)).await else {
                 return json_error(StatusCode::FORBIDDEN, "Access denied.");
             };
             let Some(existing) = db::find_one(&state.web, "sub_account", filter)
@@ -596,7 +698,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         ));
     }
     if ctx.path == "/api/subscriptions" && ctx.method == Method::POST {
-        if !ctx.is_admin(state) {
+        if !can_manage_subscriptions(state, ctx) {
             return json_error(StatusCode::FORBIDDEN, "Administrator access required.");
         }
         if state.cfg.account_hub_enabled
@@ -640,6 +742,31 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             Ok(v) => v,
             Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
         };
+        let users = db::collection(&state.web, "auth");
+        let owner = users
+            .find_one(doc! {"username_key":username.trim().to_lowercase()})
+            .await
+            .ok()
+            .flatten();
+        if ctx.is_organization_admin(state) {
+            let Some(member) = owner.as_ref() else {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "Account Hub user must be approved before creating a subscription.",
+                );
+            };
+            if db::string(member, "auth_source") != "account_hub"
+                || !ctx
+                    .user
+                    .as_ref()
+                    .is_some_and(|manager| crate::auth::same_organization(manager, member))
+            {
+                return json_error(
+                    StatusCode::FORBIDDEN,
+                    "You can only manage members of your organization.",
+                );
+            }
+        }
         let existing=db::find_one(&state.web,"sub_account",doc!{"username":{"$regex":format!("^{}$",regex::escape(username.trim())),"$options":"i"}}).await.ok().flatten();
         if existing.is_some() {
             return json_error(
@@ -647,14 +774,10 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 "A subscription already exists for this username.",
             );
         }
-        let users = db::collection(&state.web, "auth");
-        let owner = users
-            .find_one(doc! {"username_key":username.trim().to_lowercase()})
-            .await
-            .ok()
-            .flatten();
         let owner_id = if let Some(owner) = owner {
-            if db::string(&owner, "role") != "user" {
+            let account_hub_member = ctx.is_organization_admin(state)
+                && db::string(&owner, "auth_source") == "account_hub";
+            if db::string(&owner, "role") != "user" && !account_hub_member {
                 return json_error(
                     StatusCode::CONFLICT,
                     "Username is already used by the administrator.",
@@ -711,7 +834,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
     }
     if let Some(tail) = ctx.path.strip_prefix("/api/subscriptions/") {
         let (identifier, action) = tail.split_once('/').unwrap_or((tail, ""));
-        let Some(filter) = subscription_filter(state, ctx, Some(identifier)) else {
+        let Some(filter) = subscription_filter(state, ctx, Some(identifier)).await else {
             return json_error(StatusCode::FORBIDDEN, "Access denied.");
         };
         let coll = db::collection(&state.web, "sub_account");
@@ -801,7 +924,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             });
         }
         if action.is_empty() && ctx.method == Method::PUT {
-            if !ctx.is_admin(state)
+            if !can_manage_subscriptions(state, ctx)
                 && ["username", "emails", "email", "password"]
                     .iter()
                     .any(|key| ctx.json.get(*key).is_some())
@@ -834,7 +957,52 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             if !matches!(mode, "individual" | "grouped") {
                 return json_error(StatusCode::BAD_REQUEST, "Invalid email delivery mode.");
             }
-            let update = doc! {"username":username,"email":&emails[0],"emails":emails.clone(),"team":team,"delivery_mode":mode,"newsletter_profile":db::json_doc(&newsletter).unwrap(),"report_profile":db::json_doc(&report).unwrap(),"updated_at":bson::DateTime::now()};
+            let mut update = doc! {"username":username,"email":&emails[0],"emails":emails.clone(),"team":team,"delivery_mode":mode,"newsletter_profile":db::json_doc(&newsletter).unwrap(),"report_profile":db::json_doc(&report).unwrap(),"updated_at":bson::DateTime::now()};
+            if ctx.is_organization_admin(state) && ctx.json.get("username").is_some() {
+                let Some(manager) = ctx.user.as_ref() else {
+                    return json_error(StatusCode::UNAUTHORIZED, "Authentication required.");
+                };
+                let Some(member) = db::find_one(
+                    &state.web,
+                    "auth",
+                    doc! {"username_key":username.to_lowercase()},
+                )
+                .await
+                .ok()
+                .flatten() else {
+                    return json_error(
+                        StatusCode::FORBIDDEN,
+                        "You can only manage members of your organization.",
+                    );
+                };
+                let Some(member_id) = member.get_object_id("_id").ok() else {
+                    return json_error(StatusCode::FORBIDDEN, "Subscription owner is invalid.");
+                };
+                if db::string(&member, "auth_source") != "account_hub"
+                    || !crate::auth::same_organization(manager, &member)
+                {
+                    return json_error(
+                        StatusCode::FORBIDDEN,
+                        "You can only manage members of your organization.",
+                    );
+                }
+                let current_owner = existing.get_object_id("owner_user_id").ok();
+                if current_owner != Some(member_id)
+                    && coll
+                        .find_one(doc! {"owner_user_id":member_id})
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some()
+                {
+                    return json_error(
+                        StatusCode::CONFLICT,
+                        "A subscription already exists for this username.",
+                    );
+                }
+                update.insert("owner_user_id", member_id);
+                update.insert("username", db::string(&member, "username"));
+            }
             return Some(
                 match coll.update_one(doc! {"_id":id}, doc! {"$set":update}).await {
                     Ok(_) => {
@@ -864,4 +1032,59 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mongodb::bson::oid::ObjectId;
+
+    #[test]
+    fn organization_member_rows_include_account_status_and_subscription() {
+        let owner_id = ObjectId::new();
+        let user = doc! {
+            "_id": owner_id,
+            "username": "member",
+            "email": "member@example.com",
+            "role": "user",
+            "auth_source": "account_hub",
+            "account_hub_organization": "SW-ENG",
+            "account_hub_organization_id": "1",
+            "account_hub_is_organization_admin": false,
+            "disabled": false,
+        };
+        let subscription = doc! {
+            "_id": ObjectId::new(),
+            "owner_user_id": owner_id,
+            "username": "member",
+            "email": "member@example.com",
+            "emails": ["member@example.com"],
+            "team": "SW-ENG",
+            "newsletter_profile": {"enabled": true},
+            "report_profile": {"enabled": false},
+        };
+        let row = public_organization_member(&user, Some(&subscription));
+        assert_eq!(row["username"], "member");
+        assert_eq!(row["account_status"], "active");
+        assert_eq!(row["has_subscription"], true);
+        assert!(row["subscription"]["id"].as_str().is_some());
+    }
+
+    #[test]
+    fn organization_member_rows_keep_disabled_members_without_subscription() {
+        let user = doc! {
+            "_id": ObjectId::new(),
+            "username": "disabled-member",
+            "email": "disabled@example.com",
+            "role": "user",
+            "auth_source": "account_hub",
+            "account_hub_organization": "SW-ENG",
+            "account_hub_organization_id": "1",
+            "disabled": true,
+        };
+        let row = public_organization_member(&user, None);
+        assert_eq!(row["account_status"], "disabled");
+        assert_eq!(row["has_subscription"], false);
+        assert!(row["subscription"].is_null());
+    }
 }
