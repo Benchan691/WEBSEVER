@@ -179,7 +179,7 @@ mod tests {
     #[test]
     fn browser_pages_render_with_rust_template_functions() {
         let env = environment(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
-        let context = json!({"locale":"en","html_lang":"en","i18n_catalog":{},"current_user":{"username":"admin","role":"admin","auth_source":"local","email":""},"is_admin":true,"is_top_admin":true,"config":{"ACCOUNT_HUB_ENABLED":false},"request":{"path":"/reviews","full_path":"/reviews","blueprint":"review","endpoint":""},"collection_name":"cve_review","initial_error":null});
+        let context = json!({"locale":"ch","html_lang":"zh-Hans","i18n_catalog":{},"current_user":{"username":"admin","role":"admin","auth_source":"local","email":""},"is_admin":true,"is_top_admin":true,"config":{"ACCOUNT_HUB_ENABLED":false},"request":{"path":"/reviews","full_path":"/reviews","blueprint":"review","endpoint":""},"collection_name":"cve_review","initial_error":null});
         for name in [
             "auth/login.html",
             "auth/settings.html",

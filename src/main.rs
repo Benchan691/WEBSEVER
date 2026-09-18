@@ -139,9 +139,10 @@ fn request_context(ctx: &ReqCtx) -> Value {
 }
 
 fn page_context(ctx: &ReqCtx, state: &AppState, extras: Value) -> Value {
-    let locale = view::cookie(&ctx.headers, "lang")
-        .filter(|v| v == "ch")
-        .unwrap_or_else(|| "en".into());
+    // The portal is intentionally Chinese-only. Ignore any legacy `lang=en`
+    // cookie so an existing browser session cannot switch the interface back
+    // to English.
+    let locale = "ch".to_owned();
     let mut base = json!({
         "locale": locale, "html_lang": if locale == "ch" { "zh-Hans" } else { "en" },
         "i18n_catalog": serde_json::from_str::<Value>(include_str!("../config/translations.json")).unwrap_or(json!({})).get(&locale).cloned().unwrap_or(json!({})),
@@ -296,8 +297,10 @@ async fn dispatch(State(state): State<AppState>, request: Request<Body>) -> Resp
     if let Some(response) = newsletters::handle(&state, &ctx).await {
         return response;
     }
-    if let Some(code) = ctx.path.strip_prefix("/locale/") {
-        let locale = if code == "ch" { "ch" } else { "en" };
+    if ctx.path.strip_prefix("/locale/").is_some() {
+        // Keep the old endpoint working for bookmarks, but always select the
+        // only supported portal language.
+        let locale = "ch";
         let next = ctx.arg("next");
         let next = if next.starts_with('/') && !next.starts_with("//") {
             next
@@ -395,8 +398,8 @@ mod tests {
             .get_template("auth/login.html")
             .unwrap()
             .render(json!({
-                "locale": "en",
-                "html_lang": "en",
+                "locale": "ch",
+                "html_lang": "zh-Hans",
                 "i18n_catalog": {},
                 "config": {"ACCOUNT_HUB_ENABLED": true},
                 "request": request,

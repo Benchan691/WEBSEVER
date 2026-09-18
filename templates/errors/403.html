@@ -15,11 +15,6 @@
         <a href="{{ url_for('subscription.subscriptions') }}" class="btn btn-primary btn-lg">
             <i class="bi bi-house-door me-2"></i>{{ t('Go Home') }}
         </a>
-        <div class="small mt-3 text-muted">
-            <a class="text-decoration-none {{ 'fw-semibold text-dark' if locale == 'en' else 'text-muted' }}" href="{{ url_for('set_locale', code='en', next=request.full_path) }}">{{ t('EN') }}</a>
-            <span class="mx-1">|</span>
-            <a class="text-decoration-none {{ 'fw-semibold text-dark' if locale == 'ch' else 'text-muted' }}" href="{{ url_for('set_locale', code='ch', next=request.full_path) }}">{{ t('中文') }}</a>
-        </div>
     </div>
 </body>
 </html>
