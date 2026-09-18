@@ -22,7 +22,7 @@ use axum::{
 };
 use minijinja::Environment;
 use mongodb::{Client, Database};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::{collections::HashMap, env, path::PathBuf, sync::Arc};
 use tower_http::services::ServeDir;
 
@@ -105,6 +105,39 @@ impl ReqCtx {
     }
 }
 
+fn request_context(ctx: &ReqCtx) -> Value {
+    let mut args = Map::new();
+    for (key, value) in &ctx.query {
+        args.entry(key.clone()).or_insert_with(|| json!(value));
+    }
+    json!({
+        "path": ctx.path,
+        "full_path": if ctx.query.is_empty() {
+            ctx.path.clone()
+        } else {
+            format!(
+                "{}?{}",
+                ctx.path,
+                serde_urlencoded::to_string(&ctx.query).unwrap_or_default()
+            )
+        },
+        "args": args,
+        "next": ctx.arg("next"),
+        "blueprint": if ctx.path.starts_with("/subscriptions") {
+            "subscription"
+        } else if ctx.path.starts_with("/reviews") {
+            "review"
+        } else if ctx.path.starts_with("/reports") {
+            "report"
+        } else if ctx.path.starts_with("/operations") {
+            "operations"
+        } else {
+            "auth"
+        },
+        "endpoint": ""
+    })
+}
+
 fn page_context(ctx: &ReqCtx, state: &AppState, extras: Value) -> Value {
     let locale = view::cookie(&ctx.headers, "lang")
         .filter(|v| v == "ch")
@@ -115,7 +148,7 @@ fn page_context(ctx: &ReqCtx, state: &AppState, extras: Value) -> Value {
         "current_user": ctx.user.as_ref().map(auth::public_user),
         "is_admin": ctx.is_admin(state), "is_top_admin": ctx.is_top_admin(state),
         "config": {"ACCOUNT_HUB_ENABLED": state.cfg.account_hub_enabled},
-        "request": {"path":ctx.path,"full_path":if ctx.query.is_empty(){ctx.path.clone()}else{format!("{}?{}",ctx.path,serde_urlencoded::to_string(&ctx.query).unwrap_or_default())},"blueprint": if ctx.path.starts_with("/subscriptions") {"subscription"} else if ctx.path.starts_with("/reviews") {"review"} else if ctx.path.starts_with("/reports") {"report"} else if ctx.path.starts_with("/operations") {"operations"} else {"auth"},"endpoint": ""}
+        "request": request_context(ctx)
     });
     if let (Some(dst), Some(src)) = (base.as_object_mut(), extras.as_object()) {
         for (k, v) in src {
@@ -335,4 +368,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_state(state);
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{collections::HashMap, path::Path};
+
+    #[test]
+    fn account_hub_login_renders_query_next() {
+        let ctx = ReqCtx {
+            method: Method::GET,
+            path: "/login".into(),
+            query: vec![("next".into(), "/subscriptions".into())],
+            headers: HeaderMap::new(),
+            body: vec![],
+            json: Value::Null,
+            form: HashMap::new(),
+            user: None,
+        };
+        let request = request_context(&ctx);
+        assert_eq!(request["args"]["next"], "/subscriptions");
+
+        let env = view::environment(Path::new(env!("CARGO_MANIFEST_DIR")));
+        let html = env
+            .get_template("auth/login.html")
+            .unwrap()
+            .render(json!({
+                "locale": "en",
+                "html_lang": "en",
+                "i18n_catalog": {},
+                "config": {"ACCOUNT_HUB_ENABLED": true},
+                "request": request,
+                "local_login": false,
+            }))
+            .unwrap();
+        assert!(html.contains("name=\"next\""));
+        assert!(html.contains("subscriptions"));
+    }
 }

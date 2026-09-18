@@ -27,7 +27,7 @@
 
                 <form method="POST">
                     {% if config.ACCOUNT_HUB_ENABLED and not local_login %}
-                    <input type="hidden" name="next" value="{{ request.args.get('next', '') }}">
+                    <input type="hidden" name="next" value="{{ request.next }}">
                     {% endif %}
                     <div class="mb-3">
                         <label for="username" class="form-label fw-medium">{{ t('Username') }}</label>
