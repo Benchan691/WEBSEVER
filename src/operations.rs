@@ -135,8 +135,19 @@ async fn health(state: &AppState, ctx: &ReqCtx) -> Value {
             .join(", ");
         let report = &value["report_profile"];
         let newsletter = &value["newsletter_profile"];
-        reports.push(json!({"username":value["username"],"emails":emails,"email":email,"team":value["team"],"enabled":report["enabled"],"schedule_enabled":report["schedule_enabled"],"schedule_weekday":report["schedule_weekday"],"schedule_time":report["schedule_time"],"generation_mode":report["generation_mode"],"report_language":report["report_language"],"next_run_at":report["next_run_at"],"due":false,"last_run_at":report["last_run_at"],"last_error":report["last_error"],"last_job_id":report["last_job_id"],"last_match_count":report["last_match_count"],"delivery":{}}));
-        newsletters.push(json!({"username":value["username"],"emails":emails,"email":email,"team":value["team"],"enabled":newsletter["enabled"],"delivery_cursor":newsletter["delivery_cursor"],"cve_delivery_cutoff":newsletter["cve_delivery_cutoff"],"total_delivered":0,"by_collection":[]}));
+        let organization = value
+            .get("organization")
+            .and_then(Value::as_str)
+            .filter(|organization| !organization.trim().is_empty())
+            .or_else(|| {
+                value
+                    .get("team")
+                    .and_then(Value::as_str)
+                    .filter(|team| !team.trim().is_empty())
+            })
+            .unwrap_or("");
+        reports.push(json!({"username":value["username"],"emails":emails,"email":email,"organization":organization,"enabled":report["enabled"],"schedule_enabled":report["schedule_enabled"],"schedule_weekday":report["schedule_weekday"],"schedule_time":report["schedule_time"],"generation_mode":report["generation_mode"],"report_language":report["report_language"],"next_run_at":report["next_run_at"],"due":false,"last_run_at":report["last_run_at"],"last_error":report["last_error"],"last_job_id":report["last_job_id"],"last_match_count":report["last_match_count"],"delivery":{}}));
+        newsletters.push(json!({"username":value["username"],"emails":emails,"email":email,"organization":organization,"enabled":newsletter["enabled"],"delivery_cursor":newsletter["delivery_cursor"],"cve_delivery_cutoff":newsletter["cve_delivery_cutoff"],"total_delivered":0,"by_collection":[]}));
     }
     let deliveries = db::find_sorted(
         &state.web,

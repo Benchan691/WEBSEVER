@@ -630,8 +630,11 @@
         username.value = subscription ? (subscription.username || '') : '';
         username.readOnly = !isAdmin;
         renderRecipientInputs(subscription ? (subscription.emails || (subscription.email ? [subscription.email] : [''])) : ['']);
-        const team = document.getElementById('team');
-        if (team) team.value = subscription ? (subscription.team || '') : '';
+        const organization = document.getElementById('organization');
+        if (organization) {
+            organization.value = subscription ? (subscription.organization || '') : '';
+            organization.readOnly = organizationDashboard;
+        }
         document.getElementById('delivery-mode').value = subscription ? (subscription.delivery_mode || 'individual') : 'individual';
         if (isAdmin && !accountHubEnabled) {
             document.getElementById('password').value = '';
@@ -680,12 +683,12 @@
         if (addButton && selfManagement) addButton.classList.toggle('d-none', subscriptions.length !== 0);
         subscriptions.forEach(function (item) {
             const tr = document.createElement('tr');
-            tr.innerHTML = '<td><strong></strong><div class="text-muted small recipients"></div><div class="text-muted small team"></div><div class="text-muted small delivery-mode"></div></td><td></td><td></td><td></td>';
+            tr.innerHTML = '<td><strong></strong><div class="text-muted small recipients"></div><div class="text-muted small organization"></div><div class="text-muted small delivery-mode"></div></td><td></td><td></td><td></td>';
             const emails = Array.isArray(item.emails) && item.emails.length ? item.emails : [item.email];
             tr.children[0].querySelector('strong').textContent = item.username || t('Unnamed user');
             tr.children[0].querySelector('.recipients').textContent = emails.filter(Boolean).join(', ');
-            tr.children[0].querySelector('.team').textContent = item.team || '';
-            tr.children[0].querySelector('.team').classList.toggle('d-none', selfManagement);
+            tr.children[0].querySelector('.organization').textContent = item.organization || '';
+            tr.children[0].querySelector('.organization').classList.toggle('d-none', selfManagement);
             tr.children[0].querySelector('.delivery-mode').textContent = t('Delivery: {mode}', {
                 mode: item.delivery_mode === 'grouped' ? t('Grouped') : t('Individual'),
             });
@@ -781,7 +784,7 @@
                 actions.append(edit, remove);
             } else {
                 const add = document.createElement('button'); add.className = 'btn btn-outline-primary btn-sm'; add.type = 'button'; add.textContent = t('Add Subscription');
-                add.onclick = function () { openEditor({username:item.username, email:item.email, emails:item.email ? [item.email] : []}); };
+                add.onclick = function () { openEditor({username:item.username, email:item.email, emails:item.email ? [item.email] : [], organization:item.organization || ''}); };
                 actions.append(add);
             }
             tr.children[4].append(actions); rows.append(tr);
@@ -868,7 +871,7 @@
             showModalMessage(t('Password is required.'), 'danger');
             return;
         }
-        const team = document.getElementById('team');
+        const organization = document.getElementById('organization');
         const payload = {
             delivery_mode: document.getElementById('delivery-mode').value,
             newsletter_profile:{
@@ -877,7 +880,7 @@
                 statistic_schedule_enabled:document.getElementById('newsletter-statistic-schedule-enabled').checked
             },
             report_profile: buildReportProfilePayload().report_profile };
-        if (team) payload.team = team.value;
+        if (organization) payload.organization = organization.value;
         if (isAdmin || (selfManagement && !editingId)) {
             payload.username = document.getElementById('username').value;
             payload.emails = recipientValues();

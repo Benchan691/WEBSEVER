@@ -144,6 +144,19 @@ async fn profile(state: &AppState, kind: &str, input: &Value) -> Result<Value, S
 fn public(document: &Document) -> Value {
     let mut value = db::public_id(db::bson_json(document));
     if let Some(obj) = value.as_object_mut() {
+        let organization = obj
+            .get("organization")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                obj.get("team")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or("")
+            .to_owned();
+        obj.insert("organization".into(), json!(organization));
+        obj.remove("team");
         for key in [
             "owner_user_id",
             "managed_by_user_id",
@@ -164,6 +177,19 @@ fn public(document: &Document) -> Value {
         obj.remove("cve_delivery_cutoff");
     }
     value
+}
+fn subscription_organization(value: &Value) -> &str {
+    value
+        .get("organization")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            value
+                .get("team")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or("")
 }
 async fn organization_members(state: &AppState, ctx: &ReqCtx) -> Option<Vec<Document>> {
     let manager = ctx.user.as_ref()?;
@@ -368,7 +394,7 @@ async fn notify(
     mode: &str,
     kind: &str,
     username: &str,
-    team: &str,
+    organization: &str,
 ) -> Result<(), String> {
     let subject = match kind {
         "created" => "Security portal subscription confirmed",
@@ -376,9 +402,9 @@ async fn notify(
         _ => "Security portal subscription cancelled",
     };
     let body = format!(
-        "<html><body><h2>{subject}</h2><p>Username: {}</p><p>Team: {}</p></body></html>",
+        "<html><body><h2>{subject}</h2><p>Username: {}</p><p>Organization: {}</p></body></html>",
         escape_html(username),
-        escape_html(team)
+        escape_html(organization)
     );
     mail::send(state, emails, mode, subject, &body).await
 }
@@ -635,7 +661,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         let names = reviews::views(state).await.unwrap_or_default();
         return Some(view::json_response(
             StatusCode::OK,
-            json!({"schema_version":1,"subscription":{"fields":["username","emails","team","delivery_mode"],"delivery_modes":["grouped","individual"],"default_delivery_mode":"individual"},"profile_types":["newsletter","report"],"review_collections":names,"filters":{"defaults":default_filters()},"profiles":{"newsletter":{"defaults":default_profile("newsletter")},"report":{"defaults":default_profile("report")}},"vendor_product_filter":{"schema_version":1,"defaults":{"enabled":false,"schema_version":1,"include_possible_matches":false,"rows":[]}},"allowed_values":{"severity":["Critical","High","Medium","Low"],"time_window":["all","daily","week","custom"],"generation_mode":["template","enriched_weekly"],"report_language":["en","zh","ch"]},"limits":{"report_scope_max_count":500}}),
+            json!({"schema_version":1,"subscription":{"fields":["username","emails","organization","delivery_mode"],"delivery_modes":["grouped","individual"],"default_delivery_mode":"individual"},"profile_types":["newsletter","report"],"review_collections":names,"filters":{"defaults":default_filters()},"profiles":{"newsletter":{"defaults":default_profile("newsletter")},"report":{"defaults":default_profile("report")}},"vendor_product_filter":{"schema_version":1,"defaults":{"enabled":false,"schema_version":1,"include_possible_matches":false,"rows":[]}},"allowed_values":{"severity":["Critical","High","Medium","Low"],"time_window":["all","daily","week","custom"],"generation_mode":["template","enriched_weekly"],"report_language":["en","zh","ch"]},"limits":{"report_scope_max_count":500}}),
         ));
     }
     if ctx.path == "/api/organization/subscriptions" && ctx.method == Method::GET {
@@ -790,11 +816,18 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         } else {
             submitted_emails
         };
-        let team = ctx.field("team");
-        if username.trim().is_empty() || (!self_only && team.trim().is_empty()) {
+        let organization = {
+            let value = ctx.field("organization");
+            if value.trim().is_empty() {
+                ctx.field("team")
+            } else {
+                value
+            }
+        };
+        if username.trim().is_empty() || (!self_only && organization.trim().is_empty()) {
             return json_error(
                 StatusCode::BAD_REQUEST,
-                "Username, email, and team are required.",
+                "Username, email, and organization are required.",
             );
         }
         let mode = ctx.field("delivery_mode");
@@ -883,14 +916,14 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             match users.insert_one(doc!{"username":username.trim(),"username_key":username.trim().to_lowercase(),"email":&emails[0],"password":hash,"role":"user","auth_source":"local","must_change_password":false,"created_at":now,"updated_at":now}).await{Ok(v)=>v.inserted_id.as_object_id().unwrap(),Err(_)=>return json_error(StatusCode::SERVICE_UNAVAILABLE,"Unable to add subscription.")}
         };
         let now = bson::DateTime::now();
-        let document = doc! {"owner_user_id":owner_id,"managed_by_user_id":ctx.user_id().unwrap(),"username":username.trim(),"emails":emails.clone(),"email":&emails[0],"team":team.trim(),"delivery_mode":mode,"newsletter_profile":db::json_doc(&newsletter).unwrap(),"report_profile":db::json_doc(&report).unwrap(),"created_at":now,"updated_at":now};
+        let document = doc! {"owner_user_id":owner_id,"managed_by_user_id":ctx.user_id().unwrap(),"username":username.trim(),"emails":emails.clone(),"email":&emails[0],"organization":organization.trim(),"delivery_mode":mode,"newsletter_profile":db::json_doc(&newsletter).unwrap(),"report_profile":db::json_doc(&report).unwrap(),"created_at":now,"updated_at":now};
         return Some(
             match db::collection(&state.web, "sub_account")
                 .insert_one(document)
                 .await
             {
                 Ok(v) => {
-                    if notify(state, &emails, mode, "created", &username, &team)
+                    if notify(state, &emails, mode, "created", &username, &organization)
                         .await
                         .is_err()
                     {
@@ -982,10 +1015,10 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             let emails = recipients(&old).unwrap_or_default();
             let mode = old["delivery_mode"].as_str().unwrap_or("individual");
             let username = old["username"].as_str().unwrap_or("");
-            let team = old["team"].as_str().unwrap_or("");
+            let organization = subscription_organization(&old);
             return Some(match coll.delete_one(doc! {"_id":id}).await {
                 Ok(_) => {
-                    if notify(state, &emails, mode, "cancelled", username, team)
+                    if notify(state, &emails, mode, "cancelled", username, organization)
                         .await
                         .is_err()
                     {
@@ -1016,6 +1049,19 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             }
             let mut data = db::bson_json(&existing);
             merge(&mut data, &ctx.json);
+            if ctx.json.get("organization").is_none()
+                && let Some(organization) = ctx.json.get("team").and_then(Value::as_str)
+            {
+                data["organization"] = json!(organization);
+            }
+            if data
+                .get("organization")
+                .and_then(Value::as_str)
+                .is_none_or(|value| value.trim().is_empty())
+                && let Some(organization) = data.get("team").and_then(Value::as_str)
+            {
+                data["organization"] = json!(organization);
+            }
             let emails = match recipients(&data) {
                 Ok(v) => v,
                 Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
@@ -1029,15 +1075,18 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
             };
             let username = data["username"].as_str().unwrap_or("").trim();
-            let team = data["team"].as_str().unwrap_or("").trim();
-            if username.is_empty() || (!is_self_manager(state, ctx) && team.is_empty()) {
-                return json_error(StatusCode::BAD_REQUEST, "Username and team are required.");
+            let organization = data["organization"].as_str().unwrap_or("").trim();
+            if username.is_empty() || (!is_self_manager(state, ctx) && organization.is_empty()) {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "Username and organization are required.",
+                );
             }
             let mode = data["delivery_mode"].as_str().unwrap_or("individual");
             if !matches!(mode, "individual" | "grouped") {
                 return json_error(StatusCode::BAD_REQUEST, "Invalid email delivery mode.");
             }
-            let mut update = doc! {"username":username,"email":&emails[0],"emails":emails.clone(),"team":team,"delivery_mode":mode,"newsletter_profile":db::json_doc(&newsletter).unwrap(),"report_profile":db::json_doc(&report).unwrap(),"updated_at":bson::DateTime::now()};
+            let mut update = doc! {"username":username,"email":&emails[0],"emails":emails.clone(),"organization":organization,"delivery_mode":mode,"newsletter_profile":db::json_doc(&newsletter).unwrap(),"report_profile":db::json_doc(&report).unwrap(),"updated_at":bson::DateTime::now()};
             if ctx.is_organization_admin(state) && ctx.json.get("username").is_some() {
                 let Some(manager) = ctx.user.as_ref() else {
                     return json_error(StatusCode::UNAUTHORIZED, "Authentication required.");
@@ -1084,14 +1133,18 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 update.insert("username", db::string(&member, "username"));
             }
             return Some(
-                match coll.update_one(doc! {"_id":id}, doc! {"$set":update}).await {
+                match coll
+                    .update_one(doc! {"_id":id}, doc! {"$set":update,"$unset":{"team":""}})
+                    .await
+                {
                     Ok(_) => {
                         let changed = ctx.json.get("newsletter_profile").is_some()
                             || ctx.json.get("report_profile").is_some()
                             || ctx.json.get("emails").is_some()
+                            || ctx.json.get("organization").is_some()
                             || ctx.json.get("team").is_some();
                         if changed
-                            && notify(state, &emails, mode, "updated", username, team)
+                            && notify(state, &emails, mode, "updated", username, organization)
                                 .await
                                 .is_err()
                         {
@@ -1139,7 +1192,7 @@ mod tests {
             "username": "member",
             "email": "member@example.com",
             "emails": ["member@example.com"],
-            "team": "SW-ENG",
+            "organization": "SW-ENG",
             "newsletter_profile": {"enabled": true},
             "report_profile": {"enabled": false},
         };
@@ -1148,6 +1201,21 @@ mod tests {
         assert_eq!(row["account_status"], "active");
         assert_eq!(row["has_subscription"], true);
         assert!(row["subscription"]["id"].as_str().is_some());
+        assert_eq!(row["subscription"]["organization"], "SW-ENG");
+        assert!(row["subscription"].get("team").is_none());
+    }
+
+    #[test]
+    fn legacy_team_subscription_is_publicized_as_organization() {
+        let subscription = doc! {
+            "_id": ObjectId::new(),
+            "username": "legacy",
+            "email": "legacy@example.com",
+            "team": "SW-ENG",
+        };
+        let value = public(&subscription);
+        assert_eq!(value["organization"], "SW-ENG");
+        assert!(value.get("team").is_none());
     }
 
     #[test]

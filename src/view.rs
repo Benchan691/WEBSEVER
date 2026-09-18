@@ -230,6 +230,9 @@ mod tests {
             .unwrap();
         assert!(html.contains("组织订阅面板"));
         assert!(html.contains("organization/subscriptions"));
+        assert!(html.contains("for=\"organization\""));
+        assert!(!html.contains("for=\"team\""));
+        assert!(!html.contains("团队"));
         assert!(html.contains("organizationDashboard"));
     }
 
@@ -253,7 +256,8 @@ mod tests {
             .unwrap();
         assert!(html.contains("我的订阅"));
         assert!(html.contains("仅管理您自己的订阅。"));
-        assert!(!html.contains("for=\"team\""));
+        assert!(!html.contains("for=\"organization\""));
+        assert!(!html.contains("团队"));
         assert!(html.contains("\"selfManagement\":true"));
         assert!(html.contains("\"currentUsername\":\"member\""));
     }

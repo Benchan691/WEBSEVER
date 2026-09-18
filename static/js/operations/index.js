@@ -92,7 +92,7 @@
             tr.innerHTML =
                 '<td><div class="fw-semibold">' + escapeHtml(row.username || row.email) + '</div>' +
                 '<div class="small text-muted">' + escapeHtml(recipients || '') + '</div>' +
-                '<div class="small text-muted">' + escapeHtml(row.team || '') + '</div>' +
+                '<div class="small text-muted">' + escapeHtml(row.organization || '') + '</div>' +
                 '<div class="small">' + escapeHtml(row.delivery_mode || 'individual') + '</div>' +
                 '<div class="small">' + (row.enabled ? t('Enabled') : t('Disabled')) +
                 ' · ' + escapeHtml(row.generation_mode || '') + '</div></td>' +
@@ -137,7 +137,7 @@
             tr.innerHTML =
                 '<td><div class="fw-semibold">' + escapeHtml(row.username || row.email) + '</div>' +
                 '<div class="small text-muted">' + escapeHtml(recipients || '') + '</div>' +
-                '<div class="small text-muted">' + escapeHtml(row.team || '') + '</div>' +
+                '<div class="small text-muted">' + escapeHtml(row.organization || '') + '</div>' +
                 '<div class="small">' + escapeHtml(row.delivery_mode || 'individual') + '</div></td>' +
                 '<td>' + (row.enabled ? t('Yes') : t('No')) + '</td>' +
                 '<td class="small">' + escapeHtml(row.delivery_cursor || '—') + '</td>' +
