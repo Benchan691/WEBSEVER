@@ -38,6 +38,7 @@
     "You can only manage members of your organization.": "您只能管理自己组织的成员。",
     "Account Hub roles are managed by Account Hub.": "Account Hub 角色由 Account Hub 管理。",
     "Account Hub organization does not match the portal member.": "Account Hub 组织与门户成员不匹配。",
+    "Account Hub email unavailable": "Account Hub 邮箱不可用，请先登录。",
     "Sign Out": "退出登录",
     "Sub-admin": "子管理员",
     "Sub-admin Management": "子管理员管理",

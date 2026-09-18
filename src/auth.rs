@@ -30,7 +30,7 @@ fn valid_password(password: &str) -> Result<(), String> {
     }
     Ok(())
 }
-fn valid_email(email: &str) -> bool {
+pub(crate) fn valid_email(email: &str) -> bool {
     let e = email.trim();
     e.is_empty()
         || (e.contains('@')
@@ -186,6 +186,15 @@ fn account_hub_organization(data: &Value) -> (String, String) {
     (name, id)
 }
 
+fn account_hub_email_from_data(data: &Value) -> Option<String> {
+    let email = data
+        .get("email")
+        .and_then(Value::as_str)?
+        .trim()
+        .to_lowercase();
+    (!email.is_empty() && valid_email(&email)).then_some(email)
+}
+
 fn bson_strings(values: &[String]) -> Bson {
     Bson::Array(values.iter().cloned().map(Bson::String).collect())
 }
@@ -235,12 +244,21 @@ pub(crate) fn same_organization(manager: &Document, member: &Document) -> bool {
     !manager_name.is_empty() && key(&manager_name) == key(&member_name)
 }
 
+pub(crate) fn account_hub_email(user: &Document) -> Option<String> {
+    if db::string(user, "auth_source") != "account_hub" {
+        return None;
+    }
+    let email = db::string(user, "account_hub_email").trim().to_lowercase();
+    (!email.is_empty() && valid_email(&email)).then_some(email)
+}
+
 pub fn public_user(user: &Document) -> Value {
     json!({"id":db::id_string(user),"username":db::string(user,"username"),"email":db::string(user,"email"),
         "role":user.get_str("role").unwrap_or("user"),"must_change_password":db::bool_field(user,"must_change_password"),
         "disabled":db::bool_field(user,"disabled"),"pause_managed_subscriptions_when_disabled":db::bool_field(user,"pause_managed_subscriptions_when_disabled"),
         "auth_source":user.get_str("auth_source").unwrap_or("local"),"account_hub_uid":db::string(user,"account_hub_uid"),
         "account_hub_username":db::string(user,"account_hub_username"),"account_hub_bound":!db::string(user,"account_hub_uid").is_empty(),
+        "account_hub_email":account_hub_email(user).unwrap_or_default(),
         "organization":db::string(user,"account_hub_organization"),
         "organization_id":db::string(user,"account_hub_organization_id"),
         "organization_admin":db::bool_field(user,"account_hub_is_organization_admin"),
@@ -274,7 +292,7 @@ pub async fn ensure_bootstrap(state: &AppState) -> Result<(), Box<dyn std::error
                 bcrypt::hash(&state.cfg.bootstrap_password, bcrypt::DEFAULT_COST)?,
             );
         }
-        coll.update_one(doc!{"_id":id},doc!{"$set":set,"$unset":{"account_hub_uid":"","account_hub_username":"","last_account_hub_sync_at":"","account_hub_organization":"","account_hub_organization_id":"","account_hub_roles":"","account_hub_system_roles":"","account_hub_is_organization_admin":""}}).await?;
+        coll.update_one(doc!{"_id":id},doc!{"$set":set,"$unset":{"account_hub_uid":"","account_hub_username":"","account_hub_email":"","last_account_hub_sync_at":"","account_hub_organization":"","account_hub_organization_id":"","account_hub_roles":"","account_hub_system_roles":"","account_hub_is_organization_admin":""}}).await?;
     } else if !state.cfg.bootstrap_password.is_empty() {
         valid_password(&state.cfg.bootstrap_password)?;
         let hash = bcrypt::hash(&state.cfg.bootstrap_password, bcrypt::DEFAULT_COST)?;
@@ -542,6 +560,7 @@ async fn hub_login(state: &AppState, ctx: &ReqCtx) -> Response {
             StatusCode::UNAUTHORIZED,
         );
     }
+    let hub_email = account_hub_email_from_data(data);
     let hub_profile = account_hub_profile_fields(data, &state.cfg.account_hub_required_role);
     let coll = db::collection(&state.web, "auth");
     let by_uid = coll
@@ -576,12 +595,9 @@ async fn hub_login(state: &AppState, ctx: &ReqCtx) -> Response {
         for (field, value) in &hub_profile {
             document.insert(field, value.clone());
         }
-        if let Some(email) = data
-            .get("email")
-            .and_then(Value::as_str)
-            .filter(|e| valid_email(e))
-        {
-            document.insert("email", email.trim().to_lowercase());
+        if let Some(email) = hub_email.as_ref() {
+            document.insert("email", email.clone());
+            document.insert("account_hub_email", email.clone());
         }
         let inserted = match coll.insert_one(document).await {
             Ok(r) => r,
@@ -653,8 +669,14 @@ async fn hub_login(state: &AppState, ctx: &ReqCtx) -> Response {
     for (field, value) in &hub_profile {
         set.insert(field, value.clone());
     }
+    let mut unset = doc! {"password":""};
+    if hub_email.is_none() {
+        unset.insert("account_hub_email", "");
+    } else if let Some(email) = hub_email.as_ref() {
+        set.insert("account_hub_email", email.clone());
+    }
     if coll
-        .update_one(doc! {"_id":id}, doc! {"$set":set,"$unset":{"password":""}})
+        .update_one(doc! {"_id":id}, doc! {"$set":set,"$unset":unset})
         .await
         .is_err()
     {
@@ -673,6 +695,9 @@ async fn hub_login(state: &AppState, ctx: &ReqCtx) -> Response {
             StatusCode::SERVICE_UNAVAILABLE,
         );
     };
+    if let Some(email) = hub_email.as_ref() {
+        sync_account_hub_subscription_email(state, &user, email).await;
+    }
     let mut response = view::redirect(safe_next(&ctx.field("next")));
     response.headers_mut().insert(
         header::SET_COOKIE,
@@ -724,6 +749,34 @@ fn hub_error(state: &AppState, ctx: &ReqCtx, message: &str, status: StatusCode) 
     let mut r = render(state, ctx, "auth/login.html", json!({"error":message}));
     *r.status_mut() = status;
     r
+}
+
+async fn sync_account_hub_subscription_email(state: &AppState, user: &Document, email: &str) {
+    let mut ownership = Vec::new();
+    if let Ok(owner_id) = user.get_object_id("_id") {
+        ownership.push(Bson::Document(doc! {"owner_user_id": owner_id}));
+    }
+    let username = db::string(user, "username");
+    if !username.trim().is_empty() {
+        ownership.push(Bson::Document(doc! {
+            "username": {
+                "$regex": format!("^{}$", regex::escape(username.trim())),
+                "$options": "i"
+            }
+        }));
+    }
+    if ownership.is_empty() {
+        return;
+    }
+    if let Err(error) = db::collection(&state.web, "sub_account")
+        .update_many(
+            doc! {"$or": ownership},
+            doc! {"$set":{"email":email,"emails":vec![email.to_owned()],"account_hub_email":email}},
+        )
+        .await
+    {
+        tracing::error!(%error, user_id = %db::id_string(user), "Unable to synchronize Account Hub subscription email");
+    }
 }
 
 pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
@@ -1146,5 +1199,32 @@ mod tests {
             profile.get_array("account_hub_system_roles").unwrap().len(),
             2
         );
+    }
+
+    #[test]
+    fn account_hub_email_requires_a_valid_non_empty_value() {
+        assert_eq!(
+            account_hub_email_from_data(&json!({"email":"User@Example.com"})),
+            Some("user@example.com".into())
+        );
+        assert_eq!(account_hub_email_from_data(&json!({"email":""})), None);
+        assert_eq!(
+            account_hub_email_from_data(&json!({"email":"not-an-email"})),
+            None
+        );
+    }
+
+    #[test]
+    fn public_user_exposes_the_synced_account_hub_email() {
+        let user = doc! {
+            "_id": ObjectId::new(),
+            "username": "member",
+            "email": "profile@example.com",
+            "account_hub_email": "hub@example.com",
+            "auth_source": "account_hub",
+        };
+        let value = public_user(&user);
+        assert_eq!(value["email"], "profile@example.com");
+        assert_eq!(value["account_hub_email"], "hub@example.com");
     }
 }

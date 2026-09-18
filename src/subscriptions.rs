@@ -225,6 +225,30 @@ fn same_username(left: &str, right: &str) -> bool {
     !left.trim().is_empty() && left.trim().eq_ignore_ascii_case(right.trim())
 }
 
+fn same_email(left: &str, right: &str) -> bool {
+    !left.trim().is_empty() && left.trim().eq_ignore_ascii_case(right.trim())
+}
+
+fn account_hub_recipient(user: &Document) -> Result<Option<String>, String> {
+    if db::string(user, "auth_source") != "account_hub" {
+        return Ok(None);
+    }
+    auth::account_hub_email(user)
+        .map(Some)
+        .ok_or_else(|| "Account Hub email is unavailable. Ask the user to sign in again.".into())
+}
+
+fn self_recipient(user: &Document) -> Result<String, String> {
+    if let Some(email) = account_hub_recipient(user)? {
+        return Ok(email);
+    }
+    let email = db::string(user, "email").trim().to_lowercase();
+    if email.is_empty() || !auth::valid_email(&email) {
+        return Err("A valid profile email is required for this subscription.".into());
+    }
+    Ok(email)
+}
+
 fn self_subscription_owner_filter(ctx: &ReqCtx) -> Option<Document> {
     let owner_id = ctx.user_id()?;
     let user = ctx.user.as_ref()?;
@@ -780,6 +804,17 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 "Account Hub users do not use local passwords.",
             );
         }
+        let self_email = if self_only {
+            let Some(user) = ctx.user.as_ref() else {
+                return json_error(StatusCode::UNAUTHORIZED, "Authentication required.");
+            };
+            Some(match self_recipient(user) {
+                Ok(email) => email,
+                Err(error) => return json_error(StatusCode::BAD_REQUEST, &error),
+            })
+        } else {
+            None
+        };
         let submitted_emails = match recipients(&ctx.json) {
             Ok(v) => v,
             Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
@@ -790,7 +825,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         } else {
             username
         };
-        let emails = if self_only {
+        let mut emails = if self_only {
             let Some(user) = ctx.user.as_ref() else {
                 return json_error(StatusCode::UNAUTHORIZED, "Authentication required.");
             };
@@ -801,10 +836,10 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                     "You can only manage your own subscription.",
                 );
             }
-            let current_email = db::string(user, "email").trim().to_lowercase();
+            let current_email = self_email.as_deref().unwrap_or("");
             if current_email.is_empty()
                 || submitted_emails.len() != 1
-                || !same_username(&submitted_emails[0], &current_email)
+                || !same_email(&submitted_emails[0], current_email)
             {
                 return json_error(
                     StatusCode::FORBIDDEN,
@@ -812,7 +847,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 );
             }
             username = current_username;
-            vec![current_email]
+            vec![current_email.to_owned()]
         } else {
             submitted_emails
         };
@@ -882,6 +917,21 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 );
             }
         }
+        if let Some(owner) = owner.as_ref() {
+            let account_hub_email = match account_hub_recipient(owner) {
+                Ok(email) => email,
+                Err(error) => return json_error(StatusCode::BAD_REQUEST, &error),
+            };
+            if let Some(account_hub_email) = account_hub_email {
+                if emails.len() != 1 || !same_email(&emails[0], &account_hub_email) {
+                    return json_error(
+                        StatusCode::FORBIDDEN,
+                        "Account Hub subscriptions must use the Account Hub email.",
+                    );
+                }
+                emails = vec![account_hub_email];
+            }
+        }
         let existing=db::find_one(&state.web,"sub_account",doc!{"username":{"$regex":format!("^{}$",regex::escape(username.trim())),"$options":"i"}}).await.ok().flatten();
         if existing.is_some() {
             return json_error(
@@ -889,6 +939,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 "A subscription already exists for this username.",
             );
         }
+        let owner_account_hub_email = owner.as_ref().and_then(auth::account_hub_email);
         let owner_id = if let Some(owner) = owner {
             if self_only && ctx.user_id() != owner.get_object_id("_id").ok() {
                 return json_error(
@@ -924,7 +975,10 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             match users.insert_one(doc!{"username":username.trim(),"username_key":username.trim().to_lowercase(),"email":&emails[0],"password":hash,"role":"user","auth_source":"local","must_change_password":false,"created_at":now,"updated_at":now}).await{Ok(v)=>v.inserted_id.as_object_id().unwrap(),Err(_)=>return json_error(StatusCode::SERVICE_UNAVAILABLE,"Unable to add subscription.")}
         };
         let now = bson::DateTime::now();
-        let document = doc! {"owner_user_id":owner_id,"managed_by_user_id":ctx.user_id().unwrap(),"username":username.trim(),"emails":emails.clone(),"email":&emails[0],"organization":organization.trim(),"delivery_mode":mode,"newsletter_profile":db::json_doc(&newsletter).unwrap(),"report_profile":db::json_doc(&report).unwrap(),"created_at":now,"updated_at":now};
+        let mut document = doc! {"owner_user_id":owner_id,"managed_by_user_id":ctx.user_id().unwrap(),"username":username.trim(),"emails":emails.clone(),"email":&emails[0],"organization":organization.trim(),"delivery_mode":mode,"newsletter_profile":db::json_doc(&newsletter).unwrap(),"report_profile":db::json_doc(&report).unwrap(),"created_at":now,"updated_at":now};
+        if let Some(email) = owner_account_hub_email {
+            document.insert("account_hub_email", email);
+        }
         return Some(
             match db::collection(&state.web, "sub_account")
                 .insert_one(document)
@@ -1055,6 +1109,28 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                     "Only an administrator can edit subscription identity fields.",
                 );
             }
+            let owner = if let Ok(owner_id) = existing.get_object_id("owner_user_id") {
+                db::find_one(&state.web, "auth", doc! {"_id":owner_id})
+                    .await
+                    .ok()
+                    .flatten()
+            } else if is_self_manager(state, ctx) {
+                ctx.user.clone()
+            } else {
+                let username = db::string(&existing, "username");
+                if username.trim().is_empty() {
+                    None
+                } else {
+                    db::find_one(
+                        &state.web,
+                        "auth",
+                        doc! {"username_key":username.trim().to_lowercase()},
+                    )
+                    .await
+                    .ok()
+                    .flatten()
+                }
+            };
             let mut data = db::bson_json(&existing);
             merge(&mut data, &ctx.json);
             if ctx.json.get("organization").is_none()
@@ -1078,7 +1154,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                     .unwrap_or_default();
                 data["organization"] = json!(current_organization);
             }
-            let emails = match recipients(&data) {
+            let mut emails = match recipients(&data) {
                 Ok(v) => v,
                 Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
             };
@@ -1102,7 +1178,35 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             if !matches!(mode, "individual" | "grouped") {
                 return json_error(StatusCode::BAD_REQUEST, "Invalid email delivery mode.");
             }
+            let recipient_submitted =
+                ctx.json.get("emails").is_some() || ctx.json.get("email").is_some();
+            let identity_change =
+                ctx.is_organization_admin(state) && ctx.json.get("username").is_some();
+            let current_owner_hub_email = if identity_change {
+                None
+            } else if let Some(owner) = owner.as_ref() {
+                match account_hub_recipient(owner) {
+                    Ok(email) => email,
+                    Err(error) => return json_error(StatusCode::BAD_REQUEST, &error),
+                }
+            } else {
+                None
+            };
+            if let Some(account_hub_email) = current_owner_hub_email.as_ref() {
+                if recipient_submitted
+                    && (emails.len() != 1 || !same_email(&emails[0], account_hub_email))
+                {
+                    return json_error(
+                        StatusCode::FORBIDDEN,
+                        "Account Hub subscriptions must use the Account Hub email.",
+                    );
+                }
+                emails = vec![account_hub_email.clone()];
+            }
             let mut update = doc! {"username":username,"email":&emails[0],"emails":emails.clone(),"organization":organization,"delivery_mode":mode,"newsletter_profile":db::json_doc(&newsletter).unwrap(),"report_profile":db::json_doc(&report).unwrap(),"updated_at":bson::DateTime::now()};
+            if let Some(account_hub_email) = current_owner_hub_email.as_ref() {
+                update.insert("account_hub_email", account_hub_email.clone());
+            }
             if ctx.is_organization_admin(state) && ctx.json.get("username").is_some() {
                 let Some(manager) = ctx.user.as_ref() else {
                     return json_error(StatusCode::UNAUTHORIZED, "Authentication required.");
@@ -1145,12 +1249,38 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                         "A subscription already exists for this username.",
                     );
                 }
+                let account_hub_email = match account_hub_recipient(&member) {
+                    Ok(email) => email,
+                    Err(error) => return json_error(StatusCode::BAD_REQUEST, &error),
+                };
+                let Some(account_hub_email) = account_hub_email else {
+                    return json_error(
+                        StatusCode::BAD_REQUEST,
+                        "Account Hub email is unavailable. Ask the user to sign in again.",
+                    );
+                };
+                if recipient_submitted
+                    && (emails.len() != 1 || !same_email(&emails[0], &account_hub_email))
+                {
+                    return json_error(
+                        StatusCode::FORBIDDEN,
+                        "Account Hub subscriptions must use the Account Hub email.",
+                    );
+                }
+                emails = vec![account_hub_email.clone()];
                 update.insert("owner_user_id", member_id);
                 update.insert("username", db::string(&member, "username"));
+                update.insert("email", account_hub_email.clone());
+                update.insert("emails", emails.clone());
+                update.insert("account_hub_email", account_hub_email);
+            }
+            let mut unset = doc! {"team":""};
+            if current_owner_hub_email.is_none() && !identity_change {
+                unset.insert("account_hub_email", "");
             }
             return Some(
                 match coll
-                    .update_one(doc! {"_id":id}, doc! {"$set":update,"$unset":{"team":""}})
+                    .update_one(doc! {"_id":id}, doc! {"$set":update,"$unset":unset})
                     .await
                 {
                     Ok(_) => {
@@ -1195,6 +1325,7 @@ mod tests {
             "_id": owner_id,
             "username": "member",
             "email": "member@example.com",
+            "account_hub_email": "hub@example.com",
             "role": "user",
             "auth_source": "account_hub",
             "account_hub_organization": "SW-ENG",
@@ -1208,6 +1339,7 @@ mod tests {
             "username": "member",
             "email": "member@example.com",
             "emails": ["member@example.com"],
+            "account_hub_email": "hub@example.com",
             "organization": "SW-ENG",
             "newsletter_profile": {"enabled": true},
             "report_profile": {"enabled": false},
@@ -1218,6 +1350,7 @@ mod tests {
         assert_eq!(row["has_subscription"], true);
         assert!(row["subscription"]["id"].as_str().is_some());
         assert_eq!(row["subscription"]["organization"], "SW-ENG");
+        assert_eq!(row["subscription"]["account_hub_email"], "hub@example.com");
         assert!(row["subscription"].get("team").is_none());
     }
 
@@ -1271,5 +1404,21 @@ mod tests {
         };
         let filter = self_subscription_owner_filter(&ctx).unwrap();
         assert_eq!(filter.get_array("$or").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn account_hub_recipient_requires_the_synced_email() {
+        let user = doc! {
+            "auth_source": "account_hub",
+            "account_hub_email": "Hub@Example.com",
+        };
+        assert_eq!(
+            account_hub_recipient(&user).unwrap(),
+            Some("hub@example.com".into())
+        );
+        let missing = doc! {"auth_source":"account_hub"};
+        assert!(account_hub_recipient(&missing).is_err());
+        let local = doc! {"auth_source":"local","email":"local@example.com"};
+        assert_eq!(account_hub_recipient(&local).unwrap(), None);
     }
 }

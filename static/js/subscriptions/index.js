@@ -12,13 +12,15 @@
         selfManagement,
         currentUsername,
         currentEmail,
+        currentAccountHubEmail,
+        accountHubUser,
         currentOrganization,
     } = JSON.parse(document.getElementById('page-config').textContent);
     const modal = new bootstrap.Modal(document.getElementById('subscription-modal'));
     const newsletterCollections = new CollectionPicker('newsletter', {emptySelectionMeansAll: true});
     const rows = document.getElementById('rows');
     const message = document.getElementById('message');
-    let collections = [], subscriptions = [], editingId = null;
+    let collections = [], subscriptions = [], editingId = null, recipientLocked = false;
     let newsletterVendorProductFilter = emptyVendorProductFilter();
     let reportVendorProductFilter = emptyVendorProductFilter();
     let reportLegacyKeywords = [];
@@ -128,7 +130,7 @@
         modalMessage.textContent = text || '';
         modalMessage.className = text ? 'alert alert-' + kind : 'alert d-none';
     }
-    function renderRecipientInputs(emails) {
+    function renderRecipientInputs(emails, locked) {
         const list = document.getElementById('recipient-list');
         list.replaceChildren();
         const values = Array.isArray(emails) && emails.length ? emails : [''];
@@ -141,10 +143,10 @@
             input.placeholder = t('recipient@example.com');
             input.value = email || '';
             input.required = true;
-            input.readOnly = !isAdmin;
+            input.readOnly = locked || !isAdmin;
             input.setAttribute('aria-label', t('Email recipient'));
             row.append(input);
-            if (isAdmin) {
+            if (isAdmin && !locked) {
                 const remove = document.createElement('button');
                 remove.type = 'button';
                 remove.className = 'btn btn-outline-danger remove-recipient';
@@ -615,11 +617,12 @@
         previewTimer = window.setTimeout(refreshReportPreview, 400);
     }
     function openEditor(subscription) {
+        const defaultEmail = accountHubUser ? currentAccountHubEmail : currentEmail;
         if (!subscription && selfManagement) {
             subscription = {
                 username: currentUsername || '',
-                email: currentEmail || '',
-                emails: currentEmail ? [currentEmail] : [],
+                email: defaultEmail || '',
+                emails: defaultEmail ? [defaultEmail] : [],
                 organization: currentOrganization || ''
             };
         }
@@ -631,7 +634,10 @@
         const username = document.getElementById('username');
         username.value = subscription ? (subscription.username || '') : '';
         username.readOnly = !isAdmin;
-        renderRecipientInputs(subscription ? (subscription.emails || (subscription.email ? [subscription.email] : [''])) : ['']);
+        recipientLocked = accountHubUser || organizationDashboard || !!(subscription && (subscription.account_hub_email || subscription.recipientLocked));
+        renderRecipientInputs(subscription ? (subscription.emails || (subscription.email ? [subscription.email] : [''])) : [''], recipientLocked);
+        const addRecipientButton = document.getElementById('add-recipient-btn');
+        if (addRecipientButton) addRecipientButton.classList.toggle('d-none', recipientLocked);
         const organization = document.getElementById('organization');
         if (organization) {
             organization.value = subscription ? (subscription.organization || currentOrganization || '') : (currentOrganization || '');
@@ -758,7 +764,7 @@
             tr.innerHTML = '<td><strong></strong><div class="text-muted small email"></div><div class="text-muted small role"></div></td><td></td><td></td><td></td><td></td>';
             const subscription = item.subscription && item.subscription.id ? item.subscription : null;
             tr.children[0].querySelector('strong').textContent = item.username || t('Unnamed user');
-            tr.children[0].querySelector('.email').textContent = item.email || '';
+            tr.children[0].querySelector('.email').textContent = item.account_hub_email || t('Account Hub email unavailable');
             tr.children[0].querySelector('.role').textContent = item.organization_admin ? t('Organization administrator') : t('Organization member');
             const status = document.createElement('span');
             status.className = item.disabled ? 'badge text-bg-secondary' : 'badge text-bg-success';
@@ -772,10 +778,14 @@
                 edit.onclick = function () {
                     openEditor(Object.assign({}, subscription, {
                         username: item.username || subscription.username,
-                        email: item.email || subscription.email,
-                        emails: subscription.emails || (item.email ? [item.email] : [])
+                        email: item.account_hub_email || subscription.email,
+                        emails: item.account_hub_email ? [item.account_hub_email] : (subscription.emails || []),
+                        account_hub_email: item.account_hub_email || subscription.account_hub_email || '',
+                        recipientLocked: true
                     }));
                 };
+                edit.disabled = !item.account_hub_email;
+                if (edit.disabled) edit.title = t('Account Hub email unavailable');
                 const remove = document.createElement('button'); remove.className = 'btn btn-outline-danger btn-sm'; remove.type = 'button'; remove.textContent = t('Delete');
                 remove.onclick = function () {
                     if (confirm(t('Delete subscription for {username}?', {username: item.username || item.email}))) {
@@ -785,7 +795,9 @@
                 actions.append(edit, remove);
             } else {
                 const add = document.createElement('button'); add.className = 'btn btn-outline-primary btn-sm'; add.type = 'button'; add.textContent = t('Add Subscription');
-                add.onclick = function () { openEditor({username:item.username, email:item.email, emails:item.email ? [item.email] : [], organization:item.organization || ''}); };
+                add.disabled = !item.account_hub_email;
+                if (add.disabled) add.title = t('Account Hub email unavailable');
+                add.onclick = function () { openEditor({username:item.username, email:item.account_hub_email || '', emails:item.account_hub_email ? [item.account_hub_email] : [], organization:item.organization || '', account_hub_email:item.account_hub_email || '', recipientLocked:true}); };
                 actions.append(add);
             }
             tr.children[4].append(actions); rows.append(tr);
@@ -839,7 +851,7 @@
         const list = document.getElementById('recipient-list');
         const values = recipientValues();
         values.push('');
-        renderRecipientInputs(values);
+        renderRecipientInputs(values, recipientLocked);
         list.lastElementChild.querySelector('input').focus();
     };
     document.getElementById('newsletter-send-statistic').addEventListener('click', function () {
@@ -882,7 +894,7 @@
             },
             report_profile: buildReportProfilePayload().report_profile };
         if (organization) payload.organization = organization.value;
-        if (isAdmin || (selfManagement && !editingId)) {
+        if (isAdmin || organizationDashboard || (selfManagement && !editingId)) {
             payload.username = document.getElementById('username').value;
             payload.emails = recipientValues();
             if (!accountHubEnabled) payload.password = password;

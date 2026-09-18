@@ -233,6 +233,7 @@ mod tests {
         assert!(html.contains("for=\"organization\""));
         assert!(!html.contains("for=\"team\""));
         assert!(!html.contains("团队"));
+        assert!(!html.contains("add-recipient-btn"));
         assert!(html.contains("organizationDashboard"));
     }
 
@@ -246,7 +247,7 @@ mod tests {
                 "locale":"ch",
                 "html_lang":"zh-Hans",
                 "i18n_catalog":{},
-                "current_user":{"username":"member","email":"member@example.com","organization":"SW-ENG","role":"user","auth_source":"account_hub"},
+                "current_user":{"username":"member","email":"member@example.com","account_hub_email":"hub@example.com","organization":"SW-ENG","role":"user","auth_source":"account_hub"},
                 "is_admin":false,
                 "is_top_admin":false,
                 "is_organization_admin":false,
@@ -260,6 +261,7 @@ mod tests {
         assert!(!html.contains("团队"));
         assert!(html.contains("\"selfManagement\":true"));
         assert!(html.contains("\"currentUsername\":\"member\""));
+        assert!(html.contains("\"currentAccountHubEmail\":\"hub@example.com\""));
         assert!(html.contains("\"currentOrganization\":\"SW-ENG\""));
     }
     #[test]

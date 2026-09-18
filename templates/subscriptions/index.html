@@ -40,7 +40,7 @@
                     <div class="col-12">
                         <label class="form-label" for="recipient-list">{{ t('Email recipients') }}</label>
                         <div id="recipient-list" class="vstack gap-2"></div>
-                        {% if is_admin or is_organization_admin %}<button id="add-recipient-btn" class="btn btn-outline-secondary btn-sm mt-2" type="button"><i class="bi bi-plus-lg me-1"></i>{{ t('Add email recipient') }}</button>{% endif %}
+                        {% if is_admin %}<button id="add-recipient-btn" class="btn btn-outline-secondary btn-sm mt-2" type="button"><i class="bi bi-plus-lg me-1"></i>{{ t('Add email recipient') }}</button>{% endif %}
                         <div class="form-text">{{ t('All recipients share the same subscription settings.') if config.ACCOUNT_HUB_ENABLED else t('All recipients share the same subscription settings and password.') }}</div>
                     </div>
                     <div class="col-md-6"><label class="form-label" for="delivery-mode">{{ t('Email delivery mode') }}</label><select id="delivery-mode" class="form-select"><option value="individual">{{ t('Send separate private emails') }}</option><option value="grouped">{{ t('Send one email to all recipients') }}</option></select><div class="form-text">{{ t('Grouped delivery shows recipient addresses to each other.') }}</div></div>
@@ -104,9 +104,11 @@
     'selfManagement': not is_admin and not is_organization_admin,
     'currentUsername': current_user.username if current_user else '',
     'currentEmail': current_user.email if current_user else '',
+    'currentAccountHubEmail': current_user.account_hub_email if current_user else '',
+    'accountHubUser': current_user.auth_source == 'account_hub' if current_user else false,
     'currentOrganization': current_user.organization if current_user else '',
     'accountHubEnabled': config.ACCOUNT_HUB_ENABLED,
 }|tojson }}</script>
 <script src="{{ url_for('static', filename='js/shared/collection-picker.js') }}"></script>
-<script src="{{ url_for('static', filename='js/subscriptions/index.js', v='20260918-1') }}"></script>
+<script src="{{ url_for('static', filename='js/subscriptions/index.js', v='20260918-2') }}"></script>
 {% endblock %}
