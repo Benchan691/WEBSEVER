@@ -224,11 +224,134 @@ fn score(document: &Document) -> (i64, String, String, String) {
     };
     (points, priority.into(), sev, cve_id(document))
 }
-fn response_row(name: &str, document: &Document) -> Value {
-    let mut data = db::bson_json(document);
-    if let Some(object) = data.as_object_mut() {
-        object.remove("_id");
+
+fn is_blank(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => true,
+        Some(Value::String(value)) => value.trim().is_empty(),
+        Some(Value::Array(values)) => values.is_empty(),
+        Some(Value::Object(values)) => values.is_empty(),
+        Some(_) => false,
     }
+}
+
+fn text_value(value: Option<&Value>) -> Option<String> {
+    match value {
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            (!value.is_empty()).then(|| value.to_owned())
+        }
+        Some(Value::Number(value)) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn unique_join(values: impl IntoIterator<Item = String>) -> Option<String> {
+    let mut seen = HashSet::new();
+    let values = values
+        .into_iter()
+        .filter(|value| !value.trim().is_empty())
+        .filter(|value| seen.insert(value.clone()))
+        .collect::<Vec<_>>();
+    (!values.is_empty()).then(|| values.join(", "))
+}
+
+fn normalized_document(document: &Document) -> Value {
+    let mut data = db::bson_json(document);
+    let Some(object) = data.as_object_mut() else {
+        return data;
+    };
+    object.remove("_id");
+
+    let details = object.get("details").cloned().unwrap_or(Value::Null);
+    let affected_items = details
+        .get("affected")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut vendors = Vec::new();
+    let mut products = Vec::new();
+    let mut affected = Vec::new();
+    for item in &affected_items {
+        if let Some(item) = item.as_object() {
+            let vendor = text_value(item.get("vendor"));
+            let product = text_value(item.get("product"));
+            if let Some(value) = vendor.clone() {
+                vendors.push(value);
+            }
+            if let Some(value) = product.clone() {
+                products.push(value);
+            }
+            let combined = [vendor, product]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !combined.is_empty() {
+                affected.push(combined);
+            } else if let Some(package) = text_value(item.get("packageName")) {
+                affected.push(package);
+            }
+        } else if let Some(value) = text_value(Some(item)) {
+            affected.push(value);
+        }
+    }
+    if let Some(values) = details.get("affected_products").and_then(Value::as_array) {
+        affected.extend(values.iter().filter_map(|value| text_value(Some(value))));
+    }
+
+    if is_blank(object.get("description")) {
+        let description = details
+            .get("descriptions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|item| text_value(item.get("value").or_else(|| item.get("description"))))
+            .collect::<Vec<_>>();
+        let description = if description.is_empty() {
+            ["description", "summary", "overview"]
+                .iter()
+                .filter_map(|key| text_value(details.get(*key)))
+                .collect::<Vec<_>>()
+        } else {
+            description
+        };
+        if !description.is_empty() {
+            object.insert("description".into(), Value::String(description.join("\n")));
+        }
+    }
+    if is_blank(object.get("vendor")) {
+        if let Some(vendor) = unique_join(vendors) {
+            object.insert("vendor".into(), Value::String(vendor));
+        }
+    }
+    if is_blank(object.get("product")) {
+        if let Some(product) = unique_join(products) {
+            object.insert("product".into(), Value::String(product));
+        }
+    }
+    if is_blank(object.get("affected")) {
+        let mut seen = HashSet::new();
+        affected.retain(|value| seen.insert(value.clone()));
+        if !affected.is_empty() {
+            object.insert("affected".into(), json!(affected));
+        }
+    }
+    if is_blank(object.get("cve")) {
+        if let Some(code) = text_value(object.get("code")) {
+            let cve = if code.to_ascii_uppercase().starts_with("CVE-") {
+                code.to_ascii_uppercase()
+            } else {
+                format!("CVE-{code}")
+            };
+            object.insert("cve".into(), Value::String(cve));
+        }
+    }
+    data
+}
+
+fn response_row(name: &str, document: &Document) -> Value {
+    let data = normalized_document(document);
     let (selection_score, patch_priority, _, _) = score(document);
     json!({"collection":name,"selection_id":db::id_string(document),"document":data,"selection_score":selection_score,"patch_priority":patch_priority})
 }
@@ -242,9 +365,7 @@ pub(crate) async fn query_rows(
     let Some((source_name, mut pipeline)) = view_spec(state, name).await? else {
         return Ok((0, Vec::new()));
     };
-    if source_name == "cve" {
-        pipeline.clear();
-    } else if let Some(project) = pipeline
+    if let Some(project) = pipeline
         .first_mut()
         .and_then(|stage| stage.get_document_mut("$project").ok())
     {
@@ -255,6 +376,9 @@ pub(crate) async fn query_rows(
             "published_at",
             "updated_at",
             "cve_ids",
+            "code",
+            "cve",
+            "severity",
             "title",
             "summary",
             "description",
@@ -522,7 +646,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 match query_rows(state, name, filter, (page - 1) * size, size as i64).await {
                     Ok((total, documents)) => view::json_response(
                         StatusCode::OK,
-                        json!({"data":documents.iter().map(|d|json!({"selection_id":db::id_string(d),"document":db::bson_json(d)})).collect::<Vec<_>>(),"page":page,"page_size":size,"total":total,"pages":((total+size-1)/size).max(1)}),
+                        json!({"data":documents.iter().map(|d|json!({"selection_id":db::id_string(d),"document":normalized_document(d)})).collect::<Vec<_>>(),"page":page,"page_size":size,"total":total,"pages":((total+size-1)/size).max(1)}),
                     ),
                     Err(_) => view::error(
                         StatusCode::SERVICE_UNAVAILABLE,
@@ -533,4 +657,50 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalized_cve_document_restores_display_fields() {
+        let document = doc! {
+            "_id": "cve:2026-1234",
+            "code": "2026-1234",
+            "details": {
+                "descriptions": vec![doc! {"value": "A useful description."}],
+                "affected": vec![doc! {"vendor": "Acme", "product": "Widget"}],
+            },
+        };
+
+        let normalized = normalized_document(&document);
+        assert_eq!(normalized["description"], "A useful description.");
+        assert_eq!(normalized["vendor"], "Acme");
+        assert_eq!(normalized["product"], "Widget");
+        assert_eq!(normalized["affected"], json!(["Acme Widget"]));
+        assert_eq!(normalized["cve"], "CVE-2026-1234");
+        assert!(normalized.get("_id").is_none());
+    }
+
+    #[test]
+    fn normalized_cve_document_keeps_existing_view_fields() {
+        let document = doc! {
+            "code": "2026-1234",
+            "description": "View description",
+            "affected": ["View vendor View product"],
+            "vendor": "View vendor",
+            "product": "View product",
+            "details": {
+                "descriptions": vec![doc! {"value": "Raw description"}],
+                "affected": vec![doc! {"vendor": "Raw vendor", "product": "Raw product"}],
+            },
+        };
+
+        let normalized = normalized_document(&document);
+        assert_eq!(normalized["description"], "View description");
+        assert_eq!(normalized["affected"], json!(["View vendor View product"]));
+        assert_eq!(normalized["vendor"], "View vendor");
+        assert_eq!(normalized["product"], "View product");
+    }
 }
