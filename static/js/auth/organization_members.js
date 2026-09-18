@@ -41,7 +41,9 @@
             const roleLabels = {admin: t('Administrator'), sub_admin: t('Sub-admin'), user: t('User')};
             role.textContent = roleLabels[item.role] || t('User');
             const email = document.createElement('td');
-            email.textContent = item.email || t('Not provided');
+            email.textContent = item.auth_source === 'account_hub'
+                ? (item.account_hub_email || t('Not provided'))
+                : (item.email || t('Not provided'));
             const status = document.createElement('td');
             status.textContent = item.disabled ? t('Disabled') : t('Enabled');
             status.className = item.disabled ? 'text-danger' : 'text-success';
