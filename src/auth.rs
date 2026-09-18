@@ -195,6 +195,34 @@ fn account_hub_email_from_data(data: &Value) -> Option<String> {
     (!email.is_empty() && valid_email(&email)).then_some(email)
 }
 
+fn account_hub_email_from_access_token(
+    access_token: &str,
+    expected_uid: &str,
+    expected_username: &str,
+) -> Option<String> {
+    let payload = access_token.split('.').nth(1)?;
+    let payload = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let claims: Value = serde_json::from_slice(&payload).ok()?;
+    let claim_uid = claims
+        .get("uid")
+        .or_else(|| claims.get("userId"))
+        .map(value_string)
+        .unwrap_or_default();
+    if claim_uid != expected_uid {
+        return None;
+    }
+    let claim_username = claims
+        .get("username")
+        .or_else(|| claims.get("userName"))
+        .or_else(|| claims.get("account"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !claim_username.eq_ignore_ascii_case(expected_username) {
+        return None;
+    }
+    account_hub_email_from_data(&claims)
+}
+
 fn bson_strings(values: &[String]) -> Bson {
     Bson::Array(values.iter().cloned().map(Bson::String).collect())
 }
@@ -560,7 +588,8 @@ async fn hub_login(state: &AppState, ctx: &ReqCtx) -> Response {
             StatusCode::UNAUTHORIZED,
         );
     }
-    let hub_email = account_hub_email_from_data(data);
+    let hub_email = account_hub_email_from_data(data)
+        .or_else(|| account_hub_email_from_access_token(access, &uid, hub_username));
     let hub_profile = account_hub_profile_fields(data, &state.cfg.account_hub_required_role);
     let coll = db::collection(&state.web, "auth");
     let by_uid = coll
@@ -1210,6 +1239,27 @@ mod tests {
         assert_eq!(account_hub_email_from_data(&json!({"email":""})), None);
         assert_eq!(
             account_hub_email_from_data(&json!({"email":"not-an-email"})),
+            None
+        );
+    }
+
+    #[test]
+    fn account_hub_email_can_fall_back_to_a_matching_access_token_claim() {
+        let claims = URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&json!({
+                "uid": 271,
+                "username": "s2487",
+                "email": "Ben.Chan@Example.com"
+            }))
+            .unwrap(),
+        );
+        let token = format!("header.{claims}.signature");
+        assert_eq!(
+            account_hub_email_from_access_token(&token, "271", "s2487"),
+            Some("ben.chan@example.com".into())
+        );
+        assert_eq!(
+            account_hub_email_from_access_token(&token, "272", "s2487"),
             None
         );
     }
