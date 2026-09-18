@@ -228,17 +228,17 @@ async fn hub_login(state: &AppState, ctx: &ReqCtx) -> Response {
             StatusCode::UNAUTHORIZED,
         );
     }
-    let mut fields = vec![("username", username.as_str()), ("password", "")];
     let encoded = STANDARD.encode(password.as_bytes());
-    fields[1].1 = &encoded;
     let captcha = ctx.field("captchaVerification");
+    let mut payload = json!({"username":username,"password":encoded});
     if !captcha.is_empty() {
-        fields.push(("captchaVerification", &captcha));
+        payload["captchaVerification"] = json!(captcha);
     }
     let login = state
         .http
         .post(&state.cfg.account_hub_login_url)
-        .form(&fields)
+        .header(header::ACCEPT, "application/json")
+        .json(&payload)
         .send()
         .await;
     let Ok(login) = login else {
@@ -257,6 +257,14 @@ async fn hub_login(state: &AppState, ctx: &ReqCtx) -> Response {
             StatusCode::UNAUTHORIZED,
         );
     }
+    let cookie_header = login
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .filter_map(|value| value.split(';').next())
+        .collect::<Vec<_>>()
+        .join("; ");
     let payload: Value = match login.json().await {
         Ok(v) => v,
         Err(_) => {
@@ -298,12 +306,21 @@ async fn hub_login(state: &AppState, ctx: &ReqCtx) -> Response {
             StatusCode::UNAUTHORIZED,
         );
     }
-    let check = state
+    let mut check_request = state
         .http
         .get(&state.cfg.account_hub_token_check_url)
-        .query(&[("accessToken", access), ("refreshToken", refresh)])
-        .send()
-        .await;
+        .bearer_auth(access);
+    if state
+        .cfg
+        .account_hub_token_check_url
+        .contains("/token/check")
+    {
+        check_request = check_request.query(&[("accessToken", access), ("refreshToken", refresh)]);
+    }
+    if !cookie_header.is_empty() {
+        check_request = check_request.header(header::COOKIE, cookie_header);
+    }
+    let check = check_request.send().await;
     let Ok(check) = check else {
         return hub_error(
             state,
@@ -343,21 +360,19 @@ async fn hub_login(state: &AppState, ctx: &ReqCtx) -> Response {
         .get("data")
         .filter(|v| v.is_object())
         .unwrap_or(&claims);
-    let uid = data.get("uid").map(value_string).unwrap_or_default();
+    let uid = data
+        .get("uid")
+        .or_else(|| data.get("userId"))
+        .map(value_string)
+        .unwrap_or_default();
     let hub_username = data
         .get("username")
+        .or_else(|| data.get("userName"))
+        .or_else(|| data.get("account"))
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim();
-    let role_ok = data
-        .get("roles")
-        .and_then(Value::as_array)
-        .is_some_and(|roles| {
-            roles.iter().any(|role| {
-                role.get("roleName").and_then(Value::as_str)
-                    == Some(state.cfg.account_hub_required_role.as_str())
-            })
-        });
+    let role_ok = has_required_role(data, &state.cfg.account_hub_required_role);
     if !role_ok {
         let message = format!("{} role is required.", state.cfg.account_hub_required_role);
         return hub_error(state, ctx, &message, StatusCode::FORBIDDEN);
@@ -502,14 +517,43 @@ async fn hub_login(state: &AppState, ctx: &ReqCtx) -> Response {
 }
 fn business_success(value: &Value) -> bool {
     matches!(value.get("code"), None | Some(Value::Null))
-        || matches!(value.get("code"),Some(Value::Number(n)) if n.as_i64()==Some(0)||n.as_i64()==Some(200))
-        || matches!(value.get("code"),Some(Value::String(s)) if s=="0"||s=="200")
+        || matches!(value.get("code"),Some(Value::Number(n)) if n.as_i64().is_some_and(|code| matches!(code, 0 | 200 | 1000)))
+        || matches!(value.get("code"),Some(Value::String(s)) if matches!(s.as_str(), "0" | "200" | "1000"))
 }
 fn value_string(value: &Value) -> String {
     value
         .as_str()
         .map(str::to_owned)
         .unwrap_or_else(|| value.to_string())
+}
+fn has_required_role(data: &Value, required: &str) -> bool {
+    let required = required.trim();
+    if required.is_empty() {
+        return false;
+    }
+    ["roles", "role_names", "systemRole", "systemRoles"]
+        .into_iter()
+        .flat_map(|key| data.get(key).into_iter())
+        .flat_map(|value| value.as_array().into_iter().flatten())
+        .filter_map(|role| {
+            role.as_str().map(str::to_owned).or_else(|| {
+                role.get("roleName")
+                    .or_else(|| role.get("name"))
+                    .or_else(|| role.get("label"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+        })
+        .map(|role| role.trim().to_owned())
+        .any(|role| {
+            role.eq_ignore_ascii_case(required)
+                || role
+                    .strip_prefix(required)
+                    .is_some_and(|suffix| suffix.starts_with(['-', '_', '/', ' ']))
+                || role
+                    .split('/')
+                    .any(|part| part.trim().eq_ignore_ascii_case(required))
+        })
 }
 fn hub_error(state: &AppState, ctx: &ReqCtx, message: &str, status: StatusCode) -> Response {
     let mut r = render(state, ctx, "auth/login.html", json!({"error":message}));
@@ -801,4 +845,25 @@ async fn admin_api(state: &AppState, ctx: &ReqCtx) -> Response {
         return view::json_response(StatusCode::OK, json!({"data":public_user(&updated)}));
     }
     view::error(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn account_hub_role_matches_system_role_suffix() {
+        let data = json!({
+            "roles": [{"roleName": "user"}],
+            "systemRole": ["accounthub-user", "CVE-SYSTEM-admin"]
+        });
+        assert!(has_required_role(&data, "CVE-SYSTEM"));
+        assert!(!has_required_role(&data, "OTHER-SYSTEM"));
+    }
+
+    #[test]
+    fn account_hub_success_code_includes_current_api() {
+        assert!(business_success(&json!({"code":1000})));
+        assert!(!business_success(&json!({"code":2010})));
+    }
 }

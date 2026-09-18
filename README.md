@@ -10,7 +10,7 @@ Rust implementation of the cybersecurity portal in the neighboring `webserver` p
 
 `PORT` changes the listening port. `WEBSERVER_ROOT` changes the folder containing `templates`, `static`, and `config`. `WEB_DATABASE` and `VULNERABILITIES_DATABASE` can point to separate test databases. `APP_CONFIG` selects a different JSON config file. Environment variables override JSON settings.
 
-The app creates or repairs the configured local bootstrap administrator at startup. Account Hub login is enabled with `ACCOUNT_HUB_ENABLED=true` and its two configured URLs. Account Hub users must have the configured `roleName` (set `ACCOUNT_HUB_REQUIRED_ROLE` in `.env`; it defaults to `CVE-SYSTEM`). Local administrator sign-in remains at `/login/local`. Set `RUST_SCHEDULER_ENABLED=true` after validating subscription filters and SMTP output in your environment.
+The app creates or repairs the configured local bootstrap administrator at startup. Account Hub login is enabled with `ACCOUNT_HUB_ENABLED=true` and its two configured URLs. For the current Account Hub deployment, use the `/accounthub-api-gateway/auth/user/oauth/login` login API and `/accounthub-api-gateway/user/open-api/v1/user/view/info` user-info API. Account Hub users must have the configured system role (set `ACCOUNT_HUB_REQUIRED_ROLE` in `.env`; it defaults to `CVE-SYSTEM` and accepts values such as `CVE-SYSTEM-admin`). Local administrator sign-in remains at `/login/local`. Set `RUST_SCHEDULER_ENABLED=true` after validating subscription filters and SMTP output in your environment.
 
 ## Features
 
