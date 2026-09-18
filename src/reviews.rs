@@ -392,6 +392,11 @@ pub(crate) async fn query_rows(
             "impacts",
             "source",
         ] {
+            if source_name == "cve"
+                && matches!(field, "description" | "affected" | "impacts" | "cve")
+            {
+                continue;
+            }
             project.insert(field, 1);
         }
     }
