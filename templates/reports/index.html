@@ -1,0 +1,127 @@
+{% extends 'layouts/base.html' %}
+{% block title %}{{ t('Reports') }}{% endblock %}
+
+{% block content %}
+<div class="container">
+    <div class="mb-4">
+        <h2 class="mb-1"><i class="bi bi-file-earmark-text me-2"></i>{{ t('Reports') }}</h2>
+        <p class="text-muted mb-0">{{ t('Generate English CVE reports, then translate completed reports into Traditional or Simplified Chinese as separate history rows.') }}</p>
+    </div>
+
+    <div id="message" class="alert d-none" role="alert"></div>
+    <div class="card shadow-sm border-0 mb-4">
+        <div class="card-body">
+            <h5 class="card-title">{{ t('Generate Report') }}</h5>
+            <form id="generate-form">
+                <div class="row g-3">
+                    <div class="col-md-3">
+                        <label for="generation-mode" class="form-label">{{ t('Generation Mode') }}</label>
+                        <select id="generation-mode" class="form-select">
+                            <option value="enriched_weekly" selected>{{ t('Enriched Weekly') }}</option>
+                            <option value="template">{{ t('Fixed Template') }}</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label for="json-file" class="form-label">{{ t('Optional exported JSON array') }}</label>
+                        <input id="json-file" type="file" class="form-control" accept=".json,application/json">
+                        <div class="form-text">{{ t('Leave empty to use current Vulnerability Reviews selections.') }}</div>
+                    </div>
+                    <div class="col-12" id="search-prompt-wrap">
+                        <label for="search-prompt" class="form-label">{{ t('Enrichment search hint (optional)') }}</label>
+                        <textarea id="search-prompt" class="form-control" rows="2" maxlength="200" placeholder="{{ t('e.g. Exchange Server RCE patch guidance') }}"></textarea>
+                        <div class="form-text">{{ t('Applied to each selected CVE during Tavily enrichment. Does not discover new CVEs. Max 200 characters.') }}</div>
+                    </div>
+                </div>
+                <div class="d-flex justify-content-between align-items-center mt-3">
+                    <span id="selection-count" class="text-muted small"></span>
+                    <div class="d-flex gap-2">
+                        <button id="purge-search-cache-btn" type="button" class="btn btn-outline-danger btn-sm d-none">
+                            <i class="bi bi-trash me-1"></i>{{ t('Purge Search Cache') }}
+                        </button>
+                        <button id="purge-evidence-cache-btn" type="button" class="btn btn-outline-danger btn-sm d-none">
+                            <i class="bi bi-trash me-1"></i>{{ t('Purge Evidence Cache') }}
+                        </button>
+                        <button id="generate-btn" class="btn btn-primary" type="submit">
+                            <i class="bi bi-stars me-1"></i>{{ t('Generate HTML') }}
+                        </button>
+                    </div>
+                </div>
+                <div id="enriched-cache-help" class="form-text d-none">
+                    {{ t('Purge Search Cache clears cached Tavily results (search_enrichment_cache). Purge Evidence Cache clears cached LLM evidence extractions (source_evidence_cache). The next enriched weekly run will repeat any purged API calls.') }}
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <h5>{{ t('Report History') }}</h5>
+    <div class="card shadow-sm border-0 overflow-hidden">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-dark">
+                    <tr><th>{{ t('Created') }}</th><th>{{ t('Language') }}</th><th>{{ t('Sources') }}</th><th>{{ t('Generator') }}</th><th>{{ t('Status') }}</th><th>{{ t('Actions') }}</th></tr>
+                </thead>
+                <tbody id="job-rows"></tbody>
+            </table>
+        </div>
+        <div id="empty" class="text-center text-muted py-5 d-none">{{ t('No report jobs yet.') }}</div>
+    </div>
+</div>
+
+<div class="modal fade" id="preview-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header"><h5 class="modal-title">{{ t('Report Preview') }}</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>
+            <div class="modal-body p-0"><iframe id="preview-frame" title="{{ t('Report preview') }}" style="width:100%;height:70vh;border:0"></iframe></div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="log-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">{{ t('Report Job Log') }}</h5>
+                <button class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <pre id="log-content" class="small mb-0" style="white-space:pre-wrap"></pre>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="translate-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">{{ t('Translate Report') }}</h5>
+                <button class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <label for="translate-language" class="form-label">{{ t('Language') }}</label>
+                <select id="translate-language" class="form-select">
+                    <option value="zh">{{ t('Traditional Chinese') }}</option>
+                    <option value="ch">{{ t('Simplified Chinese') }}</option>
+                </select>
+                <div id="translate-status" class="form-text mt-2"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{ t('Cancel') }}</button>
+                <button id="translate-confirm-btn" type="button" class="btn btn-primary">{{ t('Confirm Translation') }}</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+{% block script %}
+<script id="page-config" type="application/json">{{ {
+    'jobsUrl': url_for('report.get_report_jobs'),
+    'purgeEvidenceCacheUrl': url_for('report.purge_report_evidence_cache'),
+    'purgeSearchCacheUrl': url_for('report.purge_report_search_cache'),
+    'cancelUrlTemplate': url_for('report.cancel_report_job', job_id='__JOB_ID__'),
+    'deleteUrlTemplate': url_for('report.delete_report_job', job_id='__JOB_ID__'),
+    'logsUrlTemplate': url_for('report.get_report_job_logs', job_id='__JOB_ID__'),
+    'translationsUrlTemplate': url_for('report.translate_report_job', job_id='__JOB_ID__'),
+}|tojson }}</script>
+<script src="{{ url_for('static', filename='js/reports/index.js') }}"></script>
+{% endblock %}

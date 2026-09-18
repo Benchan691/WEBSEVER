@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="{{ newsletter.language }}">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ newsletter.title }}</title>
+    <style>
+        body { font-family: Tahoma, Arial, sans-serif; font-size: 12px; line-height: 1.5; color: #111; }
+        h1 { text-align: center; font-size: 22px; }
+        h2 { text-align: center; font-size: 16px; font-weight: normal; }
+        h3 { margin: 22px 0 8px; }
+        h4 { margin: 14px 0 4px; }
+        table { width: 100%; border-collapse: collapse; margin-bottom: 1em; }
+        th, td { border: 1px solid #222; padding: 5px; text-align: left; vertical-align: top; }
+        th { font-weight: bold; }
+        .template-extra { margin-bottom: 16px; }
+        .metadata dt { font-weight: bold; float: left; clear: left; width: 190px; }
+        .metadata dd { margin-left: 200px; }
+    </style>
+</head>
+<body>
+    <p>{{ newsletter.labels.greeting }}</p>
+    {% if newsletter.extra %}<div class="template-extra">{{ newsletter.extra }}</div>{% endif %}
+
+    <h1>{{ newsletter.title }}</h1>
+    {% if newsletter.subtitle %}<h2>{{ newsletter.subtitle }}</h2>{% endif %}
+
+    {% if newsletter.security_fixes %}
+    <h3>Security Fixes</h3>
+    <ul>{% for item in newsletter.security_fixes %}<li>{{ item }}</li>{% endfor %}</ul>
+    {% endif %}
+
+    {% if newsletter.fixed_issues %}
+    <h3>Fixed Issues</h3>
+    {% for group in newsletter.fixed_issues %}
+    <h4>{{ group['category'] }}</h4>
+    <ul>{% for item in group['items'] %}<li>{{ item }}</li>{% endfor %}</ul>
+    {% endfor %}
+    {% endif %}
+
+    {% if newsletter.packages %}
+    <h3>Packages</h3>
+    <table>
+        <thead><tr><th>Package</th><th>Version</th></tr></thead>
+        <tbody>{% for package in newsletter.packages %}<tr><td>{{ package.name }}</td><td>{{ package.version }}</td></tr>{% endfor %}</tbody>
+    </table>
+    {% endif %}
+
+    {% if newsletter.patch_installation_url %}
+    <h3>Patch Installation</h3>
+    <p><a href="{{ newsletter.patch_installation_url }}" rel="noopener">{{ newsletter.patch_installation_url }}</a></p>
+    {% endif %}
+
+    {% if newsletter.open_source_repo_url %}
+    <h3>Open Source Repository</h3>
+    <p><a href="{{ newsletter.open_source_repo_url }}" rel="noopener">{{ newsletter.open_source_repo_url }}</a></p>
+    {% endif %}
+
+    {% if newsletter.reference_links %}
+    <h3>Reference Links</h3>
+    <ul>{% for link in newsletter.reference_links %}<li><a href="{{ link }}" rel="noopener">{{ link }}</a></li>{% endfor %}</ul>
+    {% endif %}
+
+    {% if newsletter.product_release or newsletter.codename or newsletter.third_party_patch_level or newsletter.general_availability %}
+    <h3>Release Metadata</h3>
+    <dl class="metadata">
+        {% if newsletter.product_release %}<dt>Product Release</dt><dd>{{ newsletter.product_release }}</dd>{% endif %}
+        {% if newsletter.codename %}<dt>Codename</dt><dd>{{ newsletter.codename }}</dd>{% endif %}
+        {% if newsletter.third_party_patch_level %}<dt>Third-Party Patch Level</dt><dd>{{ newsletter.third_party_patch_level }}</dd>{% endif %}
+        {% if newsletter.general_availability %}<dt>General Availability</dt><dd>{{ newsletter.general_availability }}</dd>{% endif %}
+    </dl>
+    {% endif %}
+
+    <p>{{ newsletter.footer }}</p>
+</body>
+</html>

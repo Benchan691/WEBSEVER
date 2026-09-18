@@ -1,0 +1,72 @@
+{% extends 'layouts/base.html' %}
+{% block title %}{{ t('Sub-admin Management') }}{% endblock %}
+{% block content %}
+<div class="container" style="max-width: 1040px;">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+            <h2 class="mb-1"><i class="bi bi-person-gear me-2"></i>{{ t('Sub-admin Management') }}</h2>
+            <p class="text-muted mb-0">{{ t('Create and manage isolated administrator workspaces.') }}</p>
+        </div>
+        <button id="add-sub-admin" class="btn btn-primary" type="button"><i class="bi bi-plus-lg me-1"></i>{{ t('Add sub-admin') }}</button>
+    </div>
+
+    <div id="message" class="alert d-none" role="alert"></div>
+    <div class="card shadow-sm border-0 overflow-hidden">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-dark">
+                    <tr><th>{{ t('Username') }}</th><th>{{ t('Email') }}</th><th>{{ t('Status') }}</th><th>{{ t('Managed delivery') }}</th><th>{{ t('Actions') }}</th></tr>
+                </thead>
+                <tbody id="sub-admin-rows"></tbody>
+            </table>
+        </div>
+        <div id="loading" class="text-center text-muted py-5">{{ t('Loading sub-admins...') }}</div>
+        <div id="empty" class="text-center text-muted py-5 d-none">{{ t('No sub-admins yet.') }}</div>
+    </div>
+</div>
+
+<div class="modal fade" id="sub-admin-modal" tabindex="-1">
+    <div class="modal-dialog">
+        <form id="sub-admin-form" class="modal-content">
+            <div class="modal-header">
+                <h5 id="modal-title" class="modal-title">{{ t('Add sub-admin') }}</h5>
+                <button class="btn-close" data-bs-dismiss="modal" aria-label="{{ t('Close') }}" type="button"></button>
+            </div>
+            <div class="modal-body">
+                <div id="modal-message" class="alert d-none" role="alert"></div>
+                <div class="mb-3">
+                    <label class="form-label" for="sub-admin-username">{{ t('Username') }}</label>
+                    <input id="sub-admin-username" class="form-control" type="text" autocomplete="username" required>
+                    <div id="username-help" class="form-text">{{ t('Usernames cannot be changed after creation.') }}</div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label" for="sub-admin-email">{{ t('Email (optional)') }}</label>
+                    <input id="sub-admin-email" class="form-control" type="email" autocomplete="email">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label" for="sub-admin-password">{{ t('Password') }}</label>
+                    <input id="sub-admin-password" class="form-control" type="password" autocomplete="new-password" maxlength="72">
+                    <div id="password-help" class="form-text">{{ t('Required when creating a sub-admin; leave blank when editing to keep the current password.') }}</div>
+                </div>
+                <div class="form-check form-switch mb-2">
+                    <input id="sub-admin-disabled" class="form-check-input" type="checkbox">
+                    <label class="form-check-label" for="sub-admin-disabled">{{ t('Disabled') }}</label>
+                </div>
+                <div class="form-check form-switch">
+                    <input id="sub-admin-pause" class="form-check-input" type="checkbox">
+                    <label class="form-check-label" for="sub-admin-pause">{{ t('Pause managed subscriptions when disabled') }}</label>
+                    <div class="form-text">{{ t('Scheduled deliveries continue while disabled unless this is enabled.') }}</div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal" type="button">{{ t('Cancel') }}</button>
+                <button class="btn btn-primary" type="submit">{{ t('Save') }}</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
+{% block script %}
+<script id="sub-admin-page-config" type="application/json">{{ {'subAdminsUrl': url_for('auth.get_sub_admins')}|tojson }}</script>
+<script src="{{ url_for('static', filename='js/auth/sub_admins_legacy.js', v='20260914-1') }}"></script>
+{% endblock %}

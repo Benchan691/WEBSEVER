@@ -1,0 +1,55 @@
+<!DOCTYPE html>        
+<html>
+	<head>
+		<style>
+			body{
+				font-family:Tahoma;
+				font-size:12 px;
+			}
+			table,
+			th,
+			td{
+				margin-bottom: 1em;
+				border: 1px solid black;
+				overflow-x: auto;
+			}
+			div.indent{
+				margin-left:2em;
+			}
+		</style>
+	</head>
+	<body>
+		<h2 style="text-align: center;"><b>Windows NTFS Remote Code Execution Vulnerability</b></h2>
+		<p><b>Overview:</b></p>
+		<div style="margin-left:2em;">
+			<p>The vulnerability allows a remote attacker to execute arbitrary code on the target system.</p>
+			<p>The vulnerability exists due to a boundary error in Windows NTFS. A remote attacker can trick the victim into mounting a specially crafted VHD, trigger a heap-based buffer overflow and execute arbitrary code on the target system.</p>
+			<p>Successful exploitation of this vulnerability may result in complete compromise of vulnerable system.</p>
+			<p>Note, the vulnerability is being actively exploited in the wild.</p>
+		</div>
+		<div>
+			<p><b>Affected system:</b></p>
+			<ul>
+				<li>Windows: 
+					10 21H2 10.0.19041.3920 - 11 24H2 10.0.26100.3194					
+				</li>
+				<li>Windows Server: 
+					2008 R2 SP1 - 2025 10.0.26100.3194					
+				</li>
+			</ul>
+			<p><b>CVEs:</b></p>
+			<ul>
+				<li><a href=http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2025-24993>CVE-2025-24993</a></li>
+			</ul>
+			<p><b>Recommendations:</b></p>
+			<p>Please refer to vender's website:</p>
+			<ul>
+				<li><a href="https://msrc.microsoft.com/update-guide/en-US/advisory/CVE-2025-24993">https://msrc.microsoft.com/update-guide/en-US/advisory/CVE-2025-24993</a></li>
+			</ul>
+			<p><b>References:</b></p>
+			<ul>
+				<li><a href='https://www.zero-day.cz/database/976/'>https://www.zero-day.cz/database/976/</a></li>
+			</ul>
+		</div>
+	</body>
+</html>

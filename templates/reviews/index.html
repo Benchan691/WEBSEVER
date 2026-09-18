@@ -1,0 +1,221 @@
+{% extends 'layouts/base.html' %}
+{% block title %}{{ t('Vulnerability Reviews') }}{% endblock %}
+{% block styles %}<link href="{{ url_for('static', filename='css/reviews.css') }}" rel="stylesheet">{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-3 px-lg-4">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-4">
+        <div>
+            <h2 class="mb-1"><i class="bi bi-shield-check me-2"></i>{{ t('Vulnerability Reviews') }}</h2>
+            <p class="text-muted mb-0">{{ t('Filter review records and prepare selections for reports.') }}</p>
+        </div>
+        <div class="d-flex flex-wrap align-items-center gap-2">
+            <span id="selected-count" class="badge text-bg-primary"></span>
+            <button id="clear-selection-btn" class="btn btn-outline-danger btn-sm" disabled>
+                <i class="bi bi-x-circle me-1"></i>{{ t('Clear Selection') }}
+            </button>
+            <button id="export-btn" class="btn btn-success btn-sm" disabled>
+                <i class="bi bi-download me-1"></i>{{ t('Export JSON') }}
+            </button>
+            <a id="generate-report-btn" class="btn btn-primary btn-sm disabled" aria-disabled="true" href="{{ url_for('report.reports') }}">
+                <i class="bi bi-stars me-1"></i>{{ t('Generate HTML') }}
+            </a>
+            <button id="refresh-btn" class="btn btn-outline-secondary btn-sm">
+                <i class="bi bi-arrow-clockwise me-1"></i>{{ t('Refresh') }}
+            </button>
+        </div>
+    </div>
+
+    <form id="global-filter-form" class="card shadow-sm border-0 mb-4 review-filter-card">
+        <div class="card-body">
+            <div class="row g-3">
+                <div class="col-12 col-xl-4">
+                    <div class="review-filter-group">
+                        <div class="review-filter-group-title">
+                            <i class="bi bi-search text-primary"></i>
+                            <span>{{ t('Keyword') }}</span>
+                        </div>
+                        <label for="filter-search" class="form-label">{{ t('Search keyword') }}</label>
+                        <input id="filter-search" name="search" class="form-control" placeholder="{{ t('Search by CVE, title, vendor, or product') }}">
+                        <div class="form-text">{{ t('Matches CVE ID, title, vendor, product, and related details.') }}</div>
+                    </div>
+                </div>
+                <div class="col-12 col-xl-4">
+                    <div class="review-filter-group">
+                        <div class="review-filter-group-title">
+                            <i class="bi bi-exclamation-triangle text-primary"></i>
+                            <span>{{ t('Severity') }}</span>
+                        </div>
+                        <div class="severity-check-grid" aria-describedby="filter-status-help">
+                            <div class="form-check">
+                                <input id="filter-status-critical" name="status" class="form-check-input" type="checkbox" value="Critical">
+                                <label class="form-check-label severity-check-label" for="filter-status-critical">{{ t('Critical') }}</label>
+                            </div>
+                            <div class="form-check">
+                                <input id="filter-status-high" name="status" class="form-check-input" type="checkbox" value="High">
+                                <label class="form-check-label severity-check-label" for="filter-status-high">{{ t('High') }}</label>
+                            </div>
+                            <div class="form-check">
+                                <input id="filter-status-medium" name="status" class="form-check-input" type="checkbox" value="Medium">
+                                <label class="form-check-label severity-check-label" for="filter-status-medium">{{ t('Medium') }}</label>
+                            </div>
+                            <div class="form-check">
+                                <input id="filter-status-low" name="status" class="form-check-input" type="checkbox" value="Low">
+                                <label class="form-check-label severity-check-label" for="filter-status-low">{{ t('Low') }}</label>
+                            </div>
+                        </div>
+                        <div class="form-check mt-3">
+                            <input id="filter-include-unknown" name="include_unknown" class="form-check-input" type="checkbox" value="true">
+                            <label class="form-check-label" for="filter-include-unknown">{{ t('Include unknown severity') }}</label>
+                        </div>
+                        <div id="filter-status-help" class="form-text">{{ t('Choose one or more severity levels.') }}</div>
+                    </div>
+                </div>
+                <div class="col-12 col-xl-4">
+                    <div class="review-filter-group">
+                        <div class="review-filter-group-title">
+                            <i class="bi bi-clock-history text-primary"></i>
+                            <span>{{ t('Scrape time') }}</span>
+                        </div>
+                        <label for="filter-time-window" class="form-label">{{ t('Time window') }}</label>
+                        <select id="filter-time-window" name="time_window" class="form-select">
+                            <option value="all">{{ t('All time') }}</option>
+                            <option value="daily">{{ t('Today') }}</option>
+                            <option value="week">{{ t('Last 7 days') }}</option>
+                            <option value="custom">{{ t('Custom') }}</option>
+                        </select>
+                        <div class="form-text">{{ t('Limit results to recently scraped review documents.') }}</div>
+                    </div>
+                </div>
+                <div id="filter-custom-window" class="col-12 d-none">
+                    <div class="row g-3">
+                        <div class="col-12 col-md-6">
+                            <label for="filter-start" class="form-label">{{ t('Start') }}</label>
+                            <input id="filter-start" name="start" type="datetime-local" class="form-control">
+                        </div>
+                        <div class="col-12 col-md-6">
+                            <label for="filter-end" class="form-label">{{ t('End') }}</label>
+                            <input id="filter-end" name="end" type="datetime-local" class="form-control">
+                        </div>
+                    </div>
+                </div>
+                <div class="col-12">
+                    <div class="review-filter-group">
+                        <div class="row g-3 align-items-end">
+                            <div class="col-12 col-lg">
+                                <label for="auto-select-count" class="form-label">{{ t('Auto-select top') }}</label>
+                                <div class="input-group">
+                                    <input id="auto-select-count" type="number" class="form-control" min="1" max="500" value="25" aria-label="{{ t('Number of records to auto-select') }}">
+                                    <button id="auto-select-btn" class="btn btn-outline-primary" type="button">
+                                        <i class="bi bi-magic me-1"></i>{{ t('By importance') }}
+                                    </button>
+                                </div>
+                                <div class="form-text">{{ t('Replaces the current selection using the active filters.') }}</div>
+                            </div>
+                            <div class="col-12 col-lg-auto d-flex flex-wrap gap-2">
+                                <button class="btn btn-primary" type="submit">
+                                    <i class="bi bi-search me-1"></i>{{ t('Apply Filter') }}
+                                </button>
+                                <button id="clear-filter-btn" class="btn btn-outline-secondary" type="button">{{ t('Clear') }}</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </form>
+
+    <div id="error-alert" class="alert alert-danger d-none" role="alert"></div>
+    <div id="status-alert" class="alert alert-success d-none" role="status"></div>
+
+    <div id="search-results" class="card shadow-sm border-0">
+        <div class="card-body">
+            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                <h5 id="results-title" class="mb-0">{{ t('CVE Results') }}</h5>
+                <div class="d-flex align-items-center gap-2">
+                    <span id="results-count" class="text-muted small"></span>
+                    <select id="page-size" class="form-select form-select-sm" aria-label="{{ t('Results per page') }}">
+                        <option value="25">{{ t('{n} per page', n=25) }}</option>
+                        <option value="50">{{ t('{n} per page', n=50) }}</option>
+                        <option value="100">{{ t('{n} per page', n=100) }}</option>
+                    </select>
+                </div>
+            </div>
+            <div id="results-loading" class="text-center text-muted py-5 d-none">
+                <div class="spinner-border spinner-border-sm me-2" role="status"></div>{{ t('Searching review collections...') }}
+            </div>
+            <div id="results-empty" class="text-center text-muted py-5 d-none">{{ t('No matching review documents.') }}</div>
+            <div id="results-table-wrap" class="table-responsive d-none">
+                <table class="table table-hover align-middle review-results-table">
+                    <thead>
+                        <tr id="results-head"></tr>
+                    </thead>
+                    <tbody id="results-body"></tbody>
+                </table>
+            </div>
+            <div id="pagination" class="d-flex justify-content-between align-items-center d-none">
+                <button id="previous-page" class="btn btn-outline-secondary btn-sm" type="button">{{ t('Previous') }}</button>
+                <span id="page-label" class="text-muted small"></span>
+                <button id="next-page" class="btn btn-outline-secondary btn-sm" type="button">{{ t('Next') }}</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="document-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 id="document-modal-title" class="modal-title">{{ t('Review Document') }}</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{ t('Close') }}"></button>
+            </div>
+            <div class="modal-body"><pre id="document-json" class="mb-0"></pre></div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="related-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 id="related-modal-title" class="modal-title">{{ t('Related CVE Records') }}</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{ t('Close') }}"></button>
+            </div>
+            <div class="modal-body">
+                <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                    <span id="related-count" class="text-muted small"></span>
+                    <div class="d-flex gap-2">
+                        <button id="related-select-all" type="button" class="btn btn-outline-primary btn-sm">{{ t('Select all') }}</button>
+                        <button id="related-clear" type="button" class="btn btn-outline-secondary btn-sm">{{ t('Clear') }}</button>
+                    </div>
+                </div>
+                <div id="related-empty" class="text-center text-muted py-4 d-none">{{ t('No related CVE records.') }}</div>
+                <div id="related-table-wrap" class="table-responsive">
+                    <table class="table table-hover align-middle related-modal-table">
+                        <thead>
+                            <tr>
+                                <th scope="col">{{ t('Select') }}</th>
+                                <th scope="col">{{ t('Collection') }}</th>
+                                <th scope="col">{{ t('Code / CVE') }}</th>
+                                <th scope="col">{{ t('Title') }}</th>
+                                <th scope="col">{{ t('Severity') }}</th>
+                                <th scope="col">{{ t('Affected') }}</th>
+                                <th scope="col">{{ t('Action') }}</th>
+                            </tr>
+                        </thead>
+                        <tbody id="related-body"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+{% block script %}
+<script id="page-config" type="application/json">{{ {
+    'exportUrl': url_for('review.export_review_documents'),
+    'searchUrl': url_for('review.search_review_documents'),
+    'autoSelectUrl': url_for('review.auto_select_review_documents'),
+}|tojson }}</script>
+<script src="{{ url_for('static', filename='js/reviews/index.js') }}"></script>
+{% endblock %}

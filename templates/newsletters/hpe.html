@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="{{ newsletter.language }}">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ newsletter.title }}</title>
+    <style>
+        body { font-family: Tahoma, Arial, sans-serif; font-size: 12px; line-height: 1.5; color: #111; }
+        h1 { text-align: center; font-size: 22px; }
+        h2 { text-align: center; font-size: 16px; font-weight: normal; }
+        h3 { margin: 22px 0 8px; }
+        .template-extra { margin-bottom: 16px; }
+        .source-text p { margin: 0 0 12px; }
+        .source-text p:last-child { margin-bottom: 0; }
+        .metadata dt { font-weight: bold; float: left; clear: left; width: 190px; }
+        .metadata dd { margin-left: 200px; }
+    </style>
+</head>
+<body>
+    <p>{{ newsletter.labels.greeting }}</p>
+    {% if newsletter.extra %}<div class="template-extra">{{ newsletter.extra }}</div>{% endif %}
+
+    <h1>{{ newsletter.title }}</h1>
+    {% if newsletter.document_subtype %}<h2>{{ newsletter.document_subtype }}</h2>{% endif %}
+
+    {% if newsletter.bulletin_id or newsletter.document_version or newsletter.severity or newsletter.potential_security_impact or newsletter.source_name or newsletter.published_at or newsletter.updated_at %}
+    <h3>Bulletin Information</h3>
+    <dl class="metadata">
+        {% if newsletter.bulletin_id %}<dt>Bulletin ID</dt><dd>{{ newsletter.bulletin_id }}</dd>{% endif %}
+        {% if newsletter.document_version %}<dt>Document Version</dt><dd>{{ newsletter.document_version }}</dd>{% endif %}
+        {% if newsletter.severity %}<dt>Severity</dt><dd>{{ newsletter.severity|join(', ') }}</dd>{% endif %}
+        {% if newsletter.potential_security_impact %}<dt>Potential Security Impact</dt><dd>{{ newsletter.potential_security_impact }}</dd>{% endif %}
+        {% if newsletter.source_name %}<dt>Source</dt><dd>{{ newsletter.source_name }}</dd>{% endif %}
+        {% if newsletter.published_at %}<dt>Release Date</dt><dd>{{ newsletter.published_at }}</dd>{% endif %}
+        {% if newsletter.updated_at %}<dt>Last Updated</dt><dd>{{ newsletter.updated_at }}</dd>{% endif %}
+    </dl>
+    {% endif %}
+
+    {% if newsletter.vulnerability_summary %}
+    <h3>Vulnerability Summary</h3>
+    <div class="source-text">
+        {% for paragraph in newsletter.vulnerability_summary_paragraphs %}<p>{{ paragraph }}</p>{% endfor %}
+    </div>
+    {% endif %}
+
+    {% if newsletter.supported_versions %}
+    <h3>Supported Software Versions</h3>
+    <ul>{% for item in newsletter.supported_versions %}<li>{{ item }}</li>{% endfor %}</ul>
+    {% endif %}
+
+    {% if newsletter.background %}
+    <h3>Background</h3>
+    <div class="source-text">
+        {% for paragraph in newsletter.background_paragraphs %}<p>{{ paragraph }}</p>{% endfor %}
+    </div>
+    {% endif %}
+
+    {% if newsletter.resolution %}
+    <h3>Resolution</h3>
+    <div class="source-text">
+        {% for paragraph in newsletter.resolution_paragraphs %}<p>{{ paragraph }}</p>{% endfor %}
+    </div>
+    {% endif %}
+
+    {% if newsletter.history %}
+    <h3>History</h3>
+    <div class="source-text">
+        {% for paragraph in newsletter.history_paragraphs %}<p>{{ paragraph }}</p>{% endfor %}
+    </div>
+    {% endif %}
+
+    {% if newsletter.reference_ids %}
+    <h3>References</h3>
+    <ul>{% for item in newsletter.reference_ids %}<li>{{ item }}</li>{% endfor %}</ul>
+    {% endif %}
+
+    {% if newsletter.references or newsletter.related_links %}
+    <h3>Reference Links</h3>
+    <ul>
+        {% for link in newsletter.references %}<li><a href="{{ link }}" rel="noopener">{{ link }}</a></li>{% endfor %}
+        {% for link in newsletter.related_links %}<li><a href="{{ link }}" rel="noopener">{{ link }}</a></li>{% endfor %}
+    </ul>
+    {% endif %}
+
+    <p>{{ newsletter.footer }}</p>
+</body>
+</html>

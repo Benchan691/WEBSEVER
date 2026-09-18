@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="{{ html_language }}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ report.title }}</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 1100px; margin: 0 auto; padding: 32px; color: #20242a; line-height: 1.55; }
+        h1 { border-bottom: 3px solid #6f42c1; padding-bottom: 12px; }
+        h2 { margin-top: 28px; color: #45237b; }
+        article { border-left: 4px solid #6f42c1; background: #faf8ff; padding: 16px 20px; margin: 16px 0; }
+        .meta { color: #667085; font-size: 0.9rem; }
+        .blank-section { min-height: 72px; border: 1px dashed #d0d5dd; background: #fff; margin: 8px 0 18px; }
+        li { margin-bottom: 6px; }
+        .item-table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 0.95rem; }
+        .item-table caption { caption-side: top; text-align: left; font-weight: 600; margin-bottom: 8px; color: #45237b; }
+        .item-table th, .item-table td { border: 1px solid #d0d5dd; padding: 8px 10px; text-align: left; vertical-align: top; }
+        .item-table th { background: #f4f0ff; }
+        .newsletter-section { margin-top: 14px; }
+        .newsletter-section p { margin: 6px 0; }
+        .newsletter-section-title { font-weight: 700; color: #45237b; }
+    </style>
+</head>
+<body>
+    <h1>{{ report.title }}</h1>
+    <p class="meta">{{ generated_label }}</p>
+    {% if report.template_mode %}
+    <h2>{{ labels.executive_summary }}</h2>
+    <div class="blank-section">{{ report.executive_summary }}</div>
+    <h2>{{ labels.trends }}</h2>
+    <div class="blank-section">
+        {% if report.trends %}<ul>{% for trend in report.trends %}<li>{{ trend }}</li>{% endfor %}</ul>{% endif %}
+    </div>
+    <table class="item-table">
+        <thead>
+            <tr><th>Title</th><th>Severity</th><th>Source</th></tr>
+        </thead>
+        <tbody>
+            {% for item in report.highlights %}
+            <tr>
+                <td>{{ item.title }}</td>
+                <td>{{ item.severity or '' }}</td>
+                <td>{% if item.source_link %}<a href="{{ item.source_link }}" rel="noopener">{{ item.source_link }}</a>{% endif %}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    <h2>Item Summaries</h2>
+    {% for item in report.highlights %}
+    {% set newsletter = item.newsletter or {} %}
+    {% set item_labels = newsletter.labels or {} %}
+    <article>
+        <h3>{{ item.title }}</h3>
+        <p class="meta">{{ item.code or '' }}{% if item.severity %} | {{ item.severity }}{% endif %}</p>
+        {% if newsletter.overview %}
+        <div class="newsletter-section">
+            <p class="newsletter-section-title">{{ item_labels.overview or 'Overview:' }}</p>
+            <div>{{ newsletter.overview|safe }}</div>
+        </div>
+        {% endif %}
+        {% if newsletter.table and newsletter.table.headers %}
+        <table class="item-table">
+            <thead>
+                <tr>{% for header in newsletter.table.headers %}<th>{{ header }}</th>{% endfor %}</tr>
+            </thead>
+            <tbody>
+                {% for row in newsletter.table.rows or [] %}
+                <tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+        {% if newsletter.show_severity %}
+        <div class="newsletter-section">
+            <p class="newsletter-section-title">{{ item_labels.severity or 'Severity:' }}</p>
+            <ul>{% for value in newsletter.severity or [] %}<li>{{ value }}</li>{% endfor %}</ul>
+        </div>
+        {% endif %}
+        {% if newsletter.show_impacts %}
+        <div class="newsletter-section">
+            <p class="newsletter-section-title">{{ item_labels.impacts or 'Impacts:' }}</p>
+            <ul>{% for value in newsletter.impacts or [] %}<li>{{ value }}</li>{% endfor %}</ul>
+        </div>
+        {% endif %}
+        {% if newsletter.show_affected %}
+        <div class="newsletter-section">
+            <p class="newsletter-section-title">{{ item_labels.affected or labels.affected }}</p>
+            {% if newsletter.affected_table and newsletter.affected_table.headers %}
+            <table class="item-table">
+                <thead>
+                    <tr>{% for header in newsletter.affected_table.headers %}<th>{{ header }}</th>{% endfor %}</tr>
+                </thead>
+                <tbody>
+                    {% for row in newsletter.affected_table.rows or [] %}
+                    <tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <ul>{% for value in newsletter.affected or [] %}<li>{{ value }}</li>{% endfor %}</ul>
+            {% endif %}
+        </div>
+        {% endif %}
+        {% if newsletter.cves %}
+        <div class="newsletter-section">
+            <p class="newsletter-section-title">{{ item_labels.cves or 'CVEs:' }}</p>
+            <ul>{% for value in newsletter.cves %}<li>{{ value }}</li>{% endfor %}</ul>
+        </div>
+        {% endif %}
+        {% if newsletter.show_recommendations and newsletter.recommendations %}
+        <div class="newsletter-section">
+            <p class="newsletter-section-title">{{ item_labels.recommendations or labels.recommended_actions }}</p>
+            <ul>{% for value in newsletter.recommendations %}<li>{{ value }}</li>{% endfor %}</ul>
+        </div>
+        {% endif %}
+        {% if newsletter.references %}
+        <div class="newsletter-section">
+            <p class="newsletter-section-title">{{ item_labels.references or labels.references }}</p>
+            <ul>{% for value in newsletter.references %}<li><a href="{{ value }}" rel="noopener">{{ value }}</a></li>{% endfor %}</ul>
+        </div>
+        {% endif %}
+        {% if newsletter.related_links %}
+        <div class="newsletter-section">
+            <p class="newsletter-section-title">{{ item_labels.related_links or 'Related Links:' }}</p>
+            <ul>{% for value in newsletter.related_links %}<li><a href="{{ value }}" rel="noopener">{{ value }}</a></li>{% endfor %}</ul>
+        </div>
+        {% endif %}
+    </article>
+    {% endfor %}
+    {% else %}
+    <h2>{{ labels.executive_summary }}</h2>
+    <p>{{ report.executive_summary }}</p>
+    <h2>{{ labels.trends }}</h2>
+    <ul>{% for trend in report.trends or [] %}<li>{{ trend }}</li>{% endfor %}</ul>
+    <h2>{{ labels.high_priority_vulnerabilities }}</h2>
+    {% for item in report.highlights %}
+    <article>
+        <h3>{{ item.title }}</h3>
+        <p class="meta">{{ item.code or '' }}{% if item.severity %} | {{ item.severity }}{% endif %}</p>
+        <p>{{ item.summary }}</p>
+        {% if item.table and item.table.headers %}
+        <table class="item-table">
+            {% if item.table.caption %}<caption>{{ item.table.caption }}</caption>{% endif %}
+            <thead>
+                <tr>{% for header in item.table.headers %}<th>{{ header }}</th>{% endfor %}</tr>
+            </thead>
+            <tbody>
+                {% for row in item.table.rows or [] %}
+                <tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+        {% if item.affected %}<p><strong>{{ labels.affected }}:</strong> {{ item.affected|join(', ') }}</p>{% endif %}
+        {% if item.references %}
+        <p><strong>{{ labels.references }}:</strong></p>
+        <ul>{% for reference in item.references %}<li>{{ reference }}</li>{% endfor %}</ul>
+        {% endif %}
+    </article>
+    {% endfor %}
+    <h2>{{ labels.strategic_recommendations }}</h2>
+    <ol>{% for recommendation in report.recommendations %}<li>{{ recommendation }}</li>{% endfor %}</ol>
+    {% endif %}
+</body>
+</html>

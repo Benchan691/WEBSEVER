@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ details.subject }}</title>
+    <style>
+        body { margin: 0; padding: 0; background: #f5f3f8; color: #20242a; font-family: Arial, sans-serif; line-height: 1.5; }
+        .email-shell { width: 100%; background: #f5f3f8; padding: 32px 12px; }
+        .email-card { width: 100%; max-width: 640px; margin: 0 auto; background: #ffffff; border: 1px solid #e5e0eb; border-radius: 12px; overflow: hidden; }
+        .header { background: #45237b; color: #ffffff; padding: 28px 32px; }
+        .brand { margin: 0; font-size: 14px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+        .title { margin: 10px 0 0; font-size: 28px; line-height: 1.25; }
+        .content { padding: 30px 32px; }
+        .badge { display: inline-block; margin: 0 0 16px; padding: 5px 10px; border-radius: 999px; color: #ffffff; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+        .badge-confirmed { background: #16794b; }
+        .badge-updated { background: #6f42c1; }
+        .badge-cancelled { background: #b42318; }
+        .intro { margin: 0 0 24px; color: #4b5563; font-size: 16px; }
+        .section-title { margin: 28px 0 10px; color: #45237b; font-size: 17px; }
+        .changes { margin: 0; padding: 0; list-style: none; }
+        .changes li { margin: 0 0 8px; padding: 10px 12px; border-left: 3px solid #6f42c1; background: #faf8ff; }
+        .profile-card { margin: 12px 0; padding: 16px; border: 1px solid #ded6e8; border-radius: 8px; background: #fcfbfd; }
+        .profile-header { width: 100%; border-collapse: collapse; }
+        .profile-name { color: #2c164d; font-size: 16px; font-weight: 700; }
+        .profile-status { color: #475467; font-size: 13px; font-weight: 700; text-align: right; }
+        .profile-status.enabled { color: #16794b; }
+        .profile-lines { margin: 12px 0 0; padding-left: 18px; color: #475467; font-size: 14px; }
+        .profile-lines li { margin-bottom: 5px; }
+        .disabled-copy { margin: 12px 0 0; color: #667085; font-size: 14px; }
+        .button-wrap { margin: 28px 0 18px; }
+        .button { display: inline-block; padding: 12px 18px; background: #6f42c1; border-radius: 6px; color: #ffffff; font-weight: 700; text-decoration: none; }
+        .fallback-link { margin: 0; color: #667085; font-size: 12px; }
+        .fallback-link a { color: #5a32a3; }
+        .footer { padding: 20px 32px; border-top: 1px solid #e5e0eb; background: #fcfbfd; color: #667085; font-size: 12px; }
+        @media only screen and (max-width: 600px) {
+            .email-shell { padding: 0; }
+            .email-card { border: 0; border-radius: 0; }
+            .header, .content, .footer { padding-left: 20px; padding-right: 20px; }
+            .title { font-size: 24px; }
+        }
+    </style>
+</head>
+<body>
+    <table class="email-shell" role="presentation" cellpadding="0" cellspacing="0"><tr><td>
+        <table class="email-card" role="presentation" cellpadding="0" cellspacing="0"><tr><td>
+            <div class="header">
+                <p class="brand">&#128737; Security Portal</p>
+                <h1 class="title">{{ details.heading }}</h1>
+            </div>
+            <div class="content">
+                <span class="badge badge-{{ kind }}">{{ details.badge }}</span>
+                <p class="intro">{{ details.intro }}</p>
+                {% if changes %}
+                <h2 class="section-title">What changed</h2>
+                <ul class="changes">{% for change in changes %}<li>{{ change }}</li>{% endfor %}</ul>
+                {% endif %}
+                {% if kind != 'cancelled' %}
+                <h2 class="section-title">Your subscription</h2>
+                {% for card in cards %}
+                <div class="profile-card">
+                    <table class="profile-header" role="presentation"><tr>
+                        <td class="profile-name">{{ card.name }}</td>
+                        <td class="profile-status{% if card.enabled %} enabled{% endif %}">{{ card.status }}</td>
+                    </tr></table>
+                    {% if card.enabled %}
+                    <ul class="profile-lines">{% for line in card.summary_lines %}<li>{{ line }}</li>{% endfor %}</ul>
+                    {% else %}
+                    <p class="disabled-copy">This delivery type is currently disabled.</p>
+                    {% endif %}
+                </div>
+                {% endfor %}
+                {% if cancellation_url %}
+                <div class="button-wrap"><a class="button" href="{{ cancellation_url }}">Manage or cancel subscription</a></div>
+                <p class="fallback-link">If the button does not work, copy this link into your browser: <a href="{{ cancellation_url }}">{{ cancellation_url }}</a></p>
+                {% endif %}
+                {% endif %}
+            </div>
+            <div class="footer">{{ details.footer }}</div>
+        </td></tr></table>
+    </td></tr></table>
+</body>
+</html>

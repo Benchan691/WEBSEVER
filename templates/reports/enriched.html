@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="{{ html_language }}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ report.title }}</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 1180px; margin: 0 auto; padding: 32px; color: #1f2933; line-height: 1.55; }
+        h1 { border-bottom: 3px solid #0f766e; padding-bottom: 12px; }
+        h2 { margin-top: 30px; color: #0f4f4a; }
+        h3 { margin-bottom: 6px; margin-top: 0; }
+        .meta { color: #667085; font-size: 0.9rem; }
+        .section { margin: 16px 0 24px; }
+        .brief { background: #f7faf9; border-left: 4px solid #0f766e; padding: 14px 18px; }
+        ul, ol { padding-left: 22px; }
+        li { margin-bottom: 6px; }
+        .small { font-size: 0.88rem; }
+        .vulnerability-card { width: 100%; border-collapse: collapse; margin: 0 0 16px; }
+        .vulnerability-card td { border: 1px solid #d0d5dd; border-left: 4px solid #0f766e; padding: 14px 18px; background: #f7faf9; vertical-align: top; }
+        .vulnerability-card h3 a { color: #0f4f4a; text-decoration: none; }
+        .field { margin: 10px 0; }
+        .field strong { display: block; color: #344054; margin-bottom: 4px; }
+    </style>
+</head>
+<body>
+    <h1>{{ report.title }}</h1>
+    <p class="meta">{{ generated_label }}</p>
+
+    <h2>{{ labels.executive_summary }}</h2>
+    <div class="section brief">
+        <ul>{% for finding in report.executive_summary.key_findings or [] %}<li>{{ finding }}</li>{% endfor %}</ul>
+    </div>
+
+    <h2>{{ labels.vulnerability_cards }}</h2>
+    {% for row in report.vulnerability_detail_table.rows or [] %}
+    {% set card_anchor = row.card_anchor or row.cve_id %}
+    <table class="vulnerability-card" id="{{ card_anchor }}" cellpadding="0" cellspacing="0">
+        <tr>
+            <td>
+                <h3><a href="#{{ card_anchor }}">{{ row.cve_id }} | {{ row.vendor or 'Unknown vendor' }} | {{ row.product or 'Unknown product' }}</a></h3>
+                <p class="meta">{{ labels.severity }}: {{ row.severity or '' }}</p>
+                <p class="field"><strong>{{ labels.vulnerability_overview }}</strong><br>{{ row.what_happened|nl2br }}</p>
+                <p class="field"><strong>{{ labels.risk_and_impact }}</strong><br>{{ row.why_matters|nl2br }}</p>
+                <p class="field"><strong>{{ labels.remediation_guidance }}</strong><br>{{ row.how_to_respond|nl2br }}</p>
+                {% if row.source_urls %}
+                <div class="field small">
+                    <strong>{{ labels.source_references }}</strong>
+                    <ul>
+                        {% for url in row.source_urls %}
+                        <li><a href="{{ url }}" rel="noopener">{{ url }}</a></li>
+                        {% endfor %}
+                    </ul>
+                </div>
+                {% endif %}
+            </td>
+        </tr>
+    </table>
+    {% endfor %}
+</body>
+</html>

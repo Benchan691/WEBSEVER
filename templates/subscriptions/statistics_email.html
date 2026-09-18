@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Newsletter delivery statistics</title>
+    <style>
+        body { margin: 0; padding: 0; background: #f5f3f8; color: #20242a; font-family: Arial, sans-serif; line-height: 1.5; }
+        .email-shell { width: 100%; background: #f5f3f8; padding: 32px 12px; }
+        .email-card { width: 100%; max-width: 640px; margin: 0 auto; background: #ffffff; border: 1px solid #e5e0eb; border-radius: 12px; overflow: hidden; }
+        .header { background: #45237b; color: #ffffff; padding: 28px 32px; }
+        .brand { margin: 0; font-size: 14px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+        .title { margin: 10px 0 0; font-size: 28px; line-height: 1.25; }
+        .content { padding: 30px 32px; }
+        .badge { display: inline-block; margin: 0 0 16px; padding: 5px 10px; border-radius: 999px; color: #ffffff; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; background: #6f42c1; }
+        .badge-period { background: #16794b; }
+        .intro { margin: 0 0 24px; color: #4b5563; font-size: 16px; }
+        .metric { margin: 0 0 28px; padding: 22px 20px; border-radius: 10px; background: linear-gradient(135deg, #faf8ff 0%, #f3eef9 100%); border: 1px solid #ded6e8; text-align: center; }
+        .metric-label { margin: 0 0 8px; color: #5a32a3; font-size: 13px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+        .metric-value { margin: 0; color: #2c164d; font-size: 48px; font-weight: 700; line-height: 1.1; }
+        .metric-meta { margin: 10px 0 0; color: #667085; font-size: 13px; }
+        .section-title { margin: 0 0 12px; color: #45237b; font-size: 17px; }
+        .breakdown { width: 100%; border-collapse: collapse; }
+        .breakdown-row td { padding: 14px 0; border-top: 1px solid #eee8f4; vertical-align: middle; }
+        .breakdown-row:first-child td { border-top: 0; }
+        .collection-name { margin: 0; color: #2c164d; font-size: 15px; font-weight: 700; }
+        .collection-db { margin: 4px 0 0; color: #667085; font-size: 12px; }
+        .collection-count { color: #45237b; font-size: 22px; font-weight: 700; text-align: right; white-space: nowrap; }
+        .empty { margin: 0; padding: 18px 16px; border-radius: 8px; background: #fcfbfd; border: 1px dashed #ded6e8; color: #667085; font-size: 14px; text-align: center; }
+        .footer { padding: 20px 32px; border-top: 1px solid #e5e0eb; background: #fcfbfd; color: #667085; font-size: 12px; }
+        @media only screen and (max-width: 600px) {
+            .email-shell { padding: 0; }
+            .email-card { border: 0; border-radius: 0; }
+            .header, .content, .footer { padding-left: 20px; padding-right: 20px; }
+            .title { font-size: 24px; }
+            .metric-value { font-size: 40px; }
+        }
+    </style>
+</head>
+<body>
+    <table class="email-shell" role="presentation" cellpadding="0" cellspacing="0"><tr><td>
+        <table class="email-card" role="presentation" cellpadding="0" cellspacing="0"><tr><td>
+            <div class="header">
+                <p class="brand">&#128737; Security Portal</p>
+                <h1 class="title">Newsletter delivery statistics</h1>
+            </div>
+            <div class="content">
+                {% if period %}
+                <span class="badge badge-period">{{ period }}</span>
+                {% else %}
+                <span class="badge">All time</span>
+                {% endif %}
+                <p class="intro">Delivery summary for <strong>{{ email }}</strong>.</p>
+                <div class="metric">
+                    <p class="metric-label">{% if period %}Newsletters sent this period{% else %}Total newsletters sent{% endif %}</p>
+                    <p class="metric-value">{{ total }}</p>
+                    {% if databases %}
+                    <p class="metric-meta">Database{{ 's' if databases|length != 1 else '' }}: {{ databases|join(', ') }}</p>
+                    {% endif %}
+                </div>
+                <h2 class="section-title">By collection</h2>
+                {% if by_collection %}
+                <table class="breakdown" role="presentation" cellpadding="0" cellspacing="0">
+                    {% for item in by_collection %}
+                    <tr class="breakdown-row">
+                        <td>
+                            <p class="collection-name">{{ item.source_collection }}</p>
+                            <p class="collection-db">{{ item.database }}</p>
+                        </td>
+                        <td class="collection-count">{{ item.count }}</td>
+                    </tr>
+                    {% endfor %}
+                </table>
+                {% else %}
+                <p class="empty">No newsletters have been sent yet.</p>
+                {% endif %}
+            </div>
+            <div class="footer">Automated delivery statistics from Security Portal.</div>
+        </td></tr></table>
+    </td></tr></table>
+</body>
+</html>

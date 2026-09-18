@@ -1,0 +1,88 @@
+{% extends 'layouts/base.html' %}
+{% block title %}{{ t('Settings') }}{% endblock %}
+{% block content %}
+<div class="container" style="max-width: 720px;">
+    <div class="mb-4">
+        <h2 class="mb-1"><i class="bi bi-gear me-2"></i>{{ t('Settings') }}</h2>
+        <p class="text-muted mb-0">{{ t('Manage your account settings.') }}</p>
+    </div>
+
+    <div id="message" class="alert d-none" role="alert"></div>
+
+    {% if current_user.auth_source != 'account_hub' and current_user.must_change_password %}
+    <div class="alert alert-warning" role="alert">
+        <i class="bi bi-exclamation-triangle me-2"></i>{{ t('Change your temporary password before continuing.') }}
+    </div>
+    {% endif %}
+
+    <div class="card border-0 shadow-sm">
+        <div class="card-body p-4">
+            <h3 class="h5 mb-3">{{ t('Account details') if current_user.auth_source == 'account_hub' else t('Change password') }}</h3>
+            <dl class="row small mb-4">
+                <dt class="col-sm-4">{{ t('Username') }}</dt>
+                <dd class="col-sm-8">{{ current_user.username }}</dd>
+                <dt class="col-sm-4">{{ t('Role') }}</dt>
+                <dd class="col-sm-8">{{ t('Administrator') if current_user.role == 'admin' else (t('Sub-admin') if current_user.role == 'sub_admin' else t('User')) }}</dd>
+                {% if current_user.auth_source == 'account_hub' %}
+                <dt class="col-sm-4">{{ t('Sign-in provider') }}</dt>
+                <dd class="col-sm-8">{{ t('Account Hub') }}</dd>
+                {% endif %}
+            </dl>
+            {% if current_user.auth_source == 'account_hub' %}
+            <p class="text-muted mb-0">{{ t('Your password and access permissions are managed by Account Hub.') }}</p>
+            {% else %}
+            <form id="password-form">
+                <div class="mb-3">
+                    <label for="current-password" class="form-label">{{ t('Current password') }}</label>
+                    <input id="current-password" type="password" class="form-control" autocomplete="current-password" maxlength="72" required>
+                </div>
+                <div class="mb-3">
+                    <label for="new-password" class="form-label">{{ t('New password') }}</label>
+                    <input id="new-password" type="password" class="form-control" autocomplete="new-password" maxlength="72" required>
+                </div>
+                <div class="mb-4">
+                    <label for="new-password-confirmation" class="form-label">{{ t('Confirm new password') }}</label>
+                    <input id="new-password-confirmation" type="password" class="form-control" autocomplete="new-password" maxlength="72" required>
+                </div>
+                <button class="btn btn-primary" type="submit"><i class="bi bi-check2 me-1"></i>{{ t('Save password') }}</button>
+            </form>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}
+{% block script %}
+{% if current_user.auth_source != 'account_hub' %}
+<script>
+(function () {
+    const form = document.getElementById('password-form');
+    const message = document.getElementById('message');
+    form.addEventListener('submit', function (event) {
+        event.preventDefault();
+        message.className = 'alert d-none';
+        fetch('{{ url_for('auth.change_password') }}', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+            body: JSON.stringify({
+                current_password: document.getElementById('current-password').value,
+                new_password: document.getElementById('new-password').value,
+                new_password_confirmation: document.getElementById('new-password-confirmation').value
+            })
+        }).then(function (response) {
+            return response.json().then(function (body) {
+                if (!response.ok) throw new Error(body.error || '{{ t('Request failed.') }}');
+                return body;
+            });
+        }).then(function () {
+            form.reset();
+            message.textContent = '{{ t('Password changed successfully.') }}';
+            message.className = 'alert alert-success';
+        }).catch(function (error) {
+            message.textContent = error.message;
+            message.className = 'alert alert-danger';
+        });
+    });
+}());
+</script>
+{% endif %}
+{% endblock %}

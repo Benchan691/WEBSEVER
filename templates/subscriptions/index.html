@@ -1,0 +1,105 @@
+{% extends 'layouts/base.html' %}
+{% block title %}{{ t('Subscriptions') }}{% endblock %}
+{% block styles %}<link href="{{ url_for('static', filename='css/subscriptions.css') }}" rel="stylesheet">{% endblock %}
+
+{% block content %}
+<div class="container">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+            <h2 class="mb-1"><i class="bi bi-people me-2"></i>{{ t('Subscription Management' if is_admin else 'My Subscription') }}</h2>
+            <p class="text-muted mb-0">{{ t('Manage independent newsletter feeds and report profiles.' if is_admin else 'View and manage your subscription.') }}</p>
+        </div>
+        {% if is_admin %}<button id="add-btn" class="btn btn-primary"><i class="bi bi-plus-lg me-1"></i>{{ t('Add Subscription') }}</button>{% endif %}
+    </div>
+    <div id="message" class="alert d-none"></div>
+    <div class="card shadow-sm border-0 overflow-hidden">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-dark"><tr><th>{{ t('Subscriber') }}</th><th>{{ t('Newsletter') }}</th><th>{{ t('Report') }}</th><th>{{ t('Actions') }}</th></tr></thead>
+                <tbody id="rows"></tbody>
+            </table>
+        </div>
+        <div id="loading" class="text-center text-muted py-5">{{ t('Loading subscriptions...') }}</div>
+        <div id="empty" class="text-center text-muted py-5 d-none">{{ t('No subscriptions yet.') }}</div>
+    </div>
+</div>
+
+<div class="modal fade" id="subscription-modal" tabindex="-1">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <form id="subscription-form" class="modal-content">
+            <div class="modal-header"><h5 id="modal-title" class="modal-title">{{ t('Add Subscription') }}</h5><button class="btn-close" data-bs-dismiss="modal" aria-label="{{ t('Close') }}"></button></div>
+            <div class="modal-body">
+                <div id="subscription-modal-message" class="alert d-none" role="alert" aria-live="assertive"></div>
+                <div class="row g-3 mb-4">
+                    <div class="col-md-4"><label class="form-label" for="username">{{ t('Username') }}</label><input id="username" type="text" class="form-control" autocomplete="username" required{% if not is_admin %} readonly{% endif %}></div>
+                    <div class="col-md-4"><label class="form-label" for="team">{{ t('Team') }}</label><input id="team" class="form-control" required></div>
+                    {% if is_admin and not config.ACCOUNT_HUB_ENABLED %}
+                    <div class="col-md-4"><label class="form-label" for="password">{{ t('Password') }}</label><input id="password" type="password" class="form-control" autocomplete="new-password" maxlength="72"><div id="password-help" class="form-text">{{ t('Required when creating a subscription; leave blank when editing to keep the current password.') }}</div></div>
+                    {% endif %}
+                    <div class="col-12">
+                        <label class="form-label" for="recipient-list">{{ t('Email recipients') }}</label>
+                        <div id="recipient-list" class="vstack gap-2"></div>
+                        {% if is_admin %}<button id="add-recipient-btn" class="btn btn-outline-secondary btn-sm mt-2" type="button"><i class="bi bi-plus-lg me-1"></i>{{ t('Add email recipient') }}</button>{% endif %}
+                        <div class="form-text">{{ t('All recipients share the same subscription settings.') if config.ACCOUNT_HUB_ENABLED else t('All recipients share the same subscription settings and password.') }}</div>
+                    </div>
+                    <div class="col-md-6"><label class="form-label" for="delivery-mode">{{ t('Email delivery mode') }}</label><select id="delivery-mode" class="form-select"><option value="individual">{{ t('Send separate private emails') }}</option><option value="grouped">{{ t('Send one email to all recipients') }}</option></select><div class="form-text">{{ t('Grouped delivery shows recipient addresses to each other.') }}</div></div>
+                </div>
+                <div class="row g-4">
+                    <div class="col-lg-6">
+                        <div class="card h-100"><div class="card-body">
+                            <div class="form-check form-switch mb-3"><input id="newsletter-enabled" class="form-check-input" type="checkbox"><label class="form-check-label fw-semibold" for="newsletter-enabled">{{ t('Newsletter feed enabled') }}</label></div>
+                            <div id="newsletter-fields"></div>
+                            <hr>
+                            <div class="form-check form-switch mb-2">
+                                <input id="newsletter-statistic-schedule-enabled" class="form-check-input" type="checkbox">
+                                <label class="form-check-label small" for="newsletter-statistic-schedule-enabled">{{ t('Monthly statistic email schedule enabled') }}</label>
+                            </div>
+                            <div class="form-text mb-3">{{ t('Sends previous-month delivery counts on the 1st at 09:00 HKT.') }}</div>
+                            <div id="newsletter-send-statistic-wrap" class="d-none">
+                                <button id="newsletter-send-statistic" class="btn btn-success btn-sm" type="button">
+                                    <span class="send-statistic-label">{{ t('Send Statistic') }}</span>
+                                </button>
+                                <div id="newsletter-send-statistic-status" class="alert small mt-2 mb-0 d-none" role="status"></div>
+                            </div>
+                        </div></div>
+                    </div>
+                    <div class="col-lg-6">
+                        <div class="card h-100"><div class="card-body">
+                            <div class="form-check form-switch mb-3"><input id="report-enabled" class="form-check-input" type="checkbox"><label class="form-check-label fw-semibold" for="report-enabled">{{ t('Report profile enabled') }}</label></div>
+                            <div id="report-fields"></div>
+                            <div id="report-preview" class="alert alert-light border small mt-3 mb-0" role="status" aria-live="polite">
+                                <div class="fw-semibold mb-1">{{ t('Report Preview') }}</div>
+                                <div id="report-preview-summary" class="text-muted">{{ t('Adjust report filters to preview matches.') }}</div>
+                                <ul id="report-preview-examples" class="small mt-2 mb-0 ps-3 d-none"></ul>
+                            </div>
+                            <hr>
+                            <div class="row g-2">
+                                <div class="col-md-6"><label class="form-label small">{{ t('Generation mode') }}</label><select id="report-generation-mode" class="form-select"><option value="enriched_weekly">{{ t('Enriched Weekly') }}</option><option value="template">{{ t('Fixed Template') }}</option></select></div>
+                                <div class="col-md-6"><label class="form-label small">{{ t('Language') }}</label><select id="report-language" class="form-select"><option value="en">{{ t('English') }}</option><option value="zh">{{ t('Traditional Chinese') }}</option><option value="ch">{{ t('Simplified Chinese') }}</option></select></div>
+                                <div class="col-12" id="report-search-prompt-wrap"><label class="form-label small" for="report-search-prompt">{{ t('Enrichment search hint (optional)') }}</label><textarea id="report-search-prompt" class="form-control form-control-sm" rows="2" maxlength="200" placeholder="{{ t('e.g. Exchange Server RCE patch guidance') }}"></textarea><div class="form-text">{{ t('Applied per matched CVE during Tavily enrichment. Does not discover new CVEs.') }}</div></div>
+                                <div class="col-12"><div class="form-check form-switch"><input id="report-schedule-enabled" class="form-check-input" type="checkbox"><label class="form-check-label small" for="report-schedule-enabled">{{ t('Weekly email schedule enabled') }}</label></div></div>
+                                <div class="col-md-6"><label class="form-label small">{{ t('Weekday (HKT)') }}</label><select id="report-schedule-weekday" class="form-select form-select-sm"><option value="mon">{{ t('Monday') }}</option><option value="tue">{{ t('Tuesday') }}</option><option value="wed">{{ t('Wednesday') }}</option><option value="thu">{{ t('Thursday') }}</option><option value="fri">{{ t('Friday') }}</option><option value="sat">{{ t('Saturday') }}</option><option value="sun">{{ t('Sunday') }}</option></select></div>
+                                <div class="col-md-6"><label class="form-label small">{{ t('Time (HKT)') }}</label><input id="report-schedule-time" type="time" class="form-control form-control-sm" value="09:00"></div>
+                            </div>
+                        </div></div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal" type="button">{{ t('Cancel') }}</button><button class="btn btn-primary" type="submit">{{ t('Save') }}</button></div>
+        </form>
+    </div>
+</div>
+{% endblock %}
+{% block script %}
+<script id="page-config" type="application/json">{{ {
+    'subscriptionsUrl': url_for('subscription.get_subscriptions'),
+    'previewUrl': url_for('subscription.preview_subscription_report'),
+    'reviewsUrl': url_for('subscription.get_subscription_collections'),
+    'vendorProductImportUrl': url_for('subscription.import_vendor_products'),
+    'vendorProductTemplateUrl': url_for('subscription.vendor_product_template'),
+    'isAdmin': is_admin,
+    'accountHubEnabled': config.ACCOUNT_HUB_ENABLED,
+}|tojson }}</script>
+<script src="{{ url_for('static', filename='js/shared/collection-picker.js') }}"></script>
+<script src="{{ url_for('static', filename='js/subscriptions/index.js', v='20260914-1') }}"></script>
+{% endblock %}

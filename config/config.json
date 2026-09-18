@@ -1,0 +1,60 @@
+{
+  "mongodb": {
+    "local_database": "web",
+    "web_database": "web",
+    "vulnerabilities_database": "vulnerabilities",
+    "review_view_suffix": "_review"
+  },
+  "newsletter_root": "newsletters",
+  "web_auth": {
+    "bootstrap_username": "admin"
+  },
+  "account_hub": {
+    "enabled": false,
+    "login_url": "",
+    "token_check_url": "",
+    "timeout_seconds": 5
+  },
+  "tavily": {
+    "search_depth": "advanced",
+    "max_results": 8,
+    "chunks_per_source": 3,
+    "request_timeout_seconds": 30,
+    "max_concurrent_requests": 4
+  },
+  "enriched": {
+    "llm_base_url": "http://host.docker.internal:9000/v1",
+    "llm_model": "qwen3-8b-ipex",
+    "llm_timeout_seconds": 300,
+    "llm_connect_timeout_seconds": 300,
+    "llm_max_output_tokens": 32768,
+    "llm_evidence_max_output_tokens": 2048,
+    "llm_report_max_output_tokens": 8192,
+    "llm_connection_retries": 3,
+    "llm_retry_wait_seconds": 5,
+    "llm_page_chars": 12000,
+    "llm_disable_thinking": true,
+    "results_per_task": 6,
+    "evidence_cache_enabled": true,
+    "evidence_cache_version": "7"
+  },
+  "report": {
+    "item_json_retries": 2,
+    "final_json_retries": 2,
+    "deny_keys": [
+      "raw",
+      "raw_fields",
+      "raw_sections",
+      "raw_tables"
+    ],
+    "deny_prefixes": [
+      "raw_"
+    ],
+    "max_depth": 10,
+    "max_list_items": 100,
+    "max_string_chars": 12000,
+    "preview_after_each_item": true,
+    "section_chunk_prompt_chars": 18000,
+    "section_chunk_card_count": 2
+  }
+}

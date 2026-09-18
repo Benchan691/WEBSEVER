@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="{{ newsletter.language }}">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ newsletter.title }}</title>
+    <style>
+        body { font-family: Tahoma, Arial, sans-serif; font-size: 12px; line-height: 1.5; color: #111; }
+        h1 { text-align: center; font-size: 22px; }
+        .indent { margin-left: 2em; }
+        .indent img { max-width: 100%; height: auto; }
+        table { width: 100%; border-collapse: collapse; margin-bottom: 1em; }
+        th, td { border: 1px solid #222; padding: 5px; text-align: left; vertical-align: top; }
+        th { font-weight: bold; text-align: center; }
+    </style>
+</head>
+<body>
+    <p>{{ newsletter.labels.greeting }}</p>
+    {% if newsletter.extra %}<div class="template-extra">{{ newsletter.extra }}</div>{% endif %}
+
+    {% for field in newsletter.field_order %}
+    {% if field == 'title' %}
+    <h1><b>{{ newsletter.title }}</b></h1>
+
+    {% elif field == 'collection' %}
+    <p><b>{{ newsletter.labels.collection }}</b> {{ newsletter.collection }}</p>
+
+    {% elif field == 'overview' %}
+    <p><b>{{ newsletter.labels.overview }}</b></p>
+    <div class="indent">{{ newsletter.overview }}</div>
+
+    {% elif field == 'table' and newsletter.table %}
+    <table>
+        <thead><tr>{% for header in newsletter.table.headers %}<th>{{ header }}</th>{% endfor %}</tr></thead>
+        <tbody>
+        {% for row in newsletter.table.rows %}
+            <tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>
+        {% endfor %}
+        </tbody>
+    </table>
+
+    {% elif field == 'severity' and newsletter.show_severity %}
+    <p><b>{{ newsletter.labels.severity }}</b></p>
+    <ul>{% for value in newsletter.severity %}<li>{{ value }}</li>{% else %}<li>{{ newsletter.labels.not_specified }}</li>{% endfor %}</ul>
+
+    {% elif field == 'cvss' and newsletter.cvss %}
+    <p><b>{{ newsletter.labels.cvss }}</b> {{ newsletter.cvss }}</p>
+
+    {% elif field == 'impacts' and newsletter.show_impacts %}
+    <p><b>{{ newsletter.labels.impacts }}</b></p>
+    <ul>{% for value in newsletter.impacts %}<li>{{ value }}</li>{% else %}<li>{{ newsletter.labels.not_specified }}</li>{% endfor %}</ul>
+
+    {% elif field == 'affected' and newsletter.show_affected %}
+    <p><b>{{ newsletter.labels.affected }}</b></p>
+    {% if newsletter.affected_table %}
+    <table>
+        <thead><tr>{% for header in newsletter.affected_table.headers %}<th>{{ header }}</th>{% endfor %}</tr></thead>
+        <tbody>
+        {% for row in newsletter.affected_table.rows %}
+            <tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <ul>{% for value in newsletter.affected %}<li>{{ value }}</li>{% else %}<li>{{ newsletter.labels.not_specified }}</li>{% endfor %}</ul>
+    {% endif %}
+
+    {% elif field == 'cves' and newsletter.cves %}
+    <p><b>{{ newsletter.labels.cves }}</b></p>
+    <ul>{% for value in newsletter.cves %}<li>{{ value }}</li>{% endfor %}</ul>
+
+    {% elif field == 'recommendations' and newsletter.show_recommendations %}
+    <p><b>{{ newsletter.labels.recommendations }}</b></p>
+    <ul>{% for value in newsletter.recommendations %}<li>{{ value }}</li>{% else %}<li>{{ newsletter.labels.default_recommendation }}</li>{% endfor %}</ul>
+
+    {% elif field == 'references' %}
+    <p><b>{{ newsletter.labels.references }}</b></p>
+    <ul>{% for value in newsletter.references %}<li><a href="{{ value }}" rel="noopener">{{ value }}</a></li>{% else %}<li>{{ newsletter.labels.not_specified }}</li>{% endfor %}</ul>
+
+    {% elif field == 'related_links' %}
+    <p><b>{{ newsletter.labels.related_links }}</b></p>
+    <ul>{% for value in newsletter.related_links %}<li><a href="{{ value }}" rel="noopener">{{ value }}</a></li>{% else %}<li>{{ newsletter.labels.not_specified }}</li>{% endfor %}</ul>
+    {% endif %}
+    {% endfor %}
+
+    <p>{{ newsletter.footer }}</p>
+</body>
+</html>

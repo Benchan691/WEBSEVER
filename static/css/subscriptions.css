@@ -1,0 +1,37 @@
+.subscription-collections-toggle.dropdown-toggle::after {
+    margin-left: auto;
+    float: right;
+}
+
+.subscription-collections-options {
+    max-height: 12rem;
+    overflow-y: auto;
+}
+
+.subscription-vendor-product-import {
+    background: var(--bs-light-bg-subtle);
+}
+
+.subscription-match-warning {
+    color: var(--bs-warning-text-emphasis);
+}
+
+.subscription-vendor-product-preview {
+    max-height: 16rem;
+}
+
+.subscription-vendor-product-preview thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+.subscription-vendor-product-preview td {
+    min-width: 8rem;
+    overflow-wrap: anywhere;
+}
+
+#subscription-modal-message,
+#report-vendor-product-status {
+    white-space: pre-line;
+}

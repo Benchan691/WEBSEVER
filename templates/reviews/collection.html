@@ -1,0 +1,136 @@
+{% extends 'layouts/base.html' %}
+{% block title %}{{ collection_name }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-3 px-lg-4">
+    <nav aria-label="breadcrumb" class="mb-3">
+        <ol class="breadcrumb">
+            <li class="breadcrumb-item"><a href="{{ url_for('review.reviews') }}">{{ t('Vulnerability Reviews') }}</a></li>
+            <li class="breadcrumb-item active">{{ collection_name }}</li>
+        </ol>
+    </nav>
+
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+        <div>
+            <h2 class="mb-1"><i class="bi bi-database me-2"></i>{{ collection_name }}</h2>
+            <p class="text-muted mb-0">{{ t('Click View to inspect the complete MongoDB document.') }}</p>
+        </div>
+        <div class="d-flex align-items-center gap-2">
+            <span id="selected-count" class="badge text-bg-primary"></span>
+            <button id="clear-selection-btn" class="btn btn-outline-danger btn-sm" disabled>
+                <i class="bi bi-x-circle me-1"></i>{{ t('Clear Selection') }}
+            </button>
+            <button id="refresh-btn" class="btn btn-outline-secondary btn-sm">
+                <i class="bi bi-arrow-clockwise me-1"></i>{{ t('Refresh') }}
+            </button>
+        </div>
+    </div>
+
+    <form id="filter-form" class="card shadow-sm border-0 mb-3">
+        <div class="card-body">
+            <div class="row g-2">
+                <div class="col-12 col-lg-4">
+                    <label class="form-label small text-muted" for="search">{{ t('Search all summary fields') }}</label>
+                    <input class="form-control" id="search" name="search" placeholder="{{ t('Search title, CVE, severity, affected...') }}">
+                </div>
+                <div class="col-6 col-lg-2">
+                    <label class="form-label small text-muted" for="code">{{ t('Code / CVE') }}</label>
+                    <input class="form-control" id="code" name="code" placeholder="CVE-2026-...">
+                </div>
+                <div class="col-6 col-lg-2">
+                    <label class="form-label small text-muted" for="title">{{ t('Title') }}</label>
+                    <input class="form-control" id="title" name="title" placeholder="{{ t('Title contains') }}">
+                </div>
+                <div class="col-6 col-lg-2">
+                    <label class="form-label small text-muted" for="status">{{ t('Severity') }}</label>
+                    <select class="form-select" id="status" name="status">
+                        <option value="">{{ t('All known severities') }}</option>
+                        <option value="Critical">{{ t('Critical') }}</option>
+                        <option value="High">{{ t('High') }}</option>
+                        <option value="Medium">{{ t('Medium') }}</option>
+                        <option value="Low">{{ t('Low') }}</option>
+                    </select>
+                </div>
+                <div class="col-6 col-lg-2 d-flex align-items-end">
+                    <div class="form-check mb-2">
+                        <input class="form-check-input" id="include-unknown" name="include_unknown" type="checkbox" value="true">
+                        <label class="form-check-label small" for="include-unknown">{{ t('Include unknown severity') }}</label>
+                    </div>
+                </div>
+                <div class="col-6 col-lg-2">
+                    <label class="form-label small text-muted" for="affected">{{ t('Affected') }}</label>
+                    <input class="form-control" id="affected" name="affected" placeholder="{{ t('Product') }}">
+                </div>
+            </div>
+            <div class="d-flex justify-content-end gap-2 mt-3">
+                <button type="button" id="clear-btn" class="btn btn-outline-secondary btn-sm">{{ t('Clear') }}</button>
+                <button type="submit" class="btn btn-primary btn-sm"><i class="bi bi-funnel me-1"></i>{{ t('Filter') }}</button>
+            </div>
+        </div>
+    </form>
+
+    <div id="error-alert" class="alert alert-danger {{ '' if initial_error else 'd-none' }}" role="alert">{{ initial_error or '' }}</div>
+
+    <div class="card shadow-sm border-0 overflow-hidden">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-dark">
+                    <tr>
+                        <th style="width:52px">{{ t('Select') }}</th>
+                        <th style="min-width:150px">{{ t('Code / CVE') }}</th>
+                        <th style="min-width:280px">{{ t('Title') }}</th>
+                        <th style="min-width:130px">{{ t('Severity') }}</th>
+                        <th style="min-width:300px">{{ t('Affected') }}</th>
+                        <th style="width:90px">{{ t('Action') }}</th>
+                    </tr>
+                </thead>
+                <tbody id="document-rows"></tbody>
+            </table>
+        </div>
+        <div id="loading" class="text-center text-muted py-5">
+            <div class="spinner-border spinner-border-sm me-2" role="status"></div>{{ t('Loading documents...') }}
+        </div>
+        <div id="empty-state" class="text-center text-muted py-5 d-none">
+            <i class="bi bi-search display-6 d-block mb-2"></i>{{ t('No documents match these filters.') }}
+        </div>
+    </div>
+
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-3">
+        <div id="result-count" class="text-muted small"></div>
+        <div class="d-flex align-items-center gap-2">
+            <label for="page-size" class="text-muted small">{{ t('Rows:') }}</label>
+            <select id="page-size" class="form-select form-select-sm" style="width:auto">
+                <option>10</option>
+                <option selected>25</option>
+                <option>50</option>
+                <option>100</option>
+            </select>
+            <button id="previous-btn" class="btn btn-outline-secondary btn-sm">{{ t('Previous') }}</button>
+            <span id="page-label" class="small text-muted"></span>
+            <button id="next-btn" class="btn btn-outline-secondary btn-sm">{{ t('Next') }}</button>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="detail-modal" tabindex="-1" aria-labelledby="detail-modal-title" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="detail-modal-title">{{ t('Document Detail') }}</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{ t('Close') }}"></button>
+            </div>
+            <div class="modal-body bg-dark">
+                <pre id="detail-json" class="text-light mb-0" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+{% block script %}
+<script id="page-config" type="application/json">{{ {
+    'initialError': initial_error,
+    'collectionName': collection_name,
+    'apiUrl': url_for('review.get_review_documents', collection_name=collection_name),
+}|tojson }}</script>
+<script src="{{ url_for('static', filename='js/reviews/collection.js') }}"></script>
+{% endblock %}

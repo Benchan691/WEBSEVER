@@ -1,0 +1,348 @@
+use crate::{AppState, db, mail, newsletters, reports, subscriptions};
+use chrono::{Datelike, TimeZone};
+use mongodb::bson::{self, Document, doc, oid::ObjectId};
+use serde_json::{Value, json};
+use tokio::time::{Duration, interval};
+
+fn text(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned()
+}
+fn recipients(value: &Value) -> Vec<String> {
+    value["emails"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+fn html_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+fn json_time(value: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    if let Some(text) = value.as_str() {
+        return chrono::DateTime::parse_from_rfc3339(text)
+            .ok()
+            .map(|v| v.with_timezone(&chrono::Utc));
+    }
+    if let Some(date) = value.get("$date") {
+        if let Some(text) = date.as_str() {
+            return chrono::DateTime::parse_from_rfc3339(text)
+                .ok()
+                .map(|v| v.with_timezone(&chrono::Utc));
+        }
+        if let Some(ms) = date
+            .get("$numberLong")
+            .and_then(Value::as_str)
+            .and_then(|v| v.parse::<i64>().ok())
+        {
+            return chrono::Utc.timestamp_millis_opt(ms).single();
+        }
+    }
+    None
+}
+fn bson_time(value: &mongodb::bson::Bson) -> Option<chrono::DateTime<chrono::Utc>> {
+    match value {
+        mongodb::bson::Bson::DateTime(dt) => chrono::Utc
+            .timestamp_millis_opt(dt.timestamp_millis())
+            .single(),
+        mongodb::bson::Bson::String(s) => chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|d| d.with_timezone(&chrono::Utc)),
+        _ => None,
+    }
+}
+fn next_weekly(profile: &Value, now: chrono::DateTime<chrono::Utc>) -> bson::DateTime {
+    let target_day = match profile["schedule_weekday"].as_str().unwrap_or("mon") {
+        "tue" => 1,
+        "wed" => 2,
+        "thu" => 3,
+        "fri" => 4,
+        "sat" => 5,
+        "sun" => 6,
+        _ => 0,
+    };
+    let time = profile["schedule_time"].as_str().unwrap_or("09:00");
+    let (hour, minute) = time.split_once(':').unwrap_or(("09", "00"));
+    let hour = hour.parse::<u32>().unwrap_or(9);
+    let minute = minute.parse::<u32>().unwrap_or(0);
+    let hk = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+    let local = now.with_timezone(&hk);
+    let mut date = local.date_naive();
+    for _ in 0..8 {
+        let naive = date
+            .and_hms_opt(hour, minute, 0)
+            .unwrap_or_else(|| date.and_hms_opt(9, 0, 0).unwrap());
+        let candidate = hk.from_local_datetime(&naive).single().unwrap();
+        if date.weekday().num_days_from_monday() == target_day && candidate > local {
+            return bson::DateTime::from_millis(
+                candidate.with_timezone(&chrono::Utc).timestamp_millis(),
+            );
+        }
+        date += chrono::Duration::days(1)
+    }
+    bson::DateTime::from_millis((now + chrono::Duration::days(7)).timestamp_millis())
+}
+async fn heartbeat(state: &AppState) {
+    let _=db::collection(&state.web,"scheduler_health").update_one(doc!{"_id":"email_scheduler"},doc!{"$set":{"last_tick_at":bson::DateTime::now(),"hostname":std::env::var("HOSTNAME").unwrap_or_default(),"pid":std::process::id() as i64,"updated_at":bson::DateTime::now()}}).upsert(true).await;
+}
+async fn manager_paused(state: &AppState, sub: &Document) -> bool {
+    let Ok(id) = sub.get_object_id("managed_by_user_id") else {
+        return false;
+    };
+    let manager = db::find_one(&state.web, "auth", doc! {"_id":id})
+        .await
+        .ok()
+        .flatten();
+    manager.is_some_and(|u| {
+        db::bool_field(&u, "disabled")
+            && db::bool_field(&u, "pause_managed_subscriptions_when_disabled")
+    })
+}
+async fn scheduled_report(state: &AppState, sub: &Document) {
+    let id = match sub.get_object_id("_id") {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let value = db::bson_json(sub);
+    let profile = &value["report_profile"];
+    if profile["enabled"] != true || profile["schedule_enabled"] != true {
+        return;
+    }
+    let now = chrono::Utc::now();
+    let next = sub
+        .get_document("report_profile")
+        .ok()
+        .and_then(|v| v.get("next_run_at"))
+        .and_then(bson_time);
+    if next.is_none() {
+        let next = next_weekly(profile, now);
+        let _ = db::collection(&state.web, "sub_account")
+            .update_one(
+                doc! {"_id":id},
+                doc! {"$set":{"report_profile.next_run_at":next}},
+            )
+            .await;
+        return;
+    }
+    if next.is_some_and(|v| v > now) {
+        return;
+    }
+    let next = next_weekly(profile, now);
+    let _=db::collection(&state.web,"sub_account").update_one(doc!{"_id":id},doc!{"$set":{"report_profile.next_run_at":next,"report_profile.last_run_at":bson::DateTime::now()}}).await;
+    let mode = profile["generation_mode"].as_str().unwrap_or("template");
+    let matches = subscriptions::match_profile(state, profile, 500).await;
+    let count = matches.len();
+    if count == 0 {
+        let _ = db::collection(&state.web, "sub_account")
+            .update_one(
+                doc! {"_id":id},
+                doc! {"$set":{"report_profile.last_match_count":0}},
+            )
+            .await;
+        return;
+    }
+    let now = bson::DateTime::now();
+    let mut job = doc! {"generation_mode":mode,"effective_generation_mode":mode,"report_language":"en","effective_report_language":"en","search_prompt":text(profile,"search_prompt"),"input_source":"review_selections","source_count":count as i64,"processed_count":0,"current_position":0,"item_fallback_count":0,"status":"queued","created_at":now,"updated_at":now,"provider":if mode=="template"{"Fixed Template"}else{"Search API + llama-server"},"model":if mode=="template"{"Fixed Template"}else{"Enriched Weekly"},"progress_percent":0,"progress_current":0,"progress_total":count as i64,"pipeline_logs":[]};
+    if let Ok(owner) = sub.get_object_id("managed_by_user_id") {
+        job.insert("managed_by_user_id", owner);
+    }
+    let Ok(inserted) = db::collection(&state.web, "report_jobs")
+        .insert_one(job)
+        .await
+    else {
+        return;
+    };
+    let Some(job_id) = inserted.inserted_id.as_object_id() else {
+        return;
+    };
+    let inputs:Vec<Document>=matches.iter().enumerate().map(|(position,item)|doc!{"job_id":job_id,"position":position as i64,"source_collection":item["source_collection"].as_str().unwrap_or(""),"selection_id":item["selection_id"].as_str().unwrap_or("")}).collect();
+    if db::collection(&state.web, "report_job_inputs")
+        .insert_many(inputs)
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let _=db::collection(&state.web,"sub_account").update_one(doc!{"_id":id},doc!{"$set":{"report_profile.last_job_id":job_id.to_hex(),"report_profile.last_match_count":count as i64}}).await;
+    tokio::spawn(reports::run(state.clone(), job_id));
+    tokio::spawn(send_completed_report(state.clone(), job_id, sub.clone()));
+}
+async fn send_completed_report(state: AppState, id: ObjectId, sub: Document) {
+    for _ in 0..120 {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let Some(job) = db::find_one(&state.web, "report_jobs", doc! {"_id":id})
+            .await
+            .ok()
+            .flatten()
+        else {
+            return;
+        };
+        match job.get_str("status").unwrap_or("") {
+            "failed" | "cancelled" => return,
+            "completed" => {
+                let report = job
+                    .get_document("report")
+                    .map(db::bson_json)
+                    .unwrap_or(json!({}));
+                let title = report["title"].as_str().unwrap_or("Cybersecurity Report");
+                let mut html = format!("<html><body><h1>{}</h1>", html_escape(title));
+                if let Some(items) = report["highlights"].as_array() {
+                    for item in items {
+                        html.push_str(&format!(
+                            "<h2>{}</h2><p>{}</p>",
+                            html_escape(item["title"].as_str().unwrap_or("")),
+                            html_escape(item["summary"].as_str().unwrap_or(""))
+                        ));
+                    }
+                }
+                if let Some(items) = report
+                    .pointer("/vulnerability_detail_table/rows")
+                    .and_then(Value::as_array)
+                {
+                    for item in items {
+                        html.push_str(&format!(
+                            "<h2>{}</h2><p>{}</p>",
+                            html_escape(item["cve_id"].as_str().unwrap_or("")),
+                            html_escape(item["what_happened"].as_str().unwrap_or(""))
+                        ));
+                    }
+                }
+                html.push_str("</body></html>");
+                let value = db::bson_json(&sub);
+                let emails = recipients(&value);
+                let mode = value["delivery_mode"].as_str().unwrap_or("individual");
+                let result = mail::send(&state, &emails, mode, title, &html).await;
+                let status = if result.is_ok() { "sent" } else { "failed" };
+                let error = result.err().unwrap_or_default();
+                let _ = db::collection(&state.web, "report_jobs")
+                    .update_one(
+                        doc! {"_id":id},
+                        doc! {"$set":{"delivery_status":status,"delivery_error":error}},
+                    )
+                    .await;
+                return;
+            }
+            _ => {}
+        }
+    }
+}
+async fn newsletters_tick(state: &AppState, sub: &Document) {
+    let id = match sub.get_object_id("_id") {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let value = db::bson_json(sub);
+    let profile = &value["newsletter_profile"];
+    if profile["enabled"] != true {
+        return;
+    }
+    let cursor = profile["delivery_cursor"].as_str().unwrap_or("");
+    if cursor.is_empty() {
+        let now = chrono::Utc::now().to_rfc3339();
+        let _ = db::collection(&state.web, "sub_account")
+            .update_one(
+                doc! {"_id":id},
+                doc! {"$set":{"newsletter_profile.delivery_cursor":now}},
+            )
+            .await;
+        return;
+    }
+    let matches = subscriptions::match_profile(state, profile, 100).await;
+    let emails = recipients(&value);
+    let mode = value["delivery_mode"].as_str().unwrap_or("individual");
+    let config = newsletters::template_config(state).await;
+    let cursor_time = chrono::DateTime::parse_from_rfc3339(cursor)
+        .ok()
+        .map(|v| v.with_timezone(&chrono::Utc));
+    for item in matches {
+        let source = item["source_collection"].as_str().unwrap_or("");
+        let selection_id = item["selection_id"].as_str().unwrap_or("");
+        let record = &item["document"];
+        let observed = json_time(&record["observed_at"]);
+        if observed.is_none() || cursor_time.is_some_and(|c| observed.unwrap() <= c) {
+            continue;
+        }
+        let mut pending = Vec::new();
+        for email in &emails {
+            let exists = db::find_one(
+                &state.web,
+                "newsletter_deliveries",
+                doc! {"email":email,"source_collection":source,"selection_id":selection_id},
+            )
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+            if !exists {
+                pending.push(email.clone())
+            }
+        }
+        if pending.is_empty() {
+            continue;
+        }
+        let newsletter = newsletters::normalize(record, source, &config);
+        let html = state
+            .templates
+            .get_template("newsletters/generated.html")
+            .and_then(|t| t.render(json!({"newsletter":newsletter})))
+            .unwrap_or_default();
+        let subject = newsletter["subject"]
+            .as_str()
+            .unwrap_or("Security newsletter");
+        if mail::send(state, &pending, mode, subject, &html)
+            .await
+            .is_ok()
+        {
+            for email in pending {
+                let mut delivery = doc! {"email":email,"source_collection":source,"selection_id":selection_id,"title":newsletter["title"].as_str().unwrap_or(""),"database":&state.cfg.vulnerabilities_database,"sent_at":bson::DateTime::now()};
+                if let Ok(owner) = sub.get_object_id("managed_by_user_id") {
+                    delivery.insert("managed_by_user_id", owner);
+                }
+                let _ = db::collection(&state.web, "newsletter_deliveries")
+                    .insert_one(delivery)
+                    .await;
+            }
+        } else {
+            return;
+        }
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let _ = db::collection(&state.web, "sub_account")
+        .update_one(
+            doc! {"_id":id},
+            doc! {"$set":{"newsletter_profile.delivery_cursor":now}},
+        )
+        .await;
+}
+async fn tick(state: &AppState) {
+    heartbeat(state).await;
+    let subscriptions = db::find_many(&state.web, "sub_account", doc! {}, 5000)
+        .await
+        .unwrap_or_default();
+    for sub in subscriptions {
+        if manager_paused(state, &sub).await {
+            continue;
+        }
+        scheduled_report(state, &sub).await;
+        newsletters_tick(state, &sub).await;
+    }
+}
+pub fn start(state: AppState) {
+    tokio::spawn(async move {
+        let mut timer = interval(Duration::from_secs(30));
+        timer.tick().await;
+        loop {
+            timer.tick().await;
+            tick(&state).await;
+        }
+    });
+}

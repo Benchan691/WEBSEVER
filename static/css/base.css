@@ -1,0 +1,12 @@
+body {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background-color: #f8f9fa;
+}
+
+main { flex: 1; }
+.navbar-brand { font-weight: 600; letter-spacing: 0.02em; }
+.navbar-dark .navbar-nav .nav-link { color: rgba(255, 255, 255, 0.85); }
+.navbar-dark .navbar-nav .nav-link:hover,
+.navbar-dark .navbar-nav .nav-link.active { color: #fff; }
