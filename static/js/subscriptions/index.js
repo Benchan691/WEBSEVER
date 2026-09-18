@@ -12,6 +12,7 @@
         selfManagement,
         currentUsername,
         currentEmail,
+        currentOrganization,
     } = JSON.parse(document.getElementById('page-config').textContent);
     const modal = new bootstrap.Modal(document.getElementById('subscription-modal'));
     const newsletterCollections = new CollectionPicker('newsletter', {emptySelectionMeansAll: true});
@@ -618,7 +619,8 @@
             subscription = {
                 username: currentUsername || '',
                 email: currentEmail || '',
-                emails: currentEmail ? [currentEmail] : []
+                emails: currentEmail ? [currentEmail] : [],
+                organization: currentOrganization || ''
             };
         }
         vendorProductImportRequestId += 1;
@@ -632,8 +634,8 @@
         renderRecipientInputs(subscription ? (subscription.emails || (subscription.email ? [subscription.email] : [''])) : ['']);
         const organization = document.getElementById('organization');
         if (organization) {
-            organization.value = subscription ? (subscription.organization || '') : '';
-            organization.readOnly = organizationDashboard;
+            organization.value = subscription ? (subscription.organization || currentOrganization || '') : (currentOrganization || '');
+            organization.readOnly = organizationDashboard || selfManagement;
         }
         document.getElementById('delivery-mode').value = subscription ? (subscription.delivery_mode || 'individual') : 'individual';
         if (isAdmin && !accountHubEnabled) {
@@ -688,7 +690,6 @@
             tr.children[0].querySelector('strong').textContent = item.username || t('Unnamed user');
             tr.children[0].querySelector('.recipients').textContent = emails.filter(Boolean).join(', ');
             tr.children[0].querySelector('.organization').textContent = item.organization || '';
-            tr.children[0].querySelector('.organization').classList.toggle('d-none', selfManagement);
             tr.children[0].querySelector('.delivery-mode').textContent = t('Delivery: {mode}', {
                 mode: item.delivery_mode === 'grouped' ? t('Grouped') : t('Individual'),
             });

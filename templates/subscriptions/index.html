@@ -33,7 +33,7 @@
                 <div id="subscription-modal-message" class="alert d-none" role="alert" aria-live="assertive"></div>
                 <div class="row g-3 mb-4">
                     <div class="col-md-4"><label class="form-label" for="username">{{ t('Username') }}</label><input id="username" type="text" class="form-control" autocomplete="username" required{% if not is_admin and not is_organization_admin %} readonly{% endif %}></div>
-                    {% if is_admin or is_organization_admin %}<div class="col-md-4"><label class="form-label" for="organization">{{ t('Organization') }}</label><input id="organization" class="form-control" required></div>{% endif %}
+                    <div class="col-md-4"><label class="form-label" for="organization">{{ t('Organization') }}</label><input id="organization" class="form-control"{% if is_admin or is_organization_admin %} required{% else %} readonly{% endif %}></div>
                     {% if is_admin and not config.ACCOUNT_HUB_ENABLED %}
                     <div class="col-md-4"><label class="form-label" for="password">{{ t('Password') }}</label><input id="password" type="password" class="form-control" autocomplete="new-password" maxlength="72"><div id="password-help" class="form-text">{{ t('Required when creating a subscription; leave blank when editing to keep the current password.') }}</div></div>
                     {% endif %}
@@ -104,6 +104,7 @@
     'selfManagement': not is_admin and not is_organization_admin,
     'currentUsername': current_user.username if current_user else '',
     'currentEmail': current_user.email if current_user else '',
+    'currentOrganization': current_user.organization if current_user else '',
     'accountHubEnabled': config.ACCOUNT_HUB_ENABLED,
 }|tojson }}</script>
 <script src="{{ url_for('static', filename='js/shared/collection-picker.js') }}"></script>

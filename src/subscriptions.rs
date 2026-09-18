@@ -816,13 +816,21 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         } else {
             submitted_emails
         };
-        let organization = {
+        let submitted_organization = {
             let value = ctx.field("organization");
             if value.trim().is_empty() {
                 ctx.field("team")
             } else {
                 value
             }
+        };
+        let organization = if self_only {
+            ctx.user
+                .as_ref()
+                .map(|user| db::string(user, "account_hub_organization"))
+                .unwrap_or_default()
+        } else {
+            submitted_organization
         };
         if username.trim().is_empty() || (!self_only && organization.trim().is_empty()) {
             return json_error(
@@ -1061,6 +1069,14 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 && let Some(organization) = data.get("team").and_then(Value::as_str)
             {
                 data["organization"] = json!(organization);
+            }
+            if is_self_manager(state, ctx) {
+                let current_organization = ctx
+                    .user
+                    .as_ref()
+                    .map(|user| db::string(user, "account_hub_organization"))
+                    .unwrap_or_default();
+                data["organization"] = json!(current_organization);
             }
             let emails = match recipients(&data) {
                 Ok(v) => v,

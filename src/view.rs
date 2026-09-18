@@ -246,7 +246,7 @@ mod tests {
                 "locale":"ch",
                 "html_lang":"zh-Hans",
                 "i18n_catalog":{},
-                "current_user":{"username":"member","email":"member@example.com","role":"user","auth_source":"account_hub"},
+                "current_user":{"username":"member","email":"member@example.com","organization":"SW-ENG","role":"user","auth_source":"account_hub"},
                 "is_admin":false,
                 "is_top_admin":false,
                 "is_organization_admin":false,
@@ -256,10 +256,11 @@ mod tests {
             .unwrap();
         assert!(html.contains("我的订阅"));
         assert!(html.contains("仅管理您自己的订阅。"));
-        assert!(!html.contains("for=\"organization\""));
+        assert!(html.contains("for=\"organization\""));
         assert!(!html.contains("团队"));
         assert!(html.contains("\"selfManagement\":true"));
         assert!(html.contains("\"currentUsername\":\"member\""));
+        assert!(html.contains("\"currentOrganization\":\"SW-ENG\""));
     }
     #[test]
     fn report_templates_render() {
