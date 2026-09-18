@@ -9,6 +9,9 @@
         isAdmin,
         accountHubEnabled,
         organizationDashboard,
+        selfManagement,
+        currentUsername,
+        currentEmail,
     } = JSON.parse(document.getElementById('page-config').textContent);
     const modal = new bootstrap.Modal(document.getElementById('subscription-modal'));
     const newsletterCollections = new CollectionPicker('newsletter', {emptySelectionMeansAll: true});
@@ -611,6 +614,13 @@
         previewTimer = window.setTimeout(refreshReportPreview, 400);
     }
     function openEditor(subscription) {
+        if (!subscription && selfManagement) {
+            subscription = {
+                username: currentUsername || '',
+                email: currentEmail || '',
+                emails: currentEmail ? [currentEmail] : []
+            };
+        }
         vendorProductImportRequestId += 1;
         setVendorProductImportBusy(false);
         showModalMessage('', '');
@@ -665,6 +675,8 @@
     }
     function renderSubscriptionRows() {
         rows.replaceChildren(); document.getElementById('empty').classList.toggle('d-none', subscriptions.length !== 0);
+        const addButton = document.getElementById('add-btn');
+        if (addButton && selfManagement) addButton.classList.toggle('d-none', subscriptions.length !== 0);
         subscriptions.forEach(function (item) {
             const tr = document.createElement('tr');
             tr.innerHTML = '<td><strong></strong><div class="text-muted small recipients"></div><div class="text-muted small team"></div><div class="text-muted small delivery-mode"></div></td><td></td><td></td><td></td>';
@@ -862,7 +874,7 @@
                 statistic_schedule_enabled:document.getElementById('newsletter-statistic-schedule-enabled').checked
             },
             report_profile: buildReportProfilePayload().report_profile };
-        if (isAdmin) {
+        if (isAdmin || (selfManagement && !editingId)) {
             payload.username = document.getElementById('username').value;
             payload.emails = recipientValues();
             if (!accountHubEnabled) payload.password = password;

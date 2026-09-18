@@ -232,6 +232,30 @@ mod tests {
         assert!(html.contains("organization/subscriptions"));
         assert!(html.contains("organizationDashboard"));
     }
+
+    #[test]
+    fn self_subscription_page_renders_self_management_controls() {
+        let env = environment(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
+        let html = env
+            .get_template("subscriptions/index.html")
+            .unwrap()
+            .render(json!({
+                "locale":"ch",
+                "html_lang":"zh-Hans",
+                "i18n_catalog":{},
+                "current_user":{"username":"member","email":"member@example.com","role":"user","auth_source":"account_hub"},
+                "is_admin":false,
+                "is_top_admin":false,
+                "is_organization_admin":false,
+                "config":{"ACCOUNT_HUB_ENABLED":true},
+                "request":{"path":"/subscriptions","full_path":"/subscriptions","blueprint":"subscription","endpoint":""}
+            }))
+            .unwrap();
+        assert!(html.contains("我的订阅"));
+        assert!(html.contains("仅管理您自己的订阅。"));
+        assert!(html.contains("\"selfManagement\":true"));
+        assert!(html.contains("\"currentUsername\":\"member\""));
+    }
     #[test]
     fn report_templates_render() {
         let env = environment(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));

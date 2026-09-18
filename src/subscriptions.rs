@@ -191,6 +191,43 @@ fn can_manage_subscriptions(state: &AppState, ctx: &ReqCtx) -> bool {
     ctx.is_admin(state) || ctx.is_organization_admin(state)
 }
 
+fn is_self_manager(state: &AppState, ctx: &ReqCtx) -> bool {
+    ctx.user.is_some() && !can_manage_subscriptions(state, ctx)
+}
+
+fn same_username(left: &str, right: &str) -> bool {
+    !left.trim().is_empty() && left.trim().eq_ignore_ascii_case(right.trim())
+}
+
+fn self_subscription_owner_filter(ctx: &ReqCtx) -> Option<Document> {
+    let owner_id = ctx.user_id()?;
+    let user = ctx.user.as_ref()?;
+    let owner = doc! {"owner_user_id":owner_id};
+    let mut legacy = Vec::new();
+    let username = db::string(user, "username");
+    if !username.trim().is_empty() {
+        legacy.push(Bson::Document(doc! {
+            "username":{"$regex":regex::escape(username.trim()),"$options":"i"}
+        }));
+    }
+    let email = db::string(user, "email").trim().to_lowercase();
+    if !email.is_empty() {
+        let matcher = doc! {"$regex":regex::escape(&email),"$options":"i"};
+        legacy.push(Bson::Document(doc! {"email":matcher.clone()}));
+        legacy.push(Bson::Document(doc! {"emails":matcher}));
+    }
+    if legacy.is_empty() {
+        return Some(owner);
+    }
+    let legacy_owner = doc! {
+        "$and":[
+            {"$or":[{"owner_user_id":{"$exists":false}},{"owner_user_id":Bson::Null}]},
+            {"$or":legacy},
+        ]
+    };
+    Some(doc! {"$or":[owner, legacy_owner]})
+}
+
 async fn subscription_filter(state: &AppState, ctx: &ReqCtx, id: Option<&str>) -> Option<Document> {
     let owner = if ctx.is_top_admin(state) {
         doc! {}
@@ -200,7 +237,7 @@ async fn subscription_filter(state: &AppState, ctx: &ReqCtx, id: Option<&str>) -
     } else if ctx.is_admin(state) {
         doc! {"managed_by_user_id":ctx.user_id()?}
     } else {
-        doc! {"owner_user_id":ctx.user_id()?}
+        self_subscription_owner_filter(ctx)?
     };
     if let Some(id) = id {
         if id.is_empty() {
@@ -638,7 +675,8 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 "Preview mode must be create or update.",
             );
         }
-        if mode == "create" && !can_manage_subscriptions(state, ctx) {
+        if mode == "create" && !can_manage_subscriptions(state, ctx) && !is_self_manager(state, ctx)
+        {
             return json_error(StatusCode::FORBIDDEN, "Access denied.");
         }
         let mut data = ctx.json.clone();
@@ -698,8 +736,12 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         ));
     }
     if ctx.path == "/api/subscriptions" && ctx.method == Method::POST {
-        if !can_manage_subscriptions(state, ctx) {
-            return json_error(StatusCode::FORBIDDEN, "Administrator access required.");
+        let self_only = is_self_manager(state, ctx);
+        if !can_manage_subscriptions(state, ctx) && !self_only {
+            return json_error(
+                StatusCode::FORBIDDEN,
+                "You can only manage your own subscription.",
+            );
         }
         if state.cfg.account_hub_enabled
             && ctx
@@ -712,15 +754,41 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 "Account Hub users do not use local passwords.",
             );
         }
-        let emails = match recipients(&ctx.json) {
+        let submitted_emails = match recipients(&ctx.json) {
             Ok(v) => v,
             Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
         };
         let username = ctx.field("username");
-        let username = if username.trim().is_empty() {
+        let mut username = if username.trim().is_empty() {
             ctx.field("email")
         } else {
             username
+        };
+        let emails = if self_only {
+            let Some(user) = ctx.user.as_ref() else {
+                return json_error(StatusCode::UNAUTHORIZED, "Authentication required.");
+            };
+            let current_username = db::string(user, "username");
+            if !same_username(&username, &current_username) {
+                return json_error(
+                    StatusCode::FORBIDDEN,
+                    "You can only manage your own subscription.",
+                );
+            }
+            let current_email = db::string(user, "email").trim().to_lowercase();
+            if current_email.is_empty()
+                || submitted_emails.len() != 1
+                || !same_username(&submitted_emails[0], &current_email)
+            {
+                return json_error(
+                    StatusCode::FORBIDDEN,
+                    "You can only manage your own subscription.",
+                );
+            }
+            username = current_username;
+            vec![current_email]
+        } else {
+            submitted_emails
         };
         let team = ctx.field("team");
         if username.trim().is_empty() || team.trim().is_empty() {
@@ -748,6 +816,12 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             .await
             .ok()
             .flatten();
+        if self_only && owner.is_none() {
+            return json_error(
+                StatusCode::FORBIDDEN,
+                "You can only manage your own subscription.",
+            );
+        }
         if ctx.is_organization_admin(state) {
             let Some(member) = owner.as_ref() else {
                 return json_error(
@@ -775,6 +849,12 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             );
         }
         let owner_id = if let Some(owner) = owner {
+            if self_only && ctx.user_id() != owner.get_object_id("_id").ok() {
+                return json_error(
+                    StatusCode::FORBIDDEN,
+                    "You can only manage your own subscription.",
+                );
+            }
             let account_hub_member = ctx.is_organization_admin(state)
                 && db::string(&owner, "auth_source") == "account_hub";
             if db::string(&owner, "role") != "user" && !account_hub_member {
@@ -1086,5 +1166,26 @@ mod tests {
         assert_eq!(row["account_status"], "disabled");
         assert_eq!(row["has_subscription"], false);
         assert!(row["subscription"].is_null());
+    }
+
+    #[test]
+    fn self_subscription_filter_includes_owner_and_legacy_identity() {
+        let owner_id = ObjectId::new();
+        let ctx = ReqCtx {
+            method: Method::GET,
+            path: "/api/subscriptions".into(),
+            query: Vec::new(),
+            headers: axum::http::HeaderMap::new(),
+            body: Vec::new(),
+            json: Value::Null,
+            form: std::collections::HashMap::new(),
+            user: Some(doc! {
+                "_id": owner_id,
+                "username": "member",
+                "email": "member@example.com",
+            }),
+        };
+        let filter = self_subscription_owner_filter(&ctx).unwrap();
+        assert_eq!(filter.get_array("$or").unwrap().len(), 2);
     }
 }
