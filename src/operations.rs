@@ -120,6 +120,29 @@ async fn health(state: &AppState, ctx: &ReqCtx) -> Value {
     let subs = db::find_many(&state.web, "sub_account", filter.clone(), 5000)
         .await
         .unwrap_or_default();
+    let account_hub_sync = json!({
+        "status": heartbeat
+            .as_ref()
+            .map(|value| db::string(value, "account_hub_sync_status"))
+            .unwrap_or_default(),
+        "last_sync_at": heartbeat
+            .as_ref()
+            .and_then(|value| value.get_datetime("account_hub_last_sync_at").ok())
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        "last_error": heartbeat
+            .as_ref()
+            .map(|value| db::string(value, "account_hub_sync_error"))
+            .unwrap_or_default(),
+        "synced_count": heartbeat
+            .as_ref()
+            .and_then(|value| value.get_i64("account_hub_synced_count").ok())
+            .unwrap_or(0),
+        "deleted_count": heartbeat
+            .as_ref()
+            .and_then(|value| value.get_i64("account_hub_deleted_count").ok())
+            .unwrap_or(0),
+    });
     let mut reports = Vec::new();
     let mut newsletters = Vec::new();
     for item in subs {
@@ -161,7 +184,7 @@ async fn health(state: &AppState, ctx: &ReqCtx) -> Value {
     .iter()
     .map(db::bson_json)
     .collect::<Vec<_>>();
-    json!({"generated_at":chrono::Utc::now().to_rfc3339(),"scheduler":{"alive":alive,"last_tick_at":last.map(|v|v.to_string()).unwrap_or_default(),"hostname":heartbeat.as_ref().map(|v|db::string(v,"hostname")).unwrap_or_default(),"pid":heartbeat.as_ref().and_then(|v|v.get_i64("pid").ok()),"retention":heartbeat.as_ref().and_then(|v|v.get_document("retention").ok()).map(db::bson_json).unwrap_or(json!({}))},"reports":reports,"newsletters":newsletters,"recent_newsletter_deliveries":deliveries})
+    json!({"generated_at":chrono::Utc::now().to_rfc3339(),"scheduler":{"alive":alive,"last_tick_at":last.map(|v|v.to_string()).unwrap_or_default(),"hostname":heartbeat.as_ref().map(|v|db::string(v,"hostname")).unwrap_or_default(),"pid":heartbeat.as_ref().and_then(|v|v.get_i64("pid").ok()),"retention":heartbeat.as_ref().and_then(|v|v.get_document("retention").ok()).map(db::bson_json).unwrap_or(json!({})),"account_hub_sync":account_hub_sync},"reports":reports,"newsletters":newsletters,"recent_newsletter_deliveries":deliveries})
 }
 pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
     if ctx.path == "/operations" && ctx.method == Method::GET {

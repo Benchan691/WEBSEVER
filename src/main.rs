@@ -1,3 +1,4 @@
+mod account_hub_sync;
 mod auth;
 mod config;
 mod db;

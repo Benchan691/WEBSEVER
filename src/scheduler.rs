@@ -1,8 +1,8 @@
-use crate::{AppState, db, mail, newsletters, reports, subscriptions};
+use crate::{AppState, account_hub_sync, db, mail, newsletters, reports, subscriptions};
 use chrono::{Datelike, TimeZone};
 use mongodb::bson::{self, Document, doc, oid::ObjectId};
 use serde_json::{Value, json};
-use tokio::time::{Duration, interval};
+use tokio::time::{Duration, Instant, interval};
 
 fn text(value: &Value, key: &str) -> String {
     value
@@ -93,6 +93,57 @@ fn next_weekly(profile: &Value, now: chrono::DateTime<chrono::Utc>) -> bson::Dat
 }
 async fn heartbeat(state: &AppState) {
     let _=db::collection(&state.web,"scheduler_health").update_one(doc!{"_id":"email_scheduler"},doc!{"$set":{"last_tick_at":bson::DateTime::now(),"hostname":std::env::var("HOSTNAME").unwrap_or_default(),"pid":std::process::id() as i64,"updated_at":bson::DateTime::now()}}).upsert(true).await;
+}
+async fn account_hub_tick(state: &AppState) {
+    let now = bson::DateTime::now();
+    if !state.cfg.account_hub_enabled {
+        return;
+    }
+    if state.cfg.account_hub_directory_url.trim().is_empty()
+        || state.cfg.account_hub_directory_token.trim().is_empty()
+    {
+        let _ = db::collection(&state.web, "scheduler_health")
+            .update_one(
+                doc! {"_id":"email_scheduler"},
+                doc! {"$set":{
+                    "account_hub_sync_status":"not_configured",
+                    "account_hub_sync_error":"Account Hub directory sync is not configured.",
+                    "account_hub_sync_updated_at":now,
+                }},
+            )
+            .await;
+        return;
+    }
+    match account_hub_sync::run(state).await {
+        Ok(summary) => {
+            let _ = db::collection(&state.web, "scheduler_health")
+                .update_one(
+                    doc! {"_id":"email_scheduler"},
+                    doc! {"$set":{
+                        "account_hub_last_sync_at":now,
+                        "account_hub_sync_status":"ok",
+                        "account_hub_sync_error":"",
+                        "account_hub_synced_count":summary.synced,
+                        "account_hub_deleted_count":summary.deleted,
+                        "account_hub_sync_updated_at":now,
+                    }},
+                )
+                .await;
+        }
+        Err(error) => {
+            tracing::error!(%error, "Account Hub directory synchronization failed");
+            let _ = db::collection(&state.web, "scheduler_health")
+                .update_one(
+                    doc! {"_id":"email_scheduler"},
+                    doc! {"$set":{
+                        "account_hub_sync_status":"error",
+                        "account_hub_sync_error":error,
+                        "account_hub_sync_updated_at":now,
+                    }},
+                )
+                .await;
+        }
+    }
 }
 async fn manager_paused(state: &AppState, sub: &Document) -> bool {
     let Ok(id) = sub.get_object_id("managed_by_user_id") else {
@@ -337,10 +388,16 @@ async fn tick(state: &AppState) {
 pub fn start(state: AppState) {
     tokio::spawn(async move {
         let mut timer = interval(Duration::from_secs(30));
+        let sync_interval = Duration::from_secs(state.cfg.account_hub_sync_interval_seconds.max(1));
+        let mut next_account_hub_sync = Instant::now();
         timer.tick().await;
         loop {
             timer.tick().await;
             tick(&state).await;
+            if Instant::now() >= next_account_hub_sync {
+                next_account_hub_sync = Instant::now() + sync_interval;
+                account_hub_tick(&state).await;
+            }
         }
     });
 }

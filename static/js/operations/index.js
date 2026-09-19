@@ -49,6 +49,14 @@
         const alive = Boolean(scheduler && scheduler.alive);
         banner.className = 'alert mb-4 ' + (alive ? 'alert-success' : 'alert-warning');
         const retention = (scheduler && scheduler.retention) || {};
+        const accountHub = (scheduler && scheduler.account_hub_sync) || {};
+        const accountHubStatus = accountHub.status === 'ok'
+            ? t('OK')
+            : accountHub.status === 'error'
+                ? t('Error')
+                : accountHub.status === 'not_configured'
+                    ? t('Not configured')
+                    : (accountHub.status || t('Not configured'));
         const retentionResult = retention.last_result
             ? JSON.stringify(retention.last_result)
             : '—';
@@ -62,6 +70,12 @@
             ' · ' + t('PID:') + ' ' + escapeHtml((scheduler && scheduler.pid) != null ? scheduler.pid : '—') +
             ' · ' + t('Retention last run:') + ' ' + formatTime(retention.last_run_at) +
             ' · ' + t('Retention result:') + ' ' + escapeHtml(retentionResult) +
+            '</div><div class="small mt-1">' +
+            t('Account Hub sync:') + ' ' + escapeHtml(accountHubStatus) +
+            ' · ' + t('Last sync:') + ' ' + formatTime(accountHub.last_sync_at) +
+            ' · ' + t('Synced:') + ' ' + escapeHtml(accountHub.synced_count == null ? '0' : accountHub.synced_count) +
+            ' · ' + t('Deleted:') + ' ' + escapeHtml(accountHub.deleted_count == null ? '0' : accountHub.deleted_count) +
+            (accountHub.last_error ? ' · <span class="text-danger">' + escapeHtml(accountHub.last_error) + '</span>' : '') +
             '</div>';
     }
 

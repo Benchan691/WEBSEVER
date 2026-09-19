@@ -780,7 +780,11 @@ fn hub_error(state: &AppState, ctx: &ReqCtx, message: &str, status: StatusCode) 
     r
 }
 
-async fn sync_account_hub_subscription_email(state: &AppState, user: &Document, email: &str) {
+pub(crate) async fn sync_account_hub_subscription_email(
+    state: &AppState,
+    user: &Document,
+    email: &str,
+) {
     let mut ownership = Vec::new();
     if let Ok(owner_id) = user.get_object_id("_id") {
         ownership.push(Bson::Document(doc! {"owner_user_id": owner_id}));

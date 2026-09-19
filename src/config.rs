@@ -17,6 +17,10 @@ pub struct Config {
     pub account_hub_enabled: bool,
     pub account_hub_login_url: String,
     pub account_hub_token_check_url: String,
+    pub account_hub_directory_url: String,
+    pub account_hub_directory_token: String,
+    pub account_hub_sync_interval_seconds: u64,
+    pub account_hub_timeout_seconds: u64,
     pub account_hub_required_role: String,
     pub newsletter_root: PathBuf,
     pub review_view_suffix: String,
@@ -48,6 +52,21 @@ impl Config {
                         .map(str::to_owned)
                 })
                 .unwrap_or_else(|| default.to_owned())
+        };
+        let get_u64 = |key: &str, pointer: &str, default: u64| -> u64 {
+            env::var(key)
+                .ok()
+                .or_else(|| {
+                    file.pointer(pointer).and_then(|value| {
+                        value
+                            .as_u64()
+                            .map(|value| value.to_string())
+                            .or_else(|| value.as_str().map(str::to_owned))
+                    })
+                })
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(default)
         };
         let get_bool = |key: &str, pointer: &str| -> bool {
             env::var(key)
@@ -89,6 +108,25 @@ impl Config {
             "/account_hub/token_check_url",
             "",
         );
+        let account_hub_directory_url = get(
+            "ACCOUNT_HUB_DIRECTORY_URL",
+            "/account_hub/directory_url",
+            "",
+        );
+        let account_hub_directory_token = env::var("ACCOUNT_HUB_DIRECTORY_TOKEN")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_default();
+        let account_hub_sync_interval_seconds = get_u64(
+            "ACCOUNT_HUB_SYNC_INTERVAL_SECONDS",
+            "/account_hub/sync_interval_seconds",
+            300,
+        );
+        let account_hub_timeout_seconds = get_u64(
+            "ACCOUNT_HUB_TIMEOUT_SECONDS",
+            "/account_hub/timeout_seconds",
+            5,
+        );
         let account_hub_required_role = get(
             "ACCOUNT_HUB_REQUIRED_ROLE",
             "/account_hub/required_role",
@@ -117,6 +155,10 @@ impl Config {
             account_hub_enabled,
             account_hub_login_url,
             account_hub_token_check_url,
+            account_hub_directory_url,
+            account_hub_directory_token,
+            account_hub_sync_interval_seconds,
+            account_hub_timeout_seconds,
             account_hub_required_role,
             newsletter_root,
             review_view_suffix,
