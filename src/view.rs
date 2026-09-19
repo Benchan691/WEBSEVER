@@ -323,7 +323,7 @@ mod tests {
         assert!(html.contains("for=\"organization\""));
         assert!(!html.contains("for=\"team\""));
         assert!(!html.contains("团队"));
-        assert!(!html.contains("add-recipient-btn"));
+        assert!(html.contains("add-recipient-btn"));
         assert!(html.contains("organizationDashboard"));
     }
 

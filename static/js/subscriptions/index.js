@@ -20,7 +20,7 @@
     const newsletterCollections = new CollectionPicker('newsletter', {emptySelectionMeansAll: true});
     const rows = document.getElementById('rows');
     const message = document.getElementById('message');
-    let collections = [], subscriptions = [], editingId = null, recipientLocked = false;
+    let collections = [], subscriptions = [], editingId = null, recipientLocked = false, editorLocalSubscription = false;
     let newsletterVendorProductFilter = emptyVendorProductFilter();
     let reportVendorProductFilter = emptyVendorProductFilter();
     let reportLegacyKeywords = [];
@@ -630,11 +630,17 @@
         setVendorProductImportBusy(false);
         showModalMessage('', '');
         editingId = subscription && subscription.id ? subscription.id : null;
-        document.getElementById('modal-title').textContent = editingId ? t('Edit Subscription') : t('Add Subscription');
+        editorLocalSubscription = Boolean(subscription && subscription.local_subscription)
+            || (organizationDashboard && !subscription);
+        document.getElementById('modal-title').textContent = editingId
+            ? t('Edit Subscription')
+            : (editorLocalSubscription ? t('Add Local Subscription') : t('Add Subscription'));
         const username = document.getElementById('username');
         username.value = subscription ? (subscription.username || '') : '';
         username.readOnly = !isAdmin;
-        recipientLocked = accountHubUser || organizationDashboard || !!(subscription && (subscription.account_hub_email || subscription.recipientLocked));
+        recipientLocked = !editorLocalSubscription && (
+            accountHubUser || !!(subscription && (subscription.account_hub_email || subscription.recipientLocked))
+        );
         renderRecipientInputs(subscription ? (subscription.emails || (subscription.email ? [subscription.email] : [''])) : [''], recipientLocked);
         const addRecipientButton = document.getElementById('add-recipient-btn');
         if (addRecipientButton) addRecipientButton.classList.toggle('d-none', recipientLocked);
@@ -758,17 +764,38 @@
             const tr = document.createElement('tr');
             tr.innerHTML = '<td><strong></strong><div class="text-muted small email"></div><div class="text-muted small role"></div></td><td></td><td></td><td></td><td></td>';
             const subscription = item.subscription && item.subscription.id ? item.subscription : null;
+            const localSubscription = item.local_subscription === true;
             tr.children[0].querySelector('strong').textContent = item.username || t('Unnamed user');
-            tr.children[0].querySelector('.email').textContent = item.account_hub_email || t('Account Hub email unavailable');
-            tr.children[0].querySelector('.role').textContent = item.organization_admin ? t('Organization administrator') : t('Organization member');
+            const localEmails = subscription && Array.isArray(subscription.emails)
+                ? subscription.emails.filter(Boolean).join(', ')
+                : '';
+            tr.children[0].querySelector('.email').textContent = localSubscription
+                ? localEmails
+                : (item.account_hub_email || t('Account Hub email unavailable'));
+            tr.children[0].querySelector('.role').textContent = localSubscription
+                ? t('Local subscription')
+                : (item.organization_admin ? t('Organization administrator') : t('Organization member'));
             const status = document.createElement('span');
-            status.className = item.disabled ? 'badge text-bg-secondary' : 'badge text-bg-success';
-            status.textContent = item.disabled ? t('Disabled') : t('Active');
+            status.className = localSubscription
+                ? 'badge text-bg-info'
+                : (item.disabled ? 'badge text-bg-secondary' : 'badge text-bg-success');
+            status.textContent = localSubscription
+                ? t('Local subscription')
+                : (item.disabled ? t('Disabled') : t('Active'));
             tr.children[1].append(status);
             tr.children[2].textContent = subscription ? profileStatus(subscription.newsletter_profile, 'newsletter') : t('No subscription');
             tr.children[3].textContent = subscription ? profileStatus(subscription.report_profile, 'report') : t('No subscription');
             const actions = document.createElement('div'); actions.className = 'd-flex flex-wrap gap-1';
-            if (subscription) {
+            if (subscription && localSubscription) {
+                const edit = document.createElement('button'); edit.className = 'btn btn-outline-primary btn-sm'; edit.type = 'button'; edit.textContent = t('Edit');
+                edit.onclick = function () {
+                    openEditor(Object.assign({}, subscription, {
+                        local_subscription: true,
+                        recipientLocked: false
+                    }));
+                };
+                actions.append(edit);
+            } else if (subscription) {
                 const edit = document.createElement('button'); edit.className = 'btn btn-outline-primary btn-sm'; edit.type = 'button'; edit.textContent = t('Edit');
                 edit.onclick = function () {
                     openEditor(Object.assign({}, subscription, {
@@ -882,6 +909,7 @@
             },
             report_profile: buildReportProfilePayload().report_profile };
         if (organization) payload.organization = organization.value;
+        if (editorLocalSubscription) payload.local_subscription = true;
         if (isAdmin || organizationDashboard || (selfManagement && !editingId)) {
             payload.username = document.getElementById('username').value;
             payload.emails = recipientValues();

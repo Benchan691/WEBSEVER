@@ -161,6 +161,7 @@ fn public(document: &Document) -> Value {
         for key in [
             "owner_user_id",
             "managed_by_user_id",
+            "organization_id",
             "password",
             "password_hash",
             "schedule_claim_until",
@@ -191,6 +192,42 @@ fn subscription_organization(value: &Value) -> &str {
                 .filter(|value| !value.trim().is_empty())
         })
         .unwrap_or("")
+}
+
+fn organization_name(user: &Document) -> String {
+    db::string(user, "account_hub_organization")
+        .trim()
+        .to_owned()
+}
+
+fn organization_id(user: &Document) -> String {
+    db::string(user, "account_hub_organization_id")
+        .trim()
+        .to_owned()
+}
+
+fn same_organization_name(left: &str, right: &str) -> bool {
+    !left.trim().is_empty() && left.trim().eq_ignore_ascii_case(right.trim())
+}
+
+fn local_subscription_scope(ctx: &ReqCtx) -> Option<Document> {
+    let manager_id = ctx.user_id()?;
+    let manager = ctx.user.as_ref()?;
+    let mut filter = doc! {
+        "local_subscription": true,
+        "managed_by_user_id": manager_id,
+    };
+    let organization_id = organization_id(manager);
+    if !organization_id.is_empty() {
+        filter.insert("organization_id", organization_id);
+    } else {
+        let organization = organization_name(manager);
+        if organization.is_empty() {
+            return None;
+        }
+        filter.insert("organization", organization);
+    }
+    Some(filter)
 }
 async fn organization_members(state: &AppState, ctx: &ReqCtx) -> Option<Vec<Document>> {
     let manager = ctx.user.as_ref()?;
@@ -284,7 +321,11 @@ async fn subscription_filter(state: &AppState, ctx: &ReqCtx, id: Option<&str>) -
         doc! {}
     } else if ctx.is_organization_admin(state) {
         let ids = organization_member_ids(state, ctx).await?;
-        doc! {"owner_user_id":{"$in":ids}}
+        let mut scopes = vec![Bson::Document(doc! {"owner_user_id":{"$in":ids}})];
+        if let Some(local_scope) = local_subscription_scope(ctx) {
+            scopes.push(Bson::Document(local_scope));
+        }
+        doc! {"$or":scopes}
     } else if ctx.is_admin(state) {
         doc! {"managed_by_user_id":ctx.user_id()?}
     } else {
@@ -329,6 +370,25 @@ fn public_organization_member(user: &Document, subscription: Option<&Document>) 
     value
 }
 
+fn public_local_subscription(subscription: &Document) -> Value {
+    let value = public(subscription);
+    let emails = value.get("emails").cloned().unwrap_or_else(|| json!([]));
+    json!({
+        "id": value.get("id").cloned().unwrap_or(Value::Null),
+        "username": value.get("username").cloned().unwrap_or(json!("")),
+        "email": value.get("email").cloned().unwrap_or(json!("")),
+        "emails": emails,
+        "organization": value.get("organization").cloned().unwrap_or(json!("")),
+        "organization_admin": false,
+        "account_status": "local",
+        "disabled": false,
+        "auth_source": "local",
+        "local_subscription": true,
+        "has_subscription": true,
+        "subscription": value,
+    })
+}
+
 async fn organization_subscription_rows(
     state: &AppState,
     ctx: &ReqCtx,
@@ -358,7 +418,7 @@ async fn organization_subscription_rows(
             by_owner.insert(owner_id, subscription);
         }
     }
-    Ok(members
+    let mut rows: Vec<Value> = members
         .iter()
         .map(|member| {
             let subscription = member
@@ -367,7 +427,14 @@ async fn organization_subscription_rows(
                 .and_then(|owner_id| by_owner.get(&owner_id));
             public_organization_member(member, subscription)
         })
-        .collect())
+        .collect();
+    if let Some(local_scope) = local_subscription_scope(ctx) {
+        let local_subscriptions = db::find_many(&state.web, "sub_account", local_scope, 5000)
+            .await
+            .map_err(|_| "Unable to load subscriptions.".to_owned())?;
+        rows.extend(local_subscriptions.iter().map(public_local_subscription));
+    }
+    Ok(rows)
 }
 fn recipients(data: &Value) -> Result<Vec<String>, String> {
     let raw = if let Some(items) = data.get("emails") {
@@ -787,6 +854,17 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
     }
     if ctx.path == "/api/subscriptions" && ctx.method == Method::POST {
         let self_only = is_self_manager(state, ctx);
+        let local_subscription = ctx
+            .json
+            .get("local_subscription")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if local_subscription && !ctx.is_organization_admin(state) {
+            return json_error(
+                StatusCode::FORBIDDEN,
+                "Only an organization administrator can create local subscriptions.",
+            );
+        }
         if !can_manage_subscriptions(state, ctx) && !self_only {
             return json_error(
                 StatusCode::FORBIDDEN,
@@ -819,11 +897,13 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             Ok(v) => v,
             Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
         };
-        let username = ctx.field("username");
-        let mut username = if username.trim().is_empty() {
+        let submitted_username = ctx.field("username");
+        let mut username = if local_subscription {
+            submitted_username
+        } else if submitted_username.trim().is_empty() {
             ctx.field("email")
         } else {
-            username
+            submitted_username
         };
         let mut emails = if self_only {
             let Some(user) = ctx.user.as_ref() else {
@@ -867,7 +947,9 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         } else {
             submitted_organization
         };
-        if username.trim().is_empty() || (!self_only && organization.trim().is_empty()) {
+        if username.trim().is_empty()
+            || (!self_only && !local_subscription && organization.trim().is_empty())
+        {
             return json_error(
                 StatusCode::BAD_REQUEST,
                 "Username, email, and organization are required.",
@@ -882,6 +964,96 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             Ok(v) => v,
             Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
         };
+        if local_subscription {
+            let Some(manager) = ctx.user.as_ref() else {
+                return json_error(StatusCode::UNAUTHORIZED, "Authentication required.");
+            };
+            let manager_organization = organization_name(manager);
+            if manager_organization.is_empty() {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "Your Account Hub organization is not available.",
+                );
+            }
+            if !organization.trim().is_empty()
+                && !same_organization_name(&organization, &manager_organization)
+            {
+                return json_error(
+                    StatusCode::FORBIDDEN,
+                    "Local subscriptions must belong to your organization.",
+                );
+            }
+            let existing = db::find_one(
+                &state.web,
+                "sub_account",
+                doc! {
+                    "username": {
+                        "$regex": format!("^{}$", regex::escape(username.trim())),
+                        "$options": "i"
+                    }
+                },
+            )
+            .await
+            .ok()
+            .flatten();
+            if existing.is_some() {
+                return json_error(
+                    StatusCode::CONFLICT,
+                    "A subscription already exists for this username.",
+                );
+            }
+            let now = bson::DateTime::now();
+            let mut document = doc! {
+                "managed_by_user_id": ctx.user_id().unwrap(),
+                "local_subscription": true,
+                "username": username.trim(),
+                "emails": emails.clone(),
+                "email": &emails[0],
+                "organization": manager_organization.clone(),
+                "delivery_mode": "individual",
+                "newsletter_profile": db::json_doc(&newsletter).unwrap(),
+                "report_profile": db::json_doc(&report).unwrap(),
+                "created_at": now,
+                "updated_at": now,
+            };
+            let manager_organization_id = organization_id(manager);
+            if !manager_organization_id.is_empty() {
+                document.insert("organization_id", manager_organization_id);
+            }
+            return Some(
+                match db::collection(&state.web, "sub_account")
+                    .insert_one(document)
+                    .await
+                {
+                    Ok(v) => {
+                        if notify(
+                            state,
+                            &emails,
+                            "created",
+                            username.trim(),
+                            &manager_organization,
+                        )
+                        .await
+                        .is_err()
+                        {
+                            view::error(
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "Subscription was saved, but the confirmation email could not be sent.",
+                            )
+                        } else {
+                            view::json_response(
+                                StatusCode::CREATED,
+                                json!({"success":true,"id":v.inserted_id.as_object_id().map(|id|id.to_hex()).unwrap_or_default()}),
+                            )
+                        }
+                    }
+                    Err(_) => view::error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Unable to add subscription.",
+                    ),
+                },
+            );
+        }
         let users = db::collection(&state.web, "auth");
         let owner = users
             .find_one(doc! {"username_key":username.trim().to_lowercase()})
@@ -1093,6 +1265,25 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             });
         }
         if action.is_empty() && ctx.method == Method::PUT {
+            let local_subscription = db::bool_field(&existing, "local_subscription");
+            if ctx
+                .json
+                .get("local_subscription")
+                .and_then(Value::as_bool)
+                .is_some_and(|value| value)
+                && !local_subscription
+            {
+                return json_error(
+                    StatusCode::FORBIDDEN,
+                    "Account Hub subscriptions cannot be converted to local subscriptions.",
+                );
+            }
+            if local_subscription && !ctx.is_organization_admin(state) {
+                return json_error(
+                    StatusCode::FORBIDDEN,
+                    "Only the organization administrator who created this subscription can edit it.",
+                );
+            }
             if !can_manage_subscriptions(state, ctx)
                 && ["username", "emails", "email", "password"]
                     .iter()
@@ -1103,7 +1294,9 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                     "Only an administrator can edit subscription identity fields.",
                 );
             }
-            let owner = if let Ok(owner_id) = existing.get_object_id("owner_user_id") {
+            let owner = if local_subscription {
+                None
+            } else if let Ok(owner_id) = existing.get_object_id("owner_user_id") {
                 db::find_one(&state.web, "auth", doc! {"_id":owner_id})
                     .await
                     .ok()
@@ -1148,6 +1341,32 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                     .unwrap_or_default();
                 data["organization"] = json!(current_organization);
             }
+            if local_subscription {
+                let Some(manager) = ctx.user.as_ref() else {
+                    return json_error(StatusCode::UNAUTHORIZED, "Authentication required.");
+                };
+                let manager_organization = organization_name(manager);
+                if manager_organization.is_empty() {
+                    return json_error(
+                        StatusCode::BAD_REQUEST,
+                        "Your Account Hub organization is not available.",
+                    );
+                }
+                let submitted_organization = data
+                    .get("organization")
+                    .and_then(Value::as_str)
+                    .or_else(|| data.get("team").and_then(Value::as_str))
+                    .unwrap_or("");
+                if !submitted_organization.trim().is_empty()
+                    && !same_organization_name(submitted_organization, &manager_organization)
+                {
+                    return json_error(
+                        StatusCode::FORBIDDEN,
+                        "Local subscriptions must belong to your organization.",
+                    );
+                }
+                data["organization"] = json!(manager_organization);
+            }
             let mut emails = match recipients(&data) {
                 Ok(v) => v,
                 Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
@@ -1171,8 +1390,9 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             let mode = "individual";
             let recipient_submitted =
                 ctx.json.get("emails").is_some() || ctx.json.get("email").is_some();
-            let identity_change =
-                ctx.is_organization_admin(state) && ctx.json.get("username").is_some();
+            let identity_change = !local_subscription
+                && ctx.is_organization_admin(state)
+                && ctx.json.get("username").is_some();
             let current_owner_hub_email = if identity_change {
                 None
             } else if let Some(owner) = owner.as_ref() {
@@ -1198,7 +1418,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             if let Some(account_hub_email) = current_owner_hub_email.as_ref() {
                 update.insert("account_hub_email", account_hub_email.clone());
             }
-            if ctx.is_organization_admin(state) && ctx.json.get("username").is_some() {
+            if identity_change {
                 let Some(manager) = ctx.user.as_ref() else {
                     return json_error(StatusCode::UNAUTHORIZED, "Authentication required.");
                 };
@@ -1266,7 +1486,19 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 update.insert("account_hub_email", account_hub_email);
             }
             let mut unset = doc! {"team":""};
-            if current_owner_hub_email.is_none() && !identity_change {
+            if local_subscription {
+                update.insert("local_subscription", true);
+                update.insert("managed_by_user_id", ctx.user_id().unwrap());
+                let manager_organization_id =
+                    ctx.user.as_ref().map(organization_id).unwrap_or_default();
+                if manager_organization_id.is_empty() {
+                    unset.insert("organization_id", "");
+                } else {
+                    update.insert("organization_id", manager_organization_id);
+                }
+                unset.insert("owner_user_id", "");
+                unset.insert("account_hub_email", "");
+            } else if current_owner_hub_email.is_none() && !identity_change {
                 unset.insert("account_hub_email", "");
             }
             return Some(
@@ -1275,7 +1507,9 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                     .await
                 {
                     Ok(_) => {
-                        let changed = ctx.json.get("newsletter_profile").is_some()
+                        let changed = ctx.json.get("username").is_some()
+                            || ctx.json.get("email").is_some()
+                            || ctx.json.get("newsletter_profile").is_some()
                             || ctx.json.get("report_profile").is_some()
                             || ctx.json.get("emails").is_some()
                             || ctx.json.get("organization").is_some()
@@ -1376,6 +1610,28 @@ mod tests {
         assert_eq!(row["account_status"], "disabled");
         assert_eq!(row["has_subscription"], false);
         assert!(row["subscription"].is_null());
+    }
+
+    #[test]
+    fn local_subscription_rows_keep_manual_recipients_and_scope_marker() {
+        let subscription = doc! {
+            "_id": ObjectId::new(),
+            "local_subscription": true,
+            "username": "local-report",
+            "email": "one@example.com",
+            "emails": ["one@example.com", "two@example.com"],
+            "organization": "SW-ENG",
+            "newsletter_profile": {"enabled": false},
+            "report_profile": {"enabled": true},
+        };
+        let row = public_local_subscription(&subscription);
+        assert_eq!(row["local_subscription"], true);
+        assert_eq!(row["account_status"], "local");
+        assert_eq!(row["organization"], "SW-ENG");
+        assert_eq!(row["emails"][1], "two@example.com");
+        assert_eq!(row["subscription"]["local_subscription"], true);
+        assert_eq!(row["subscription"]["emails"][0], "one@example.com");
+        assert!(row["subscription"].get("managed_by_user_id").is_none());
     }
 
     #[test]
