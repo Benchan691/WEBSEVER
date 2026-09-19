@@ -328,6 +328,7 @@
     "legacy keyword filter": "旧版关键词筛选",
     "Delete subscription for {email}?": "确定删除 {email} 的订阅？",
     "Delete subscription for {username}?": "确定删除用户名为 {username} 的订阅？",
+    "Subscription deleted.": "订阅已删除。",
     "Subscription saved.": "订阅已保存。",
     "Newsletter statistics email sent.": "通讯统计邮件已发送。",
     "Filter review records and prepare selections for reports.": "筛选审核记录并为报告准备选中项。",

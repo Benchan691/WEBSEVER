@@ -1240,6 +1240,13 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             );
         }
         if action.is_empty() && ctx.method == Method::DELETE {
+            if ctx.is_organization_admin(state) && !db::bool_field(&existing, "local_subscription")
+            {
+                return json_error(
+                    StatusCode::FORBIDDEN,
+                    "Account Hub subscriptions cannot be deleted by an organization administrator.",
+                );
+            }
             let old = db::bson_json(&existing);
             let emails = recipients(&old).unwrap_or_default();
             let username = old["username"].as_str().unwrap_or("");

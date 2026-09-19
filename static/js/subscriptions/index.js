@@ -794,7 +794,22 @@
                         recipientLocked: false
                     }));
                 };
-                actions.append(edit);
+                const remove = document.createElement('button'); remove.className = 'btn btn-outline-danger btn-sm'; remove.type = 'button'; remove.textContent = t('Delete');
+                remove.onclick = function () {
+                    const username = item.username || subscription.username || '';
+                    if (!window.confirm(t('Delete subscription for {username}?', {username: username}))) return;
+                    remove.disabled = true;
+                    requestJson(apiUrl(subscription.id), {method: 'DELETE'})
+                        .then(function () {
+                            showMessage(t('Subscription deleted.'), 'success');
+                            return load();
+                        })
+                        .catch(function (error) {
+                            remove.disabled = false;
+                            showMessage(error.message, 'danger');
+                        });
+                };
+                actions.append(edit, remove);
             } else if (subscription) {
                 const edit = document.createElement('button'); edit.className = 'btn btn-outline-primary btn-sm'; edit.type = 'button'; edit.textContent = t('Edit');
                 edit.onclick = function () {
