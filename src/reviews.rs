@@ -3,6 +3,7 @@ use axum::{
     http::{Method, StatusCode},
     response::Response,
 };
+use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone, Utc};
 use futures::TryStreamExt;
 use mongodb::bson::{Bson, Document, doc};
 use regex::Regex;
@@ -60,6 +61,26 @@ fn regex_clause(field: &str, value: &str) -> Bson {
     );
     Bson::Document(result)
 }
+
+fn parse_review_datetime(value: &str) -> Option<DateTime<Utc>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if let Ok(parsed) = DateTime::parse_from_rfc3339(value) {
+        return Some(parsed.with_timezone(&Utc));
+    }
+    let hong_kong = FixedOffset::east_opt(8 * 3600)?;
+    ["%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S"]
+        .iter()
+        .find_map(|format| {
+            NaiveDateTime::parse_from_str(value, format)
+                .ok()
+                .and_then(|parsed| hong_kong.from_local_datetime(&parsed).single())
+                .map(|parsed| parsed.with_timezone(&Utc))
+        })
+}
+
 fn filter(ctx: &ReqCtx) -> Result<Document, String> {
     let mut clauses = Vec::<Bson>::new();
     for (arg, fields) in [
@@ -108,18 +129,39 @@ fn filter(ctx: &ReqCtx) -> Result<Document, String> {
         clauses.push(Bson::Document(doc! {"$or": search.split_whitespace().flat_map(|term| fields.iter().map(move |field| regex_clause(field,term))).collect::<Vec<_>>() }));
     }
     let window = ctx.arg("time_window");
-    let days = match window.as_str() {
-        "24h" => 1,
-        "7d" => 7,
-        "30d" => 30,
-        "" | "all" | "custom" => 0,
+    let now = Utc::now();
+    let hong_kong = FixedOffset::east_opt(8 * 3600).unwrap();
+    let bounds = match window.as_str() {
+        "" | "all" => None,
+        "daily" => {
+            let local_now = now.with_timezone(&hong_kong);
+            let start = local_now
+                .date_naive()
+                .and_hms_opt(0, 0, 0)
+                .and_then(|value| hong_kong.from_local_datetime(&value).single())
+                .map(|value| value.with_timezone(&Utc))
+                .expect("midnight is a valid local time");
+            Some((start, now))
+        }
+        "week" => Some((now - chrono::Duration::days(7), now)),
+        "24h" => Some((now - chrono::Duration::hours(24), now)),
+        "7d" => Some((now - chrono::Duration::days(7), now)),
+        "30d" => Some((now - chrono::Duration::days(30), now)),
+        "custom" => {
+            let start = parse_review_datetime(&ctx.arg("start"));
+            let end = parse_review_datetime(&ctx.arg("end"));
+            if start.is_none_or(|start| end.is_none_or(|end| start >= end)) {
+                return Err("Custom scrape time requires a valid start before end.".into());
+            }
+            Some((start.unwrap(), end.unwrap()))
+        }
         _ => return Err("Invalid time window.".into()),
     };
-    if days > 0 {
-        let start = mongodb::bson::DateTime::from_millis(
-            (chrono::Utc::now() - chrono::Duration::days(days)).timestamp_millis(),
-        );
-        clauses.push(Bson::Document(doc! {"observed_at": {"$gte": start}}));
+    if let Some((start, end)) = bounds {
+        clauses.push(Bson::Document(doc! {"observed_at": {
+            "$gte": mongodb::bson::DateTime::from_millis(start.timestamp_millis()),
+            "$lt": mongodb::bson::DateTime::from_millis(end.timestamp_millis()),
+        }}));
     }
     if clauses.is_empty() {
         Ok(doc! {})
@@ -667,6 +709,37 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn filter_context(query: Vec<(&str, &str)>) -> ReqCtx {
+        ReqCtx {
+            method: Method::GET,
+            path: "/api/reviews/search".into(),
+            query: query
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                .collect(),
+            headers: axum::http::HeaderMap::new(),
+            body: Vec::new(),
+            json: Value::Null,
+            form: HashMap::new(),
+            user: None,
+        }
+    }
+
+    #[test]
+    fn review_filter_accepts_frontend_time_windows() {
+        for window in ["all", "daily", "week"] {
+            assert!(filter(&filter_context(vec![("time_window", window)])).is_ok());
+        }
+        let custom = filter(&filter_context(vec![
+            ("time_window", "custom"),
+            ("start", "2026-06-01T08:30"),
+            ("end", "2026-06-02T09:45"),
+        ]))
+        .expect("valid custom scrape time");
+        assert!(custom.get("observed_at").is_some());
+        assert!(filter(&filter_context(vec![("time_window", "invalid")])).is_err());
+    }
 
     #[test]
     fn normalized_cve_document_restores_display_fields() {
