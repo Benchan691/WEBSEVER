@@ -643,7 +643,6 @@
             organization.value = subscription ? (subscription.organization || currentOrganization || '') : (currentOrganization || '');
             organization.readOnly = organizationDashboard || selfManagement;
         }
-        document.getElementById('delivery-mode').value = subscription ? (subscription.delivery_mode || 'individual') : 'individual';
         if (isAdmin && !accountHubEnabled) {
             document.getElementById('password').value = '';
             document.getElementById('password-help').textContent = editingId
@@ -691,14 +690,11 @@
         if (addButton && selfManagement) addButton.classList.toggle('d-none', subscriptions.length !== 0);
         subscriptions.forEach(function (item) {
             const tr = document.createElement('tr');
-            tr.innerHTML = '<td><strong></strong><div class="text-muted small recipients"></div><div class="text-muted small organization"></div><div class="text-muted small delivery-mode"></div></td><td></td><td></td><td></td>';
+            tr.innerHTML = '<td><strong></strong><div class="text-muted small recipients"></div><div class="text-muted small organization"></div></td><td></td><td></td><td></td>';
             const emails = Array.isArray(item.emails) && item.emails.length ? item.emails : [item.email];
             tr.children[0].querySelector('strong').textContent = item.username || t('Unnamed user');
             tr.children[0].querySelector('.recipients').textContent = emails.filter(Boolean).join(', ');
             tr.children[0].querySelector('.organization').textContent = item.organization || '';
-            tr.children[0].querySelector('.delivery-mode').textContent = t('Delivery: {mode}', {
-                mode: item.delivery_mode === 'grouped' ? t('Grouped') : t('Individual'),
-            });
             if (item.newsletter_profile.enabled) {
                 const collectionCount = item.newsletter_profile.filters.collections.length;
                 const newsletterSummary = [
@@ -879,7 +875,6 @@
         }
         const organization = document.getElementById('organization');
         const payload = {
-            delivery_mode: document.getElementById('delivery-mode').value,
             newsletter_profile:{
                 enabled:document.getElementById('newsletter-enabled').checked,
                 filters:readFilters('newsletter'),

@@ -353,6 +353,7 @@ mod tests {
         assert!(html.contains("\"currentUsername\":\"member\""));
         assert!(html.contains("\"currentAccountHubEmail\":\"hub@example.com\""));
         assert!(html.contains("\"currentOrganization\":\"SW-ENG\""));
+        assert!(!html.contains("id=\"delivery-mode\""));
     }
     #[test]
     fn report_templates_render() {

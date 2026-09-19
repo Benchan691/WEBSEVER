@@ -156,6 +156,7 @@ fn public(document: &Document) -> Value {
             .unwrap_or("")
             .to_owned();
         obj.insert("organization".into(), json!(organization));
+        obj.insert("delivery_mode".into(), json!("individual"));
         obj.remove("team");
         for key in [
             "owner_user_id",
@@ -415,7 +416,6 @@ fn escape_html(value: &str) -> String {
 async fn notify(
     state: &AppState,
     emails: &[String],
-    mode: &str,
     kind: &str,
     username: &str,
     organization: &str,
@@ -430,7 +430,7 @@ async fn notify(
         escape_html(username),
         escape_html(organization)
     );
-    mail::send(state, emails, mode, subject, &body).await
+    mail::send(state, emails, "individual", subject, &body).await
 }
 async fn vendor_import(ctx: &ReqCtx) -> Response {
     let content_type = ctx
@@ -685,7 +685,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         let names = reviews::views(state).await.unwrap_or_default();
         return Some(view::json_response(
             StatusCode::OK,
-            json!({"schema_version":1,"subscription":{"fields":["username","emails","organization","delivery_mode"],"delivery_modes":["grouped","individual"],"default_delivery_mode":"individual"},"profile_types":["newsletter","report"],"review_collections":names,"filters":{"defaults":default_filters()},"profiles":{"newsletter":{"defaults":default_profile("newsletter")},"report":{"defaults":default_profile("report")}},"vendor_product_filter":{"schema_version":1,"defaults":{"enabled":false,"schema_version":1,"include_possible_matches":false,"rows":[]}},"allowed_values":{"severity":["Critical","High","Medium","Low"],"time_window":["all","daily","week","custom"],"generation_mode":["template","enriched_weekly"],"report_language":["en","zh","ch"]},"limits":{"report_scope_max_count":500}}),
+            json!({"schema_version":1,"subscription":{"fields":["username","emails","organization"],"delivery_mode":"individual"},"profile_types":["newsletter","report"],"review_collections":names,"filters":{"defaults":default_filters()},"profiles":{"newsletter":{"defaults":default_profile("newsletter")},"report":{"defaults":default_profile("report")}},"vendor_product_filter":{"schema_version":1,"defaults":{"enabled":false,"schema_version":1,"include_possible_matches":false,"rows":[]}},"allowed_values":{"severity":["Critical","High","Medium","Low"],"time_window":["all","daily","week","custom"],"generation_mode":["template","enriched_weekly"],"report_language":["en","zh","ch"]},"limits":{"report_scope_max_count":500}}),
         ));
     }
     if ctx.path == "/api/organization/subscriptions" && ctx.method == Method::GET {
@@ -873,11 +873,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 "Username, email, and organization are required.",
             );
         }
-        let mode = ctx.field("delivery_mode");
-        let mode = if mode.is_empty() { "individual" } else { &mode };
-        if !matches!(mode, "individual" | "grouped") {
-            return json_error(StatusCode::BAD_REQUEST, "Invalid email delivery mode.");
-        }
+        let mode = "individual";
         let newsletter = match profile(state, "newsletter", &ctx.json["newsletter_profile"]).await {
             Ok(v) => v,
             Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
@@ -985,7 +981,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 .await
             {
                 Ok(v) => {
-                    if notify(state, &emails, mode, "created", &username, &organization)
+                    if notify(state, &emails, "created", &username, &organization)
                         .await
                         .is_err()
                     {
@@ -1053,12 +1049,11 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             let html = format!(
                 "<html><body><h2>Newsletter delivery statistics</h2><p>Total delivered: {total}</p></body></html>"
             );
-            let mode = sub["delivery_mode"].as_str().unwrap_or("individual");
             return Some(
                 match mail::send(
                     state,
                     &emails,
-                    mode,
+                    "individual",
                     "Newsletter delivery statistics",
                     &html,
                 )
@@ -1075,12 +1070,11 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         if action.is_empty() && ctx.method == Method::DELETE {
             let old = db::bson_json(&existing);
             let emails = recipients(&old).unwrap_or_default();
-            let mode = old["delivery_mode"].as_str().unwrap_or("individual");
             let username = old["username"].as_str().unwrap_or("");
             let organization = subscription_organization(&old);
             return Some(match coll.delete_one(doc! {"_id":id}).await {
                 Ok(_) => {
-                    if notify(state, &emails, mode, "cancelled", username, organization)
+                    if notify(state, &emails, "cancelled", username, organization)
                         .await
                         .is_err()
                     {
@@ -1174,10 +1168,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                     "Username and organization are required.",
                 );
             }
-            let mode = data["delivery_mode"].as_str().unwrap_or("individual");
-            if !matches!(mode, "individual" | "grouped") {
-                return json_error(StatusCode::BAD_REQUEST, "Invalid email delivery mode.");
-            }
+            let mode = "individual";
             let recipient_submitted =
                 ctx.json.get("emails").is_some() || ctx.json.get("email").is_some();
             let identity_change =
@@ -1290,7 +1281,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                             || ctx.json.get("organization").is_some()
                             || ctx.json.get("team").is_some();
                         if changed
-                            && notify(state, &emails, mode, "updated", username, organization)
+                            && notify(state, &emails, "updated", username, organization)
                                 .await
                                 .is_err()
                         {
@@ -1361,9 +1352,11 @@ mod tests {
             "username": "legacy",
             "email": "legacy@example.com",
             "team": "SW-ENG",
+            "delivery_mode": "grouped",
         };
         let value = public(&subscription);
         assert_eq!(value["organization"], "SW-ENG");
+        assert_eq!(value["delivery_mode"], "individual");
         assert!(value.get("team").is_none());
     }
 

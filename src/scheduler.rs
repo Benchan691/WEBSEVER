@@ -219,8 +219,7 @@ async fn send_completed_report(state: AppState, id: ObjectId, sub: Document) {
                 html.push_str("</body></html>");
                 let value = db::bson_json(&sub);
                 let emails = recipients(&value);
-                let mode = value["delivery_mode"].as_str().unwrap_or("individual");
-                let result = mail::send(&state, &emails, mode, title, &html).await;
+                let result = mail::send(&state, &emails, "individual", title, &html).await;
                 let status = if result.is_ok() { "sent" } else { "failed" };
                 let error = result.err().unwrap_or_default();
                 let _ = db::collection(&state.web, "report_jobs")
@@ -258,7 +257,6 @@ async fn newsletters_tick(state: &AppState, sub: &Document) {
     }
     let matches = subscriptions::match_profile(state, profile, 100).await;
     let emails = recipients(&value);
-    let mode = value["delivery_mode"].as_str().unwrap_or("individual");
     let config = newsletters::template_config(state).await;
     let cursor_time = chrono::DateTime::parse_from_rfc3339(cursor)
         .ok()
@@ -298,7 +296,7 @@ async fn newsletters_tick(state: &AppState, sub: &Document) {
         let subject = newsletter["subject"]
             .as_str()
             .unwrap_or("Security newsletter");
-        if mail::send(state, &pending, mode, subject, &html)
+        if mail::send(state, &pending, "individual", subject, &html)
             .await
             .is_ok()
         {

@@ -8,7 +8,7 @@ use std::{env, str::FromStr};
 pub async fn send(
     state: &AppState,
     recipients: &[String],
-    mode: &str,
+    _mode: &str,
     subject: &str,
     html: &str,
 ) -> Result<(), String> {
@@ -59,31 +59,17 @@ pub async fn send(
     };
     let transport = builder.build();
     let sender = lettre::message::Mailbox::from_str(&from).map_err(|e| e.to_string())?;
-    if mode == "grouped" {
-        let mut message = Message::builder().from(sender).subject(subject);
-        for recipient in recipients {
-            message = message.to(recipient
+    for recipient in recipients {
+        let message = Message::builder()
+            .from(sender.clone())
+            .to(recipient
                 .parse()
                 .map_err(|e: lettre::address::AddressError| e.to_string())?)
-        }
-        let message = message
+            .subject(subject)
             .header(ContentType::TEXT_HTML)
             .body(html.to_owned())
             .map_err(|e| e.to_string())?;
         transport.send(message).await.map_err(|e| e.to_string())?;
-    } else {
-        for recipient in recipients {
-            let message = Message::builder()
-                .from(sender.clone())
-                .to(recipient
-                    .parse()
-                    .map_err(|e: lettre::address::AddressError| e.to_string())?)
-                .subject(subject)
-                .header(ContentType::TEXT_HTML)
-                .body(html.to_owned())
-                .map_err(|e| e.to_string())?;
-            transport.send(message).await.map_err(|e| e.to_string())?;
-        }
     }
     Ok(())
 }

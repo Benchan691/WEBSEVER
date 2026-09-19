@@ -43,7 +43,6 @@
                         {% if is_admin %}<button id="add-recipient-btn" class="btn btn-outline-secondary btn-sm mt-2" type="button"><i class="bi bi-plus-lg me-1"></i>{{ t('Add email recipient') }}</button>{% endif %}
                         <div class="form-text">{{ t('All recipients share the same subscription settings.') if config.ACCOUNT_HUB_ENABLED else t('All recipients share the same subscription settings and password.') }}</div>
                     </div>
-                    <div class="col-md-6"><label class="form-label" for="delivery-mode">{{ t('Email delivery mode') }}</label><select id="delivery-mode" class="form-select"><option value="individual">{{ t('Send separate private emails') }}</option><option value="grouped">{{ t('Send one email to all recipients') }}</option></select><div class="form-text">{{ t('Grouped delivery shows recipient addresses to each other.') }}</div></div>
                 </div>
                 <div class="row g-4">
                     <div class="col-lg-6">
@@ -110,5 +109,5 @@
     'accountHubEnabled': config.ACCOUNT_HUB_ENABLED,
 }|tojson }}</script>
 <script src="{{ url_for('static', filename='js/shared/collection-picker.js') }}"></script>
-<script src="{{ url_for('static', filename='js/subscriptions/index.js', v='20260919-1') }}"></script>
+<script src="{{ url_for('static', filename='js/subscriptions/index.js', v='20260919-2') }}"></script>
 {% endblock %}
