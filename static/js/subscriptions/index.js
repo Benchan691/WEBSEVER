@@ -738,9 +738,8 @@
                 tr.children[2].textContent = t('Disabled');
             }
             const actions = document.createElement('div'); actions.className = 'd-flex flex-wrap gap-1';
-            actions.innerHTML = '<button class="btn btn-outline-primary btn-sm edit" type="button">' + t('Edit') + '</button><button class="btn btn-outline-danger btn-sm remove" type="button">' + t('Delete') + '</button>';
+            actions.innerHTML = '<button class="btn btn-outline-primary btn-sm edit" type="button">' + t('Edit') + '</button>';
             actions.querySelector('.edit').onclick = function () { openEditor(item); };
-            actions.querySelector('.remove').onclick = function () { if (confirm(t('Delete subscription for {username}?', {username: item.username || item.email}))) requestJson(apiUrl(item.id), {method:'DELETE'}).then(load).catch(function(e){showMessage(e.message,'danger');}); };
             tr.children[3].append(actions); rows.append(tr);
         });
     }
@@ -786,13 +785,7 @@
                 };
                 edit.disabled = !item.account_hub_email;
                 if (edit.disabled) edit.title = t('Account Hub email unavailable');
-                const remove = document.createElement('button'); remove.className = 'btn btn-outline-danger btn-sm'; remove.type = 'button'; remove.textContent = t('Delete');
-                remove.onclick = function () {
-                    if (confirm(t('Delete subscription for {username}?', {username: item.username || item.email}))) {
-                        requestJson(apiUrl(subscription.id), {method:'DELETE'}).then(load).catch(function(e){showMessage(e.message,'danger');});
-                    }
-                };
-                actions.append(edit, remove);
+                actions.append(edit);
             } else {
                 const add = document.createElement('button'); add.className = 'btn btn-outline-primary btn-sm'; add.type = 'button'; add.textContent = t('Add Subscription');
                 add.disabled = !item.account_hub_email;
