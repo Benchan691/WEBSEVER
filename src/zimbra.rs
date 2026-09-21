@@ -217,7 +217,7 @@ impl ZimbraSession {
     ) -> Result<(), String> {
         let http = client(config)?;
         let path = format!(
-            "home/{}/{}?fmt=sync&nohdr=1",
+            "home/{}/{}",
             urlencoding::encode(email),
             urlencoding::encode(folder)
         );
@@ -235,6 +235,12 @@ impl ZimbraSession {
         {
             return Err("Zimbra mailbox authentication failed.".into());
         }
+        // The REST import endpoint on this Zimbra installation returns an
+        // empty 200 response and does not include X-Zimbra-ItemId.  A
+        // successful import is still a delivered message; imported messages
+        // are unread by default.  If an item ID is provided, keep the
+        // explicit unread safeguard, but never report a successful delivery
+        // as failed merely because Zimbra omitted that optional header.
         let item_id = response
             .headers()
             .get("X-Zimbra-ItemId")
@@ -243,11 +249,12 @@ impl ZimbraSession {
             .filter(|value| !value.is_empty())
             .map(str::to_owned);
         response_text(response).await?;
-        let item_id = item_id.ok_or_else(|| {
-            "Zimbra did not return the imported message ID; unread status could not be set."
-                .to_owned()
-        })?;
-        self.mark_unread(config, &item_id).await
+        if let Some(item_id) = item_id
+            && let Err(error) = self.mark_unread(config, &item_id).await
+        {
+            tracing::warn!(%error, %email, "Unable to explicitly keep imported Zimbra message unread");
+        }
+        Ok(())
     }
 
     async fn mark_unread(&self, config: &Config, item_id: &str) -> Result<(), String> {
