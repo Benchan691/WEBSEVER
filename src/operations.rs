@@ -5,7 +5,59 @@ use axum::{
 };
 use mongodb::bson::{self, Bson, doc};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+const SOURCE_URL_FIELDS: &[&str] = &[
+    "source",
+    "source_url",
+    "reference_links",
+    "references",
+    "related_links",
+    "urls",
+    "publication_url",
+    "patch_installation_url",
+    "open_source_repo_url",
+    "details.references",
+    "details.reference_links",
+    "details.related_links",
+    "details.urls",
+    "details.publication_url",
+    "details.patch_installation_url",
+    "details.open_source_repo_url",
+];
+
+fn collect_source_urls(value: &Bson, urls: &mut HashSet<String>) {
+    match value {
+        Bson::String(text) => {
+            for part in text.split_whitespace() {
+                let candidate = part.trim_matches(|c: char| " ,;()[]<>\r\n\t".contains(c));
+                let Some((scheme, host_and_path)) = candidate.split_once("://") else {
+                    continue;
+                };
+                if !matches!(scheme, "http" | "https")
+                    || host_and_path
+                        .split('/')
+                        .next()
+                        .is_none_or(|host| host.is_empty())
+                {
+                    continue;
+                }
+                urls.insert(candidate.to_owned());
+            }
+        }
+        Bson::Array(values) => {
+            for value in values {
+                collect_source_urls(value, urls);
+            }
+        }
+        Bson::Document(document) => {
+            for value in document.values() {
+                collect_source_urls(value, urls);
+            }
+        }
+        _ => {}
+    }
+}
 
 const CATALOG: &[(&str, &str, &str)] = &[
     ("title", "Title", "The advisory or vulnerability title."),
@@ -218,18 +270,18 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         for row in latest(state).await {
             let source = row["source_collection"].as_str().unwrap_or("");
             let coll = db::collection(&state.vuln, source);
-            if let Ok(values) = coll.distinct("source.url", doc! {}).await {
-                let mut urls = values
-                    .iter()
-                    .filter_map(|v| v.as_str())
-                    .filter(|v| v.starts_with("http://") || v.starts_with("https://"))
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>();
-                urls.sort();
-                urls.dedup();
-                if !urls.is_empty() {
-                    data.push(json!({"collection":source,"urls":urls}))
+            let mut urls = HashSet::new();
+            for field in SOURCE_URL_FIELDS {
+                if let Ok(values) = coll.distinct(*field, doc! {}).await {
+                    for value in values {
+                        collect_source_urls(&value, &mut urls);
+                    }
                 }
+            }
+            let mut urls: Vec<_> = urls.into_iter().collect();
+            urls.sort();
+            if !urls.is_empty() {
+                data.push(json!({"collection":source,"urls":urls}))
             }
         }
         return Some(view::json_response(StatusCode::OK, json!({"data":data})));
@@ -325,4 +377,33 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         ));
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collects_all_safe_source_and_reference_urls() {
+        let value = Bson::Document(doc! {
+            "url": "https://vendor.example/advisory",
+            "detail_url": "https://vendor.example/advisory/123",
+            "references": [
+                {"url": "https://tracker.example/CVE-2026-1234"},
+                "https://patch.example/fix"
+            ],
+            "unsafe": "javascript:alert(1)",
+        });
+        let mut urls = HashSet::new();
+        collect_source_urls(&value, &mut urls);
+        assert_eq!(
+            urls,
+            HashSet::from([
+                "https://vendor.example/advisory".to_owned(),
+                "https://vendor.example/advisory/123".to_owned(),
+                "https://tracker.example/CVE-2026-1234".to_owned(),
+                "https://patch.example/fix".to_owned(),
+            ])
+        );
+    }
 }
