@@ -313,6 +313,67 @@ fn default_zimbra_subscription_document(
     }
 }
 
+fn subscription_emails(document: &Document) -> Vec<String> {
+    let mut emails = document
+        .get_array("emails")
+        .ok()
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Bson::as_str)
+                .map(|value| value.trim().to_lowercase())
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if emails.is_empty() {
+        let email = db::string(document, "email").trim().to_lowercase();
+        if !email.is_empty() {
+            emails.push(email);
+        }
+    }
+    emails.sort();
+    emails
+}
+
+fn same_subscription_identity(left: &Document, right: &Document) -> bool {
+    let left_organization = db::string(left, "organization");
+    let right_organization = db::string(right, "organization");
+    same_username(
+        &db::string(left, "username"),
+        &db::string(right, "username"),
+    ) && subscription_emails(left) == subscription_emails(right)
+        && left_organization
+            .trim()
+            .eq_ignore_ascii_case(right_organization.trim())
+        && left.get("newsletter_profile") == right.get("newsletter_profile")
+        && left.get("report_profile") == right.get("report_profile")
+}
+
+fn is_default_zimbra_subscription(document: &Document) -> bool {
+    let newsletter = db::json_doc(&default_profile("newsletter")).ok();
+    let report = db::json_doc(&default_profile("report")).ok();
+    newsletter.is_some_and(|expected| {
+        document
+            .get_document("newsletter_profile")
+            .ok()
+            .is_some_and(|actual| actual == &expected)
+    }) && report.is_some_and(|expected| {
+        document
+            .get_document("report_profile")
+            .ok()
+            .is_some_and(|actual| actual == &expected)
+    })
+}
+
+fn is_legacy_subscription(document: &Document) -> bool {
+    matches!(document.get("auto_provisioned"), None | Some(Bson::Null))
+}
+
+fn subscription_object_id(document: &Document) -> Option<bson::oid::ObjectId> {
+    document.get_object_id("_id").ok()
+}
+
 /// Ensure that every Zimbra account has one owner-scoped subscription record.
 /// The record is deliberately created with both delivery profiles disabled so
 /// logging in never starts mail delivery without the user's action.
@@ -339,60 +400,154 @@ pub async fn ensure_zimbra_subscription(state: &AppState, user: &Document) -> Re
         "delivery_mode": "individual",
         "updated_at": now,
     };
-    if let Some(existing) = coll
-        .find_one(doc! {"owner_user_id": owner_id, "auto_provisioned": true})
-        .await
-        .map_err(|_| "Unable to load the Zimbra subscription.".to_owned())?
+    let owner_filter = doc! {
+        "owner_user_id": owner_id,
+        "local_subscription": {"$ne": true},
+    };
+    let mut owner_rows = db::find_sorted(
+        &state.web,
+        "sub_account",
+        owner_filter.clone(),
+        doc! {"auto_provisioned": -1, "created_at": 1, "_id": 1},
+        5000,
+    )
+    .await
+    .map_err(|_| "Unable to load the Zimbra subscriptions.".to_owned())?;
+
+    // A deployment before auto_provisioned was introduced may have left the
+    // user's default disabled subscription without the marker. Reuse it as
+    // the canonical automatic row instead of creating a second row.
+    let mut canonical_id = owner_rows
+        .iter()
+        .find(|row| db::bool_field(row, "auto_provisioned"))
+        .and_then(subscription_object_id);
+    if canonical_id.is_none()
+        && let Some(legacy) = owner_rows
+            .iter()
+            .find(|row| is_legacy_subscription(row) && is_default_zimbra_subscription(row))
     {
-        coll.update_one(
-            doc! {"_id": existing.get_object_id("_id").map_err(|_| "Zimbra subscription has no valid id.".to_owned())?},
-            doc! {"$set": identity},
-        )
-        .await
-        .map_err(|_| "Unable to update the Zimbra subscription.".to_owned())?;
-        return Ok(());
+        canonical_id = subscription_object_id(legacy);
+        if let Some(id) = canonical_id {
+            let mut set = identity.clone();
+            set.insert("auto_provisioned", true);
+            set.insert("local_subscription", false);
+            coll.update_one(doc! {"_id": id}, doc! {"$set": set})
+                .await
+                .map_err(|_| "Unable to migrate the Zimbra subscription.".to_owned())?;
+        }
     }
 
     // Adopt a prior Rust subscription created before owner_user_id was set,
-    // but never take over a manually managed local subscription.
-    let zimbra_pattern = format!("^{}$", regex::escape(&email));
-    if let Some(existing) = coll
-        .find_one(doc! {
-            "local_subscription": {"$ne": true},
-            "$or": [{"owner_user_id": {"$exists": false}}, {"owner_user_id": Bson::Null}],
-            "zimbra_email": {"$regex": zimbra_pattern, "$options": "i"},
-        })
-        .await
-        .map_err(|_| "Unable to inspect existing Zimbra subscriptions.".to_owned())?
-    {
-        coll.update_one(
-            doc! {"_id": existing.get_object_id("_id").map_err(|_| "Zimbra subscription has no valid id.".to_owned())?},
-            doc! {"$set": identity},
-        )
-        .await
-        .map_err(|_| "Unable to claim the Zimbra subscription.".to_owned())?;
-        return Ok(());
-    }
-
-    let document = default_zimbra_subscription_document(user, owner_id, &email, now);
-    match coll.insert_one(document).await {
-        Ok(_) => Ok(()),
-        Err(_) => {
-            // A concurrent login may have created the record. Re-check the
-            // owner before reporting a failure to the caller.
-            if coll
-                .find_one(doc! {"owner_user_id": owner_id})
+    // but do not take over a local subscription or a configured manual row.
+    if canonical_id.is_none() && owner_rows.is_empty() {
+        let zimbra_pattern = format!("^{}$", regex::escape(&email));
+        if let Some(existing) = coll
+            .find_one(doc! {
+                "local_subscription": {"$ne": true},
+                "$or": [{"owner_user_id": {"$exists": false}}, {"owner_user_id": Bson::Null}],
+                "zimbra_email": {"$regex": zimbra_pattern, "$options": "i"},
+            })
+            .await
+            .map_err(|_| "Unable to inspect existing Zimbra subscriptions.".to_owned())?
+        {
+            let id = existing
+                .get_object_id("_id")
+                .map_err(|_| "Zimbra subscription has no valid id.".to_owned())?;
+            let mut set = identity.clone();
+            let default_row = is_default_zimbra_subscription(&existing);
+            set.insert("auto_provisioned", default_row);
+            set.insert("local_subscription", false);
+            coll.update_one(doc! {"_id": id}, doc! {"$set": set})
                 .await
-                .ok()
-                .flatten()
-                .is_some()
-            {
-                Ok(())
-            } else {
-                Err("Unable to create the Zimbra subscription.".into())
+                .map_err(|_| "Unable to claim the Zimbra subscription.".to_owned())?;
+            if default_row {
+                canonical_id = Some(id);
             }
+            owner_rows = db::find_sorted(
+                &state.web,
+                "sub_account",
+                owner_filter.clone(),
+                doc! {"auto_provisioned": -1, "created_at": 1, "_id": 1},
+                5000,
+            )
+            .await
+            .map_err(|_| "Unable to reload the Zimbra subscriptions.".to_owned())?;
         }
     }
+
+    if canonical_id.is_none() {
+        let document = default_zimbra_subscription_document(user, owner_id, &email, now);
+        canonical_id = match coll.insert_one(document).await {
+            Ok(result) => result.inserted_id.as_object_id(),
+            Err(_) => {
+                // A concurrent login may have created the record. Re-check
+                // the owner before reporting a failure to the caller.
+                coll.find_one(doc! {"owner_user_id": owner_id, "auto_provisioned": true})
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|existing| existing.get_object_id("_id").ok())
+            }
+        };
+        if canonical_id.is_none() {
+            return Err("Zimbra subscription has no valid id.".into());
+        }
+    }
+
+    let canonical_id = canonical_id.expect("canonical id set above");
+    let mut canonical_set = identity;
+    canonical_set.insert("auto_provisioned", true);
+    canonical_set.insert("local_subscription", false);
+    coll.update_one(doc! {"_id": canonical_id}, doc! {"$set": canonical_set})
+        .await
+        .map_err(|_| "Unable to update the Zimbra subscription.".to_owned())?;
+
+    let Some(canonical) = coll
+        .find_one(doc! {"_id": canonical_id})
+        .await
+        .ok()
+        .flatten()
+    else {
+        return Err("Unable to reload the Zimbra subscription.".into());
+    };
+    // Remove only exact legacy copies of the automatic disabled row. Manual
+    // rows with different profiles are preserved and explicitly marked as
+    // user-created, so their delete action remains available to the owner.
+    let rows = if owner_rows.is_empty() {
+        db::find_sorted(
+            &state.web,
+            "sub_account",
+            owner_filter,
+            doc! {"created_at": 1, "_id": 1},
+            5000,
+        )
+        .await
+        .map_err(|_| "Unable to inspect duplicate Zimbra subscriptions.".to_owned())?
+    } else {
+        owner_rows
+    };
+    for row in rows {
+        let Some(id) = subscription_object_id(&row) else {
+            continue;
+        };
+        if id == canonical_id {
+            continue;
+        }
+        let duplicate_auto = db::bool_field(&row, "auto_provisioned");
+        let duplicate_legacy = is_legacy_subscription(&row)
+            && same_subscription_identity(&row, &canonical)
+            && is_default_zimbra_subscription(&row);
+        if duplicate_auto || duplicate_legacy {
+            if let Err(error) = coll.delete_one(doc! {"_id": id}).await {
+                tracing::warn!(%error, subscription_id = %id, "Unable to remove duplicate Zimbra subscription");
+            }
+        } else if is_legacy_subscription(&row) {
+            let _ = coll
+                .update_one(doc! {"_id": id}, doc! {"$set": {"auto_provisioned": false}})
+                .await;
+        }
+    }
+    Ok(())
 }
 
 /// Backfill active Zimbra accounts when the service starts. This keeps users
@@ -886,7 +1041,15 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             return json_error(StatusCode::FORBIDDEN, "Access denied.");
         };
         return Some(
-            match db::find_many(&state.web, "sub_account", filter, 5000).await {
+            match db::find_sorted(
+                &state.web,
+                "sub_account",
+                filter,
+                doc! {"auto_provisioned": -1, "created_at": 1, "_id": 1},
+                5000,
+            )
+            .await
+            {
                 Ok(rows) => view::json_response(
                     StatusCode::OK,
                     json!({"data":rows.iter().map(public).collect::<Vec<_>>()}),
@@ -1081,6 +1244,36 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             Ok(v) => v,
             Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
         };
+        if self_only {
+            let Some(owner_id) = ctx.user_id() else {
+                return json_error(StatusCode::UNAUTHORIZED, "Authentication required.");
+            };
+            let duplicate_filter = doc! {
+                "owner_user_id": owner_id,
+                "local_subscription": {"$ne": true},
+                "emails": emails.clone(),
+                "newsletter_profile": db::json_doc(&newsletter).unwrap_or_default(),
+                "report_profile": db::json_doc(&report).unwrap_or_default(),
+            };
+            match db::collection(&state.web, "sub_account")
+                .find_one(duplicate_filter)
+                .await
+            {
+                Ok(Some(_)) => {
+                    return json_error(
+                        StatusCode::CONFLICT,
+                        "An identical subscription already exists. Edit the existing subscription instead.",
+                    );
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    return json_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Unable to check existing subscriptions.",
+                    );
+                }
+            }
+        }
         if local_subscription {
             let Some(manager) = ctx.user.as_ref() else {
                 return json_error(StatusCode::UNAUTHORIZED, "Authentication required.");
@@ -1539,6 +1732,34 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 }
                 emails = vec![zimbra_email.clone()];
             }
+            if is_self_manager(state, ctx) {
+                let Some(owner_id) = ctx.user_id() else {
+                    return json_error(StatusCode::UNAUTHORIZED, "Authentication required.");
+                };
+                let duplicate_filter = doc! {
+                    "owner_user_id": owner_id,
+                    "_id": {"$ne": id},
+                    "local_subscription": {"$ne": true},
+                    "emails": emails.clone(),
+                    "newsletter_profile": db::json_doc(&newsletter).unwrap_or_default(),
+                    "report_profile": db::json_doc(&report).unwrap_or_default(),
+                };
+                match coll.find_one(duplicate_filter).await {
+                    Ok(Some(_)) => {
+                        return json_error(
+                            StatusCode::CONFLICT,
+                            "An identical subscription already exists. Edit the existing subscription instead.",
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        return json_error(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "Unable to check existing subscriptions.",
+                        );
+                    }
+                }
+            }
             let mut update = doc! {"username":username,"email":&emails[0],"emails":emails.clone(),"organization":organization,"delivery_mode":mode,"newsletter_profile":db::json_doc(&newsletter).unwrap(),"report_profile":db::json_doc(&report).unwrap(),"updated_at":bson::DateTime::now()};
             if let Some(zimbra_email) = current_owner_hub_email.as_ref() {
                 update.insert("zimbra_email", zimbra_email.clone());
@@ -1821,5 +2042,56 @@ mod tests {
         assert_eq!(document["newsletter_profile"]["enabled"], false.into());
         assert_eq!(document["report_profile"]["enabled"], false.into());
         assert_eq!(document["local_subscription"], false.into());
+    }
+
+    #[test]
+    fn legacy_default_subscription_is_identified_for_migration() {
+        let owner_id = ObjectId::new();
+        let user = doc! {
+            "_id": owner_id,
+            "username": "user@example.com",
+            "auth_source": "zimbra",
+            "organization": "SW-ENG",
+        };
+        let mut legacy = default_zimbra_subscription_document(
+            &user,
+            owner_id,
+            "user@example.com",
+            bson::DateTime::now(),
+        );
+        legacy.remove("auto_provisioned");
+        let current = default_zimbra_subscription_document(
+            &user,
+            owner_id,
+            "user@example.com",
+            bson::DateTime::now(),
+        );
+        assert!(is_legacy_subscription(&legacy));
+        assert!(is_default_zimbra_subscription(&legacy));
+        assert!(same_subscription_identity(&legacy, &current));
+    }
+
+    #[test]
+    fn configured_manual_subscription_is_not_treated_as_automatic() {
+        let owner_id = ObjectId::new();
+        let user = doc! {
+            "_id": owner_id,
+            "username": "user@example.com",
+            "auth_source": "zimbra",
+            "organization": "SW-ENG",
+        };
+        let mut manual = default_zimbra_subscription_document(
+            &user,
+            owner_id,
+            "user@example.com",
+            bson::DateTime::now(),
+        );
+        manual.remove("auto_provisioned");
+        manual
+            .get_document_mut("newsletter_profile")
+            .unwrap()
+            .insert("enabled", true);
+        assert!(is_legacy_subscription(&manual));
+        assert!(!is_default_zimbra_subscription(&manual));
     }
 }
