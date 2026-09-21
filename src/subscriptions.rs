@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 
 fn default_filters() -> Value {
-    json!({"collections":[],"search":"","code":"","title":"","impact":"","affected":"","status":[],"severity_threshold":"","include_unknown":false,"source":"","keywords":[],"vendor_product_filter":{"enabled":false,"schema_version":1,"include_possible_matches":false,"rows":[]},"time_window":"all","start":"","end":"","source_timestamp":{},"report_scope":{}})
+    json!({"collections":[],"collections_mode":"selected","search":"","code":"","title":"","impact":"","affected":"","status":[],"severity_threshold":"","include_unknown":false,"source":"","keywords":[],"vendor_product_filter":{"enabled":false,"schema_version":1,"include_possible_matches":false,"rows":[]},"time_window":"all","start":"","end":"","source_timestamp":{},"report_scope":{}})
 }
 fn default_profile(kind: &str) -> Value {
     if kind == "newsletter" {
@@ -1004,8 +1004,14 @@ pub(crate) async fn match_profile(state: &AppState, profile: &Value, limit: i64)
         .filter_map(Value::as_str)
         .map(str::to_owned)
         .collect::<Vec<_>>();
+    // New profiles use an explicit "selected" mode, so an empty list means
+    // none selected. Older records without the mode retain their historical
+    // empty-means-all behavior until they are saved again.
     if names.is_empty() {
-        names = reviews::views(state).await.unwrap_or_default()
+        if filters["collections_mode"].as_str() == Some("selected") {
+            return output;
+        }
+        names = reviews::views(state).await.unwrap_or_default();
     }
     for name in names {
         let source = name
@@ -1918,6 +1924,13 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
 mod tests {
     use super::*;
     use mongodb::bson::oid::ObjectId;
+
+    #[test]
+    fn new_profiles_start_without_selected_collections() {
+        let filters = default_filters();
+        assert_eq!(filters["collections"], json!([]));
+        assert_eq!(filters["collections_mode"], "selected");
+    }
 
     #[test]
     fn organization_member_rows_include_account_status_and_subscription() {

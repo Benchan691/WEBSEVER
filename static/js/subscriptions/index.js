@@ -16,11 +16,13 @@
         accountHubUser,
         currentOrganization,
     } = JSON.parse(document.getElementById('page-config').textContent);
-    const modal = new bootstrap.Modal(document.getElementById('subscription-modal'));
-    const newsletterCollections = new CollectionPicker('newsletter', {emptySelectionMeansAll: true});
+    const modalElement = document.getElementById('subscription-modal');
+    const modal = new bootstrap.Modal(modalElement);
+    const newsletterCollections = new CollectionPicker('newsletter', {emptySelectionMeansAll: false});
     const rows = document.getElementById('rows');
     const message = document.getElementById('message');
     let collections = [], subscriptions = [], editingId = null, recipientLocked = false, editorLocalSubscription = false;
+    let editorDirty = false, saving = false;
     let newsletterVendorProductFilter = emptyVendorProductFilter();
     let reportVendorProductFilter = emptyVendorProductFilter();
     let reportLegacyKeywords = [];
@@ -76,14 +78,14 @@
         '<div class="col-md-6">' +
         '<label for="newsletter-collections-toggle" class="form-label small">' + t('Collections') + '</label>' +
         '<div class="dropdown w-100">' +
-        '<button id="newsletter-collections-toggle" type="button" class="form-select form-select-sm dropdown-toggle subscription-collections-toggle text-start w-100" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">' + t('All collections') + '</button>' +
+        '<button id="newsletter-collections-toggle" type="button" class="form-select form-select-sm dropdown-toggle subscription-collections-toggle text-start w-100" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">' + t('No collections') + '</button>' +
         '<div id="newsletter-collections-menu" class="dropdown-menu w-100 shadow-sm p-2">' +
         '<input id="newsletter-collections-search" type="search" class="form-control form-control-sm mb-2" placeholder="' + t('Search collections...') + '" autocomplete="off">' +
         '<div id="newsletter-collections-options" class="subscription-collections-options"></div>' +
         '<div class="dropdown-divider my-2"></div>' +
         '<div class="d-flex justify-content-between px-1">' +
+        '<button type="button" class="btn btn-link btn-sm p-0 text-muted collections-action" data-action="clear">' + t('Clear all') + '</button>' +
         '<button type="button" class="btn btn-link btn-sm p-0 collections-action" data-action="all">' + t('Select all') + '</button>' +
-        '<button type="button" class="btn btn-link btn-sm p-0 text-muted collections-action" data-action="reset">' + t('Reset to all') + '</button>' +
         '</div></div></div></div>' +
         '<div class="col-12"><label class="form-label small">' + t('Severity / status') + '</label><div class="d-flex flex-wrap gap-3">' +
         severityLevels.map(function (level) {
@@ -129,6 +131,9 @@
         const modalMessage = document.getElementById('subscription-modal-message');
         modalMessage.textContent = text || '';
         modalMessage.className = text ? 'alert alert-' + kind : 'alert d-none';
+    }
+    function markEditorDirty() {
+        if (!saving) editorDirty = true;
     }
     function renderRecipientInputs(emails, locked) {
         const list = document.getElementById('recipient-list');
@@ -618,6 +623,8 @@
         previewTimer = window.setTimeout(refreshReportPreview, 400);
     }
     function openEditor(subscription) {
+        editorDirty = false;
+        saving = false;
         const defaultEmail = accountHubUser ? currentAccountHubEmail : currentEmail;
         if (!subscription && accountHubUser) {
             subscription = {
@@ -707,7 +714,9 @@
                 const newsletterSummary = [
                     collectionCount
                         ? t('Enabled · {count} collection(s)', {count: collectionCount})
-                        : t('Enabled · all collection(s)')
+                        : item.newsletter_profile.filters.collections_mode !== 'selected'
+                            ? t('Enabled · all collection(s)')
+                            : t('Enabled · no collections')
                 ];
                 const inventorySuffix = inventorySummarySuffix(item.newsletter_profile.filters);
                 if (inventorySuffix) {
@@ -773,7 +782,9 @@
             const collections = Array.isArray(filters.collections) ? filters.collections : [];
             return collections.length
                 ? t('Enabled · {count} collection(s)', {count: collections.length})
-                : t('Enabled · all collection(s)');
+                : filters.collections_mode !== 'selected'
+                    ? t('Enabled · all collection(s)')
+                    : t('Enabled · no collections');
         }
         return profile.schedule_enabled
             ? t('Enabled · weekly {weekday} {time} HKT', {weekday: profile.schedule_weekday || '', time: profile.schedule_time || ''})
@@ -863,6 +874,23 @@
         }
     }
     function load() { return requestJson(subscriptionsUrl).then(function(body){subscriptions=body.data || [];renderRows();}).catch(function(e){showMessage(e.message,'danger');}).finally(function(){document.getElementById('loading').classList.add('d-none');}); }
+    const subscriptionForm = document.getElementById('subscription-form');
+    subscriptionForm.addEventListener('input', markEditorDirty);
+    subscriptionForm.addEventListener('change', markEditorDirty);
+    subscriptionForm.addEventListener('click', function (event) {
+        if (event.target.closest('.collections-action, .remove-recipient, #add-recipient-btn, .subscription-vendor-product-clear')) {
+            markEditorDirty();
+        }
+    });
+    modalElement.addEventListener('hide.bs.modal', function (event) {
+        if (editorDirty && !saving && !window.confirm(t('You have unsaved changes. Close without saving?'))) {
+            event.preventDefault();
+        }
+    });
+    modalElement.addEventListener('hidden.bs.modal', function () {
+        editorDirty = false;
+        saving = false;
+    });
     newsletterCollections.wire();
     document.getElementById('report-time-window').addEventListener('change', function () { toggleCustomWindow('report'); });
     ['newsletter', 'report'].forEach(function (prefix) {
@@ -946,7 +974,7 @@
             payload.username = document.getElementById('username').value;
             payload.emails = recipientValues();
         }
-        requestJson(editingId ? apiUrl(editingId) : manageSubscriptionsUrl, {method:editingId?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(){modal.hide();showMessage(t('Subscription saved.'),'success');return load();}).catch(function(e){showModalMessage(e.message,'danger');});
+        requestJson(editingId ? apiUrl(editingId) : manageSubscriptionsUrl, {method:editingId?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(){editorDirty=false;saving=true;modal.hide();showMessage(t('Subscription saved.'),'success');return load();}).catch(function(e){saving=false;showModalMessage(e.message,'danger');});
     };
     requestJson(reviewsUrl).then(function(body){collections=body.data.map(function(item){return item.name;});return load();}).catch(function(e){showMessage(e.message,'danger');});
 })();

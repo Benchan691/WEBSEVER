@@ -38,9 +38,10 @@
         updateLabel() {
             const checked = this.checkboxes().filter(function (input) { return input.checked; });
             const toggle = this.element('toggle');
-            toggle.textContent = this.allMode || checked.length === 0
+            toggle.textContent = this.allMode
                 ? t('All collections')
-                : checked.length === 1 ? checked[0].value : t('{count} collections', {count: checked.length});
+                : checked.length === 0 ? t('No collections')
+                    : checked.length === 1 ? checked[0].value : t('{count} collections', {count: checked.length});
         }
 
         render(collections, selected) {
@@ -83,6 +84,12 @@
                 const action = event.target.closest('.collections-action');
                 if (!action) return;
                 event.preventDefault();
+                if (action.dataset.action === 'clear') {
+                    this.allMode = false;
+                    this.checkboxes().forEach(function (input) { input.checked = false; });
+                    this.updateLabel();
+                    return;
+                }
                 if (this.emptySelectionMeansAll && action.dataset.action === 'reset') {
                     this.allMode = true;
                     this.checkboxes().forEach(function (input) { input.checked = false; });
