@@ -145,12 +145,12 @@ fn request_context(ctx: &ReqCtx) -> Value {
 }
 
 fn page_context(ctx: &ReqCtx, state: &AppState, extras: Value) -> Value {
-    // The portal is intentionally Chinese-only. Ignore any legacy `lang=en`
+    // This branch serves the portal in English. Ignore any legacy language
     // cookie so an existing browser session cannot switch the interface back
-    // to English.
-    let locale = "ch".to_owned();
+    // to Chinese.
+    let locale = "en".to_owned();
     let mut base = json!({
-        "locale": locale, "html_lang": if locale == "ch" { "zh-Hans" } else { "en" },
+        "locale": locale, "html_lang": "en",
         "i18n_catalog": serde_json::from_str::<Value>(include_str!("../config/translations.json")).unwrap_or(json!({})).get(&locale).cloned().unwrap_or(json!({})),
         "current_user": ctx.user.as_ref().map(auth::public_user),
         "is_admin": ctx.is_admin(state), "is_top_admin": ctx.is_top_admin(state),
@@ -290,7 +290,7 @@ async fn dispatch(State(state): State<AppState>, request: Request<Body>) -> Resp
     if ctx.path.strip_prefix("/locale/").is_some() {
         // Keep the old endpoint working for bookmarks, but always select the
         // only supported portal language.
-        let locale = "ch";
+        let locale = "en";
         let next = ctx.arg("next");
         let next = if next.starts_with('/') && !next.starts_with("//") {
             next
@@ -388,8 +388,8 @@ mod tests {
             .get_template("auth/login.html")
             .unwrap()
             .render(json!({
-                "locale": "ch",
-                "html_lang": "zh-Hans",
+                "locale": "en",
+                "html_lang": "en",
                 "i18n_catalog": {},
                 "config": {"ZIMBRA_ENABLED": true},
                 "request": request,
