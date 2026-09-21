@@ -7,6 +7,7 @@
     const refresh = document.getElementById('refresh-btn');
     const filterForm = document.getElementById('global-filter-form');
     const clearFilter = document.getElementById('clear-filter-btn');
+    const applyFilterButton = filterForm.querySelector('button[type="submit"]');
     const resultsLoading = document.getElementById('results-loading');
     const resultsEmpty = document.getElementById('results-empty');
     const resultsTableWrap = document.getElementById('results-table-wrap');
@@ -159,6 +160,10 @@
     }
 
     function ensureVendorProductFilter() {
+        if (vendorProductImportBusy) {
+            showError(t('Wait for CSV validation to finish before applying the filter.'));
+            return false;
+        }
         if (hasVendorProductFilter()) return true;
         showError(t('Upload a vendor/product CSV filter before searching review documents.'));
         vendorProductFile.focus();
@@ -169,6 +174,7 @@
         if (!file || vendorProductImportBusy) return;
         vendorProductImportBusy = true;
         vendorProductFile.disabled = true;
+        applyFilterButton.disabled = true;
         showVendorProductStatus(t('Validating CSV...'), 'info');
         const form = new FormData();
         form.append('file', file);
@@ -195,6 +201,7 @@
             .finally(function () {
                 vendorProductImportBusy = false;
                 vendorProductFile.disabled = false;
+                applyFilterButton.disabled = false;
                 vendorProductFile.value = '';
             });
     }
