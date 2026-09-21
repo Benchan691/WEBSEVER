@@ -164,6 +164,7 @@ fn public(document: &Document) -> Value {
             "organization_id",
             "password",
             "password_hash",
+            "zimbra_password",
             "schedule_claim_until",
             "schedule_claim_owner",
             "statistic_schedule_claim_until",
@@ -195,15 +196,11 @@ fn subscription_organization(value: &Value) -> &str {
 }
 
 fn organization_name(user: &Document) -> String {
-    db::string(user, "account_hub_organization")
-        .trim()
-        .to_owned()
+    db::string(user, "zimbra_organization").trim().to_owned()
 }
 
 fn organization_id(user: &Document) -> String {
-    db::string(user, "account_hub_organization_id")
-        .trim()
-        .to_owned()
+    db::string(user, "zimbra_organization_id").trim().to_owned()
 }
 
 fn same_organization_name(left: &str, right: &str) -> bool {
@@ -222,20 +219,25 @@ fn local_subscription_scope(ctx: &ReqCtx) -> Option<Document> {
         filter.insert("organization_id", organization_id);
     } else {
         let organization = organization_name(manager);
-        if organization.is_empty() {
-            return None;
+        if !organization.is_empty() {
+            filter.insert("organization", organization);
         }
-        filter.insert("organization", organization);
     }
     Some(filter)
 }
 async fn organization_members(state: &AppState, ctx: &ReqCtx) -> Option<Vec<Document>> {
     let manager = ctx.user.as_ref()?;
     let mut filter = crate::auth::organization_filter(manager)?;
-    filter.insert("auth_source", "account_hub");
-    db::find_sorted(&state.web, "auth", filter, doc! {"username_key":1}, 5000)
-        .await
-        .ok()
+    filter.insert("auth_source", "zimbra");
+    db::find_sorted(
+        &state.web,
+        &state.cfg.account_collection,
+        filter,
+        doc! {"username_key":1},
+        5000,
+    )
+    .await
+    .ok()
 }
 
 async fn organization_member_ids(
@@ -267,17 +269,28 @@ fn same_email(left: &str, right: &str) -> bool {
     !left.trim().is_empty() && left.trim().eq_ignore_ascii_case(right.trim())
 }
 
-fn account_hub_recipient(user: &Document) -> Result<Option<String>, String> {
-    if db::string(user, "auth_source") != "account_hub" {
+fn zimbra_recipient(user: &Document) -> Result<Option<String>, String> {
+    if db::string(user, "auth_source") != "zimbra" {
         return Ok(None);
     }
-    auth::account_hub_email(user)
-        .map(Some)
-        .ok_or_else(|| "Account Hub email is unavailable. Ask the user to sign in again.".into())
+    let email = {
+        let value = db::string(user, "email");
+        if value.is_empty() {
+            db::string(user, "zimbra_email")
+        } else {
+            value
+        }
+    }
+    .trim()
+    .to_lowercase();
+    if email.is_empty() || !auth::valid_email(&email) {
+        return Err("Zimbra email is unavailable. Ask the user to sign in again.".into());
+    }
+    Ok(Some(email))
 }
 
 fn self_recipient(user: &Document) -> Result<String, String> {
-    if let Some(email) = account_hub_recipient(user)? {
+    if let Some(email) = zimbra_recipient(user)? {
         return Ok(email);
     }
     let email = db::string(user, "email").trim().to_lowercase();
@@ -289,31 +302,7 @@ fn self_recipient(user: &Document) -> Result<String, String> {
 
 fn self_subscription_owner_filter(ctx: &ReqCtx) -> Option<Document> {
     let owner_id = ctx.user_id()?;
-    let user = ctx.user.as_ref()?;
-    let owner = doc! {"owner_user_id":owner_id};
-    let mut legacy = Vec::new();
-    let username = db::string(user, "username");
-    if !username.trim().is_empty() {
-        legacy.push(Bson::Document(doc! {
-            "username":{"$regex":regex::escape(username.trim()),"$options":"i"}
-        }));
-    }
-    let email = db::string(user, "email").trim().to_lowercase();
-    if !email.is_empty() {
-        let matcher = doc! {"$regex":regex::escape(&email),"$options":"i"};
-        legacy.push(Bson::Document(doc! {"email":matcher.clone()}));
-        legacy.push(Bson::Document(doc! {"emails":matcher}));
-    }
-    if legacy.is_empty() {
-        return Some(owner);
-    }
-    let legacy_owner = doc! {
-        "$and":[
-            {"$or":[{"owner_user_id":{"$exists":false}},{"owner_user_id":Bson::Null}]},
-            {"$or":legacy},
-        ]
-    };
-    Some(doc! {"$or":[owner, legacy_owner]})
+    Some(doc! {"owner_user_id":owner_id})
 }
 
 async fn subscription_filter(state: &AppState, ctx: &ReqCtx, id: Option<&str>) -> Option<Document> {
@@ -859,10 +848,10 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             .get("local_subscription")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        if local_subscription && !ctx.is_organization_admin(state) {
+        if local_subscription && !ctx.is_top_admin(state) {
             return json_error(
                 StatusCode::FORBIDDEN,
-                "Only an organization administrator can create local subscriptions.",
+                "Only the local administrator can create local subscriptions.",
             );
         }
         if !can_manage_subscriptions(state, ctx) && !self_only {
@@ -871,7 +860,10 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 "You can only manage your own subscription.",
             );
         }
-        if state.cfg.account_hub_enabled
+        if ctx
+            .user
+            .as_ref()
+            .is_some_and(|u| db::string(u, "auth_source") == "zimbra")
             && ctx
                 .json
                 .get("password")
@@ -879,7 +871,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         {
             return json_error(
                 StatusCode::BAD_REQUEST,
-                "Account Hub users do not use local passwords.",
+                "Zimbra users do not use local passwords.",
             );
         }
         let self_email = if self_only {
@@ -942,7 +934,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         let organization = if self_only {
             ctx.user
                 .as_ref()
-                .map(|user| db::string(user, "account_hub_organization"))
+                .map(|user| db::string(user, "zimbra_organization"))
                 .unwrap_or_default()
         } else {
             submitted_organization
@@ -968,13 +960,14 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             let Some(manager) = ctx.user.as_ref() else {
                 return json_error(StatusCode::UNAUTHORIZED, "Authentication required.");
             };
-            let manager_organization = organization_name(manager);
-            if manager_organization.is_empty() {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    "Your Account Hub organization is not available.",
-                );
-            }
+            let manager_organization = {
+                let value = organization_name(manager);
+                if value.is_empty() {
+                    "local".to_owned()
+                } else {
+                    value
+                }
+            };
             if !organization.trim().is_empty()
                 && !same_organization_name(&organization, &manager_organization)
             {
@@ -1054,7 +1047,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 },
             );
         }
-        let users = db::collection(&state.web, "auth");
+        let users = db::collection(&state.web, &state.cfg.account_collection);
         let owner = users
             .find_one(doc! {"username_key":username.trim().to_lowercase()})
             .await
@@ -1070,10 +1063,10 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             let Some(member) = owner.as_ref() else {
                 return json_error(
                     StatusCode::BAD_REQUEST,
-                    "Account Hub user must be approved before creating a subscription.",
+                    "Zimbra user must be approved before creating a subscription.",
                 );
             };
-            if db::string(member, "auth_source") != "account_hub"
+            if db::string(member, "auth_source") != "zimbra"
                 || !ctx
                     .user
                     .as_ref()
@@ -1086,18 +1079,18 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             }
         }
         if let Some(owner) = owner.as_ref() {
-            let account_hub_email = match account_hub_recipient(owner) {
+            let zimbra_email = match zimbra_recipient(owner) {
                 Ok(email) => email,
                 Err(error) => return json_error(StatusCode::BAD_REQUEST, &error),
             };
-            if let Some(account_hub_email) = account_hub_email {
-                if emails.len() != 1 || !same_email(&emails[0], &account_hub_email) {
+            if let Some(zimbra_email) = zimbra_email {
+                if emails.len() != 1 || !same_email(&emails[0], &zimbra_email) {
                     return json_error(
                         StatusCode::FORBIDDEN,
-                        "Account Hub subscriptions must use the Account Hub email.",
+                        "Zimbra subscriptions must use the Zimbra email.",
                     );
                 }
-                emails = vec![account_hub_email];
+                emails = vec![zimbra_email];
             }
         }
         let existing=db::find_one(&state.web,"sub_account",doc!{"username":{"$regex":format!("^{}$",regex::escape(username.trim())),"$options":"i"}}).await.ok().flatten();
@@ -1107,7 +1100,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 "A subscription already exists for this username.",
             );
         }
-        let owner_account_hub_email = owner.as_ref().and_then(auth::account_hub_email);
+        let owner_zimbra_email = owner.as_ref().and_then(auth::zimbra_email);
         let owner_id = if let Some(owner) = owner {
             if self_only && ctx.user_id() != owner.get_object_id("_id").ok() {
                 return json_error(
@@ -1115,9 +1108,9 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                     "You can only manage your own subscription.",
                 );
             }
-            let account_hub_member = ctx.is_organization_admin(state)
-                && db::string(&owner, "auth_source") == "account_hub";
-            if db::string(&owner, "role") != "user" && !account_hub_member {
+            let zimbra_member =
+                ctx.is_organization_admin(state) && db::string(&owner, "auth_source") == "zimbra";
+            if db::string(&owner, "role") != "user" && !zimbra_member {
                 return json_error(
                     StatusCode::CONFLICT,
                     "Username is already used by the administrator.",
@@ -1125,27 +1118,15 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             }
             owner.get_object_id("_id").unwrap()
         } else {
-            if state.cfg.account_hub_enabled {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    "Account Hub user must be approved before creating a subscription.",
-                );
-            }
-            let password = ctx.field("password");
-            if password.is_empty() || password.len() > 72 {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    "Password is required and must be 72 bytes or fewer.",
-                );
-            }
-            let hash = bcrypt::hash(password, bcrypt::DEFAULT_COST).unwrap();
-            let now = bson::DateTime::now();
-            match users.insert_one(doc!{"username":username.trim(),"username_key":username.trim().to_lowercase(),"email":&emails[0],"password":hash,"role":"user","auth_source":"local","must_change_password":false,"created_at":now,"updated_at":now}).await{Ok(v)=>v.inserted_id.as_object_id().unwrap(),Err(_)=>return json_error(StatusCode::SERVICE_UNAVAILABLE,"Unable to add subscription.")}
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "The recipient must first sign in with Zimbra.",
+            );
         };
         let now = bson::DateTime::now();
         let mut document = doc! {"owner_user_id":owner_id,"managed_by_user_id":ctx.user_id().unwrap(),"username":username.trim(),"emails":emails.clone(),"email":&emails[0],"organization":organization.trim(),"delivery_mode":mode,"newsletter_profile":db::json_doc(&newsletter).unwrap(),"report_profile":db::json_doc(&report).unwrap(),"created_at":now,"updated_at":now};
-        if let Some(email) = owner_account_hub_email {
-            document.insert("account_hub_email", email);
+        if let Some(email) = owner_zimbra_email {
+            document.insert("zimbra_email", email);
         }
         return Some(
             match db::collection(&state.web, "sub_account")
@@ -1244,7 +1225,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             {
                 return json_error(
                     StatusCode::FORBIDDEN,
-                    "Account Hub subscriptions cannot be deleted by an organization administrator.",
+                    "Zimbra subscriptions cannot be deleted by an organization administrator.",
                 );
             }
             let old = db::bson_json(&existing);
@@ -1282,10 +1263,10 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             {
                 return json_error(
                     StatusCode::FORBIDDEN,
-                    "Account Hub subscriptions cannot be converted to local subscriptions.",
+                    "Zimbra subscriptions cannot be converted to local subscriptions.",
                 );
             }
-            if local_subscription && !ctx.is_organization_admin(state) {
+            if local_subscription && !ctx.is_top_admin(state) {
                 return json_error(
                     StatusCode::FORBIDDEN,
                     "Only the organization administrator who created this subscription can edit it.",
@@ -1304,10 +1285,14 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             let owner = if local_subscription {
                 None
             } else if let Ok(owner_id) = existing.get_object_id("owner_user_id") {
-                db::find_one(&state.web, "auth", doc! {"_id":owner_id})
-                    .await
-                    .ok()
-                    .flatten()
+                db::find_one(
+                    &state.web,
+                    &state.cfg.account_collection,
+                    doc! {"_id":owner_id},
+                )
+                .await
+                .ok()
+                .flatten()
             } else if is_self_manager(state, ctx) {
                 ctx.user.clone()
             } else {
@@ -1317,7 +1302,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 } else {
                     db::find_one(
                         &state.web,
-                        "auth",
+                        &state.cfg.account_collection,
                         doc! {"username_key":username.trim().to_lowercase()},
                     )
                     .await
@@ -1344,7 +1329,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 let current_organization = ctx
                     .user
                     .as_ref()
-                    .map(|user| db::string(user, "account_hub_organization"))
+                    .map(|user| db::string(user, "organization"))
                     .unwrap_or_default();
                 data["organization"] = json!(current_organization);
             }
@@ -1352,13 +1337,14 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 let Some(manager) = ctx.user.as_ref() else {
                     return json_error(StatusCode::UNAUTHORIZED, "Authentication required.");
                 };
-                let manager_organization = organization_name(manager);
-                if manager_organization.is_empty() {
-                    return json_error(
-                        StatusCode::BAD_REQUEST,
-                        "Your Account Hub organization is not available.",
-                    );
-                }
+                let manager_organization = {
+                    let value = organization_name(manager);
+                    if value.is_empty() {
+                        "local".to_owned()
+                    } else {
+                        value
+                    }
+                };
                 let submitted_organization = data
                     .get("organization")
                     .and_then(Value::as_str)
@@ -1403,27 +1389,27 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             let current_owner_hub_email = if identity_change {
                 None
             } else if let Some(owner) = owner.as_ref() {
-                match account_hub_recipient(owner) {
+                match zimbra_recipient(owner) {
                     Ok(email) => email,
                     Err(error) => return json_error(StatusCode::BAD_REQUEST, &error),
                 }
             } else {
                 None
             };
-            if let Some(account_hub_email) = current_owner_hub_email.as_ref() {
+            if let Some(zimbra_email) = current_owner_hub_email.as_ref() {
                 if recipient_submitted
-                    && (emails.len() != 1 || !same_email(&emails[0], account_hub_email))
+                    && (emails.len() != 1 || !same_email(&emails[0], zimbra_email))
                 {
                     return json_error(
                         StatusCode::FORBIDDEN,
-                        "Account Hub subscriptions must use the Account Hub email.",
+                        "Zimbra subscriptions must use the Zimbra email.",
                     );
                 }
-                emails = vec![account_hub_email.clone()];
+                emails = vec![zimbra_email.clone()];
             }
             let mut update = doc! {"username":username,"email":&emails[0],"emails":emails.clone(),"organization":organization,"delivery_mode":mode,"newsletter_profile":db::json_doc(&newsletter).unwrap(),"report_profile":db::json_doc(&report).unwrap(),"updated_at":bson::DateTime::now()};
-            if let Some(account_hub_email) = current_owner_hub_email.as_ref() {
-                update.insert("account_hub_email", account_hub_email.clone());
+            if let Some(zimbra_email) = current_owner_hub_email.as_ref() {
+                update.insert("zimbra_email", zimbra_email.clone());
             }
             if identity_change {
                 let Some(manager) = ctx.user.as_ref() else {
@@ -1431,7 +1417,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 };
                 let Some(member) = db::find_one(
                     &state.web,
-                    "auth",
+                    &state.cfg.account_collection,
                     doc! {"username_key":username.to_lowercase()},
                 )
                 .await
@@ -1445,7 +1431,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 let Some(member_id) = member.get_object_id("_id").ok() else {
                     return json_error(StatusCode::FORBIDDEN, "Subscription owner is invalid.");
                 };
-                if db::string(&member, "auth_source") != "account_hub"
+                if db::string(&member, "auth_source") != "zimbra"
                     || !crate::auth::same_organization(manager, &member)
                 {
                     return json_error(
@@ -1467,30 +1453,30 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                         "A subscription already exists for this username.",
                     );
                 }
-                let account_hub_email = match account_hub_recipient(&member) {
+                let zimbra_email = match zimbra_recipient(&member) {
                     Ok(email) => email,
                     Err(error) => return json_error(StatusCode::BAD_REQUEST, &error),
                 };
-                let Some(account_hub_email) = account_hub_email else {
+                let Some(zimbra_email) = zimbra_email else {
                     return json_error(
                         StatusCode::BAD_REQUEST,
-                        "Account Hub email is unavailable. Ask the user to sign in again.",
+                        "Zimbra email is unavailable. Ask the user to sign in again.",
                     );
                 };
                 if recipient_submitted
-                    && (emails.len() != 1 || !same_email(&emails[0], &account_hub_email))
+                    && (emails.len() != 1 || !same_email(&emails[0], &zimbra_email))
                 {
                     return json_error(
                         StatusCode::FORBIDDEN,
-                        "Account Hub subscriptions must use the Account Hub email.",
+                        "Zimbra subscriptions must use the Zimbra email.",
                     );
                 }
-                emails = vec![account_hub_email.clone()];
+                emails = vec![zimbra_email.clone()];
                 update.insert("owner_user_id", member_id);
                 update.insert("username", db::string(&member, "username"));
-                update.insert("email", account_hub_email.clone());
+                update.insert("email", zimbra_email.clone());
                 update.insert("emails", emails.clone());
-                update.insert("account_hub_email", account_hub_email);
+                update.insert("zimbra_email", zimbra_email);
             }
             let mut unset = doc! {"team":""};
             if local_subscription {
@@ -1504,9 +1490,9 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                     update.insert("organization_id", manager_organization_id);
                 }
                 unset.insert("owner_user_id", "");
-                unset.insert("account_hub_email", "");
+                unset.insert("zimbra_email", "");
             } else if current_owner_hub_email.is_none() && !identity_change {
-                unset.insert("account_hub_email", "");
+                unset.insert("zimbra_email", "");
             }
             return Some(
                 match coll
@@ -1557,12 +1543,12 @@ mod tests {
             "_id": owner_id,
             "username": "member",
             "email": "member@example.com",
-            "account_hub_email": "hub@example.com",
+            "zimbra_email": "hub@example.com",
             "role": "user",
-            "auth_source": "account_hub",
-            "account_hub_organization": "SW-ENG",
-            "account_hub_organization_id": "1",
-            "account_hub_is_organization_admin": false,
+            "auth_source": "zimbra",
+            "zimbra_organization": "SW-ENG",
+            "zimbra_organization_id": "1",
+            "zimbra_is_organization_admin": false,
             "disabled": false,
         };
         let subscription = doc! {
@@ -1571,7 +1557,7 @@ mod tests {
             "username": "member",
             "email": "member@example.com",
             "emails": ["member@example.com"],
-            "account_hub_email": "hub@example.com",
+            "zimbra_email": "hub@example.com",
             "organization": "SW-ENG",
             "newsletter_profile": {"enabled": true},
             "report_profile": {"enabled": false},
@@ -1582,7 +1568,7 @@ mod tests {
         assert_eq!(row["has_subscription"], true);
         assert!(row["subscription"]["id"].as_str().is_some());
         assert_eq!(row["subscription"]["organization"], "SW-ENG");
-        assert_eq!(row["subscription"]["account_hub_email"], "hub@example.com");
+        assert_eq!(row["subscription"]["zimbra_email"], "hub@example.com");
         assert!(row["subscription"].get("team").is_none());
     }
 
@@ -1608,9 +1594,9 @@ mod tests {
             "username": "disabled-member",
             "email": "disabled@example.com",
             "role": "user",
-            "auth_source": "account_hub",
-            "account_hub_organization": "SW-ENG",
-            "account_hub_organization_id": "1",
+            "auth_source": "zimbra",
+            "zimbra_organization": "SW-ENG",
+            "zimbra_organization_id": "1",
             "disabled": true,
         };
         let row = public_organization_member(&user, None);
@@ -1642,7 +1628,7 @@ mod tests {
     }
 
     #[test]
-    fn self_subscription_filter_includes_owner_and_legacy_identity() {
+    fn self_subscription_filter_uses_only_the_new_account_owner() {
         let owner_id = ObjectId::new();
         let ctx = ReqCtx {
             method: Method::GET,
@@ -1659,22 +1645,22 @@ mod tests {
             }),
         };
         let filter = self_subscription_owner_filter(&ctx).unwrap();
-        assert_eq!(filter.get_array("$or").unwrap().len(), 2);
+        assert_eq!(filter.get_object_id("owner_user_id").unwrap(), owner_id);
     }
 
     #[test]
-    fn account_hub_recipient_requires_the_synced_email() {
+    fn zimbra_recipient_requires_the_synced_email() {
         let user = doc! {
-            "auth_source": "account_hub",
-            "account_hub_email": "Hub@Example.com",
+            "auth_source": "zimbra",
+            "zimbra_email": "Hub@Example.com",
         };
         assert_eq!(
-            account_hub_recipient(&user).unwrap(),
+            zimbra_recipient(&user).unwrap(),
             Some("hub@example.com".into())
         );
-        let missing = doc! {"auth_source":"account_hub"};
-        assert!(account_hub_recipient(&missing).is_err());
+        let missing = doc! {"auth_source":"zimbra"};
+        assert!(zimbra_recipient(&missing).is_err());
         let local = doc! {"auth_source":"local","email":"local@example.com"};
-        assert_eq!(account_hub_recipient(&local).unwrap(), None);
+        assert_eq!(zimbra_recipient(&local).unwrap(), None);
     }
 }

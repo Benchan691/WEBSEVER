@@ -1,4 +1,3 @@
-mod account_hub_sync;
 mod auth;
 mod config;
 mod db;
@@ -12,6 +11,7 @@ mod scheduler;
 mod subscriptions;
 mod vendor_matcher;
 mod view;
+mod zimbra;
 
 use axum::{
     Router,
@@ -155,7 +155,7 @@ fn page_context(ctx: &ReqCtx, state: &AppState, extras: Value) -> Value {
         "current_user": ctx.user.as_ref().map(auth::public_user),
         "is_admin": ctx.is_admin(state), "is_top_admin": ctx.is_top_admin(state),
         "is_organization_admin": ctx.is_organization_admin(state),
-        "config": {"ACCOUNT_HUB_ENABLED": state.cfg.account_hub_enabled},
+        "config": {"ZIMBRA_ENABLED": true},
         "request": request_context(ctx)
     });
     if let (Some(dst), Some(src)) = (base.as_object_mut(), extras.as_object()) {
@@ -173,13 +173,7 @@ pub fn render(state: &AppState, ctx: &ReqCtx, name: &str, extras: Value) -> Resp
 fn guard(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
     let public = matches!(
         ctx.path.as_str(),
-        "/login"
-            | "/login/local"
-            | "/logout"
-            | "/auth/account-hub/callback"
-            | "/en"
-            | "/zh"
-            | "/cn"
+        "/login" | "/login/local" | "/logout" | "/en" | "/zh" | "/cn"
     ) || ctx.path.starts_with("/locale/")
         || ctx.path.starts_with("/image/");
     if public {
@@ -189,11 +183,7 @@ fn guard(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         return Some(if ctx.is_api() {
             view::error(StatusCode::UNAUTHORIZED, "Authentication required")
         } else {
-            let target = if state.cfg.account_hub_enabled {
-                format!("/login?next={}", urlencoding::encode(&ctx.path))
-            } else {
-                "/login".into()
-            };
+            let target = format!("/login?next={}", urlencoding::encode(&ctx.path));
             view::redirect(&target)
         });
     }
@@ -221,11 +211,6 @@ fn guard(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         || ctx.path.starts_with("/reports")
         || ctx.path.starts_with("/api/operations")
         || ctx.path.starts_with("/generated-newsletters/");
-    let member_admin = ctx.path == "/organization/members"
-        || ctx.path.starts_with("/api/organization/members")
-        || ctx.path == "/api/organization/subscriptions"
-        || ctx.path == "/admin/account-users"
-        || ctx.path.starts_with("/api/admin/account-users");
     let top = matches!(
         ctx.path.as_str(),
         "/admin/sub-admins" | "/operations" | "/set-news"
@@ -235,10 +220,7 @@ fn guard(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         || ctx.path.starts_with("/api/reports/search-cache/")
         || ctx.path.starts_with("/api/operations/newsletter-")
         || ctx.path == "/api/operations/source-list";
-    if top && !ctx.is_top_admin(state)
-        || member_admin && !ctx.is_organization_admin(state)
-        || admin && !ctx.is_admin(state)
-    {
+    if top && !ctx.is_top_admin(state) || admin && !ctx.is_admin(state) {
         return Some(if ctx.is_api() {
             view::error(StatusCode::FORBIDDEN, "Administrator access required.")
         } else {
@@ -285,13 +267,7 @@ async fn dispatch(State(state): State<AppState>, request: Request<Body>) -> Resp
         return response;
     }
     if ctx.path == "/" {
-        return view::redirect(if ctx.is_organization_admin(&state) {
-            "/organization/members"
-        } else if ctx.is_top_admin(&state) && !state.cfg.account_hub_enabled {
-            "/admin/sub-admins"
-        } else {
-            "/subscriptions"
-        });
+        return view::redirect("/subscriptions");
     }
     if let Some(response) = auth::handle(&state, &ctx).await {
         return response;
@@ -393,7 +369,7 @@ mod tests {
     use std::{collections::HashMap, path::Path};
 
     #[test]
-    fn account_hub_login_renders_query_next() {
+    fn zimbra_login_renders_query_next() {
         let ctx = ReqCtx {
             method: Method::GET,
             path: "/login".into(),
@@ -415,7 +391,7 @@ mod tests {
                 "locale": "ch",
                 "html_lang": "zh-Hans",
                 "i18n_catalog": {},
-                "config": {"ACCOUNT_HUB_ENABLED": true},
+                "config": {"ZIMBRA_ENABLED": true},
                 "request": request,
                 "local_login": false,
             }))

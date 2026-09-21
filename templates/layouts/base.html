@@ -12,7 +12,7 @@
 <body>
     <nav class="navbar navbar-expand-lg navbar-dark bg-dark shadow-sm">
         <div class="container">
-            <a class="navbar-brand" href="{{ url_for('auth.organization_members') if is_organization_admin else (url_for('auth.sub_admins') if is_top_admin and not config.ACCOUNT_HUB_ENABLED else url_for('subscription.subscriptions')) }}"><i class="bi bi-shield-check me-2"></i>{{ t('Security Portal') }}</a>
+            <a class="navbar-brand" href="{{ url_for('subscription.subscriptions') }}"><i class="bi bi-shield-check me-2"></i>{{ t('Security Portal') }}</a>
             <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav"
                     aria-controls="navbarNav" aria-expanded="false" aria-label="{{ t('Toggle navigation') }}">
                 <span class="navbar-toggler-icon"></span>
@@ -37,16 +37,6 @@
                     <li class="nav-item">
                         <a class="nav-link {{ 'active' if request.endpoint == 'auth.settings' else '' }}" href="{{ url_for('auth.settings') }}"><i class="bi bi-gear me-1"></i>{{ t('Settings') }}</a>
                     </li>
-                    {% if is_organization_admin %}
-                    <li class="nav-item">
-                        <a class="nav-link {{ 'active' if request.endpoint == 'auth.organization_members' else '' }}" href="{{ url_for('auth.organization_members') }}"><i class="bi bi-people me-1"></i>{{ t('Organization members') }}</a>
-                    </li>
-                    {% endif %}
-                    {% if is_top_admin and not config.ACCOUNT_HUB_ENABLED %}
-                    <li class="nav-item">
-                        <a class="nav-link {{ 'active' if request.endpoint == 'auth.sub_admins' else '' }}" href="{{ url_for('auth.sub_admins') }}"><i class="bi bi-person-gear me-1"></i>{{ t('Sub-admin Management') }}</a>
-                    </li>
-                    {% endif %}
                     <li class="nav-item">
                         <a class="nav-link" href="{{ url_for('auth.logout') }}"><i class="bi bi-box-arrow-right me-1"></i>{{ t('Sign Out') }}</a>
                     </li>

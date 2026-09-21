@@ -9,12 +9,12 @@
   "web_auth": {
     "bootstrap_username": "admin"
   },
-  "account_hub": {
-    "enabled": false,
-    "login_url": "",
-    "token_check_url": "",
-    "required_role": "CVE-SYSTEM",
-    "timeout_seconds": 5
+  "account_collection": "accounts",
+  "zimbra": {
+    "base_url": "https://zmailbox.citictel-cpc.com",
+    "folder_name": "news",
+    "timeout_seconds": 10,
+    "verify_tls": true
   },
   "tavily": {
     "search_depth": "advanced",

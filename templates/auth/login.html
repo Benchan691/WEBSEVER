@@ -26,15 +26,15 @@
                 {% endif %}
 
                 <form method="POST">
-                    {% if config.ACCOUNT_HUB_ENABLED and not local_login %}
+                    {% if not local_login %}
                     <input type="hidden" name="next" value="{{ request.next }}">
                     {% endif %}
                     <div class="mb-3">
-                        <label for="username" class="form-label fw-medium">{{ t('Username') }}</label>
+                        <label for="username" class="form-label fw-medium">{{ t('Zimbra email address') if not local_login else t('Username') }}</label>
                         <div class="input-group">
                             <span class="input-group-text"><i class="bi bi-person"></i></span>
                             <input type="text" class="form-control" name="username" id="username"
-                                   placeholder="{{ t('Enter username') }}" autocomplete="username" required>
+                                   placeholder="{{ t('name@example.com') if not local_login else t('Enter username') }}" autocomplete="username" required>
                         </div>
                     </div>
                     <div class="mb-4">
@@ -45,25 +45,18 @@
                                    placeholder="{{ t('Enter password') }}" autocomplete="current-password" required>
                         </div>
                     </div>
-                    {% if config.ACCOUNT_HUB_ENABLED and not local_login %}
-                    <div class="mb-3">
-                        <label for="captchaVerification" class="form-label fw-medium">{{ t('CAPTCHA verification (when required)') }}</label>
-                        <input type="text" class="form-control" id="captchaVerification" name="captchaVerification" autocomplete="off">
-                        <div class="form-text">{{ t('After repeated failures, Account Hub may require a slider CAPTCHA verification token.') }}</div>
-                    </div>
-                    {% endif %}
                     <button type="submit" class="btn btn-primary w-100 py-2 fw-medium">
                         <i class="bi bi-box-arrow-in-right me-2"></i>{{ t('Sign In') }}
                     </button>
                 </form>
-                {% if local_login and config.ACCOUNT_HUB_ENABLED %}
+                {% if local_login %}
                 <p class="text-center small mt-3 mb-0 text-muted">
-                    <a href="{{ url_for('auth.login') }}">{{ t('Sign in with Account Hub') }}</a>
+                    <a href="{{ url_for('auth.login') }}">{{ t('Sign in with Zimbra') }}</a>
                 </p>
                 {% endif %}
-                {% if config.ACCOUNT_HUB_ENABLED and not local_login %}
+                {% if not local_login %}
                 <p class="text-center small mt-3 mb-0 text-muted">
-                    {{ t('Bootstrap administrator?') }}
+                    {{ t('Local administrator?') }}
                     <a href="{{ url_for('auth.local_login') }}">{{ t('Use local admin sign-in') }}</a>
                 </p>
                 {% endif %}

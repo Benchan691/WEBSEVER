@@ -9,7 +9,7 @@
 
     <div id="message" class="alert d-none" role="alert"></div>
 
-    {% if current_user.auth_source != 'account_hub' and current_user.must_change_password %}
+    {% if current_user.auth_source == 'local' and current_user.must_change_password %}
     <div class="alert alert-warning" role="alert">
         <i class="bi bi-exclamation-triangle me-2"></i>{{ t('Change your temporary password before continuing.') }}
     </div>
@@ -21,22 +21,22 @@
             <dl class="row small mb-4">
                 <dt class="col-sm-4">{{ t('Username') }}</dt>
                 <dd class="col-sm-8">{{ current_user.username }}</dd>
+                {% if current_user.email %}
+                <dt class="col-sm-4">{{ t('Email') }}</dt>
+                <dd class="col-sm-8">{{ current_user.email }}</dd>
+                {% endif %}
                 <dt class="col-sm-4">{{ t('Role') }}</dt>
                 <dd class="col-sm-8">{{ t('Administrator') if current_user.role == 'admin' else (t('Sub-admin') if current_user.role == 'sub_admin' else t('User')) }}</dd>
-                {% if current_user.auth_source == 'account_hub' %}
-                <dt class="col-sm-4">{{ t('Sign-in provider') }}</dt>
-                <dd class="col-sm-8">{{ t('Account Hub') }}</dd>
+                {% if current_user.auth_source == 'zimbra' %}
+                    <dt class="col-sm-4">{{ t('Sign-in provider') }}</dt>
+                    <dd class="col-sm-8">{{ t('Zimbra') }}</dd>
                 {% if current_user.organization %}
                 <dt class="col-sm-4">{{ t('Organization') }}</dt>
                 <dd class="col-sm-8">{{ current_user.organization }}</dd>
                 {% endif %}
-                {% if current_user.organization_admin %}
-                <dt class="col-sm-4">{{ t('Organization role') }}</dt>
-                <dd class="col-sm-8">{{ t('Organization administrator') }}</dd>
-                {% endif %}
                 {% endif %}
             </dl>
-            {% if current_user.auth_source != 'account_hub' %}
+            {% if current_user.auth_source == 'local' %}
             <form id="profile-form" class="mb-4">
                 <div class="mb-3">
                     <label for="profile-email" class="form-label">{{ t('Email (optional)') }}</label>
@@ -46,8 +46,8 @@
                 <button class="btn btn-outline-primary" type="submit"><i class="bi bi-person-check me-1"></i>{{ t('Save profile') }}</button>
             </form>
             {% endif %}
-            {% if current_user.auth_source == 'account_hub' %}
-            <p class="text-muted mb-0">{{ t('Your password and access permissions are managed by Account Hub.') }}</p>
+            {% if current_user.auth_source == 'zimbra' %}
+            <p class="text-muted mb-0">{{ t('Your password and access permissions are managed by Zimbra.') }}</p>
             {% else %}
             <h3 class="h5 mb-3">{{ t('Change password') }}</h3>
             <form id="password-form">
@@ -75,7 +75,7 @@
 (function () {
     const form = document.getElementById('password-form');
     const message = document.getElementById('message');
-    {% if current_user.auth_source != 'account_hub' %}
+    {% if current_user.auth_source == 'local' %}
     const profile = document.getElementById('profile-form');
     profile.addEventListener('submit', function (event) {
         event.preventDefault();

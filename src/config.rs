@@ -14,14 +14,12 @@ pub struct Config {
     pub secret: String,
     pub bootstrap_username: String,
     pub bootstrap_password: String,
-    pub account_hub_enabled: bool,
-    pub account_hub_login_url: String,
-    pub account_hub_token_check_url: String,
-    pub account_hub_directory_url: String,
-    pub account_hub_directory_token: String,
-    pub account_hub_sync_interval_seconds: u64,
-    pub account_hub_timeout_seconds: u64,
-    pub account_hub_required_role: String,
+    pub zimbra_base_url: String,
+    pub zimbra_folder_name: String,
+    pub zimbra_timeout_seconds: u64,
+    pub zimbra_verify_tls: bool,
+    pub zimbra_credential_key: String,
+    pub account_collection: String,
     pub newsletter_root: PathBuf,
     pub review_view_suffix: String,
     pub port: u16,
@@ -45,7 +43,7 @@ impl Config {
         let get = |key: &str, pointer: &str, default: &str| -> String {
             env::var(key)
                 .ok()
-                .filter(|v| !v.is_empty())
+                .filter(|v| !v.trim().is_empty())
                 .or_else(|| {
                     file.pointer(pointer)
                         .and_then(Value::as_str)
@@ -57,23 +55,22 @@ impl Config {
             env::var(key)
                 .ok()
                 .or_else(|| {
-                    file.pointer(pointer).and_then(|value| {
-                        value
-                            .as_u64()
-                            .map(|value| value.to_string())
-                            .or_else(|| value.as_str().map(str::to_owned))
+                    file.pointer(pointer).and_then(|v| {
+                        v.as_u64()
+                            .map(|n| n.to_string())
+                            .or_else(|| v.as_str().map(str::to_owned))
                     })
                 })
-                .and_then(|value| value.parse::<u64>().ok())
-                .filter(|value| *value > 0)
+                .and_then(|v| v.parse().ok())
+                .filter(|v: &u64| *v > 0)
                 .unwrap_or(default)
         };
-        let get_bool = |key: &str, pointer: &str| -> bool {
+        let get_bool = |key: &str, pointer: &str, default: bool| -> bool {
             env::var(key)
                 .ok()
                 .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
                 .or_else(|| file.pointer(pointer).and_then(Value::as_bool))
-                .unwrap_or(false)
+                .unwrap_or(default)
         };
         let mongo_uri = env::var("MONGO_URI")
             .ok()
@@ -90,78 +87,43 @@ impl Config {
         } else {
             root.join(newsletter)
         };
-        let web_database = get("WEB_DATABASE", "/mongodb/web_database", "web");
-        let vulnerabilities_database = get(
-            "VULNERABILITIES_DATABASE",
-            "/mongodb/vulnerabilities_database",
-            "vulnerabilities",
-        );
-        let bootstrap_username = get(
-            "WEB_AUTH_BOOTSTRAP_USERNAME",
-            "/web_auth/bootstrap_username",
-            "admin",
-        );
-        let account_hub_enabled = get_bool("ACCOUNT_HUB_ENABLED", "/account_hub/enabled");
-        let account_hub_login_url = get("ACCOUNT_HUB_LOGIN_URL", "/account_hub/login_url", "");
-        let account_hub_token_check_url = get(
-            "ACCOUNT_HUB_TOKEN_CHECK_URL",
-            "/account_hub/token_check_url",
-            "",
-        );
-        let account_hub_directory_url = get(
-            "ACCOUNT_HUB_DIRECTORY_URL",
-            "/account_hub/directory_url",
-            "",
-        );
-        let account_hub_directory_token = env::var("ACCOUNT_HUB_DIRECTORY_TOKEN")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_default();
-        let account_hub_sync_interval_seconds = get_u64(
-            "ACCOUNT_HUB_SYNC_INTERVAL_SECONDS",
-            "/account_hub/sync_interval_seconds",
-            300,
-        );
-        let account_hub_timeout_seconds = get_u64(
-            "ACCOUNT_HUB_TIMEOUT_SECONDS",
-            "/account_hub/timeout_seconds",
-            5,
-        );
-        let account_hub_required_role = get(
-            "ACCOUNT_HUB_REQUIRED_ROLE",
-            "/account_hub/required_role",
-            "CVE-SYSTEM",
-        );
-        let account_hub_required_role = if account_hub_required_role.trim().is_empty() {
-            "CVE-SYSTEM".to_owned()
-        } else {
-            account_hub_required_role.trim().to_owned()
-        };
-        let review_view_suffix = get(
-            "REVIEW_VIEW_SUFFIX",
-            "/mongodb/review_view_suffix",
-            "_review",
-        );
         Ok(Self {
             root: root.to_path_buf(),
-            file,
+            file: file.clone(),
             mongo_uri,
-            web_database,
-            vulnerabilities_database,
+            web_database: get("WEB_DATABASE", "/mongodb/web_database", "web"),
+            vulnerabilities_database: get(
+                "VULNERABILITIES_DATABASE",
+                "/mongodb/vulnerabilities_database",
+                "vulnerabilities",
+            ),
             secret,
-            bootstrap_username,
-            bootstrap_password: env::var("WEB_AUTH_BOOTSTRAP_PASSWORD")
-                .unwrap_or_else(|_| "changeme".into()),
-            account_hub_enabled,
-            account_hub_login_url,
-            account_hub_token_check_url,
-            account_hub_directory_url,
-            account_hub_directory_token,
-            account_hub_sync_interval_seconds,
-            account_hub_timeout_seconds,
-            account_hub_required_role,
+            bootstrap_username: get(
+                "WEB_AUTH_BOOTSTRAP_USERNAME",
+                "/web_auth/bootstrap_username",
+                "admin",
+            ),
+            bootstrap_password: env::var("WEB_AUTH_BOOTSTRAP_PASSWORD").unwrap_or_default(),
+            zimbra_base_url: get(
+                "ZIMBRA_BASE_URL",
+                "/zimbra/base_url",
+                "https://zmailbox.citictel-cpc.com",
+            ),
+            zimbra_folder_name: get("ZIMBRA_FOLDER_NAME", "/zimbra/folder_name", "news"),
+            zimbra_timeout_seconds: get_u64(
+                "ZIMBRA_TIMEOUT_SECONDS",
+                "/zimbra/timeout_seconds",
+                10,
+            ),
+            zimbra_verify_tls: get_bool("ZIMBRA_VERIFY_TLS", "/zimbra/verify_tls", true),
+            zimbra_credential_key: env::var("ZIMBRA_CREDENTIAL_KEY").unwrap_or_default(),
+            account_collection: get("ACCOUNT_COLLECTION", "/account_collection", "accounts"),
             newsletter_root,
-            review_view_suffix,
+            review_view_suffix: get(
+                "REVIEW_VIEW_SUFFIX",
+                "/mongodb/review_view_suffix",
+                "_review",
+            ),
             port: env::var("PORT")
                 .ok()
                 .and_then(|v| v.parse().ok())

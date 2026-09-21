@@ -1,11 +1,14 @@
 services:
   web:
+    container_name: webserver-rust-candidate
     build: .
     ports:
-      - "9100:9100"
+      # Use 19100 while validating beside the current service.
+      - "${RUST_WEB_PORT:-19100}:9100"
     env_file:
       - .env
     environment:
       LOCAL_MONGO_URI: mongodb://host.docker.internal:27017/
+      RUST_SCHEDULER_ENABLED: "${RUST_SCHEDULER_ENABLED:-false}"
     extra_hosts:
       - host.docker.internal:host-gateway

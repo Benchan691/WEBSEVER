@@ -1,54 +1,54 @@
-use crate::{AppState, ReqCtx, db, render, view};
+use crate::{AppState, ReqCtx, db, render, view, zimbra};
 use axum::{
     http::{HeaderMap, Method, StatusCode, header},
     response::Response,
 };
-use base64::{
-    Engine,
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
-};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
-use mongodb::bson::{self, Bson, Document, doc, oid::ObjectId};
+use mongodb::{
+    IndexModel,
+    bson::{self, Document, doc, oid::ObjectId},
+    options::IndexOptions,
+};
 use serde_json::{Value, json};
 use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 const COOKIE: &str = "rust_session";
 
-fn key(value: &str) -> String {
+pub fn key(value: &str) -> String {
     value.trim().to_lowercase()
+}
+pub(crate) fn valid_email(email: &str) -> bool {
+    let e = email.trim();
+    !e.is_empty()
+        && e.len() <= 320
+        && e.contains('@')
+        && e.rsplit('@').next().is_some_and(|d| d.contains('.'))
+        && !e.contains(char::is_whitespace)
 }
 fn valid_password(password: &str) -> Result<(), String> {
     if password.is_empty() {
         return Err("Password is required.".into());
     }
-    if password.chars().count() > 256 {
-        return Err("Password must be 256 characters or fewer.".into());
-    }
-    if password.len() > 72 {
+    if password.chars().count() > 256 || password.len() > 72 {
         return Err("Password must be 72 bytes or fewer.".into());
     }
     Ok(())
 }
-pub(crate) fn valid_email(email: &str) -> bool {
-    let e = email.trim();
-    e.is_empty()
-        || (e.contains('@')
-            && e.rsplit('@')
-                .next()
-                .is_some_and(|domain| domain.contains('.'))
-            && !e.contains(char::is_whitespace))
+fn accounts(state: &AppState) -> mongodb::Collection<Document> {
+    db::collection(&state.web, &state.cfg.account_collection)
 }
+
 fn session_cookie(state: &AppState, user: &Document) -> String {
     let expiry = chrono::Utc::now().timestamp() + 12 * 3600;
     let payload = format!(
-        "{}:{}:{}:{}",
+        "{}:{}:{}",
         db::id_string(user),
         db::string(user, "auth_source"),
-        db::string(user, "account_hub_uid"),
         expiry
     );
-    let mut mac = HmacSha256::new_from_slice(state.cfg.secret.as_bytes()).unwrap();
+    let mut mac = HmacSha256::new_from_slice(state.cfg.secret.as_bytes()).expect("HMAC key");
     mac.update(payload.as_bytes());
     format!(
         "{COOKIE}={}.{}; Path=/; Max-Age=43200; HttpOnly; SameSite=Lax",
@@ -56,10 +56,7 @@ fn session_cookie(state: &AppState, user: &Document) -> String {
         URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
     )
 }
-fn session_from_cookie(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> Option<(ObjectId, String, String)> {
+fn session_from_cookie(state: &AppState, headers: &HeaderMap) -> Option<(ObjectId, String)> {
     let raw = view::cookie(headers, COOKIE)?;
     let (message, signature) = raw.split_once('.')?;
     let payload = URL_SAFE_NO_PAD.decode(message).ok()?;
@@ -68,306 +65,138 @@ fn session_from_cookie(
     mac.update(&payload);
     mac.verify_slice(&sig).ok()?;
     let payload = String::from_utf8(payload).ok()?;
-    let mut parts = payload.splitn(4, ':');
+    let mut parts = payload.splitn(3, ':');
     let id = db::object_id(parts.next()?)?;
     let source = parts.next()?.to_owned();
-    let uid = parts.next()?.to_owned();
     let expiry = parts.next()?.parse::<i64>().ok()?;
-    if expiry <= chrono::Utc::now().timestamp() {
-        return None;
-    }
-    Some((id, source, uid))
+    (expiry > chrono::Utc::now().timestamp()).then_some((id, source))
 }
 
 pub async fn current_user(state: &AppState, headers: &HeaderMap) -> Option<Document> {
-    let (id, source, uid) = session_from_cookie(state, headers)?;
-    let user = db::find_one(&state.web, "auth", doc! {"_id":id})
-        .await
-        .ok()??;
-    if db::bool_field(&user, "disabled") {
-        return None;
-    }
-    let actual_source = user.get_str("auth_source").unwrap_or("local");
-    if source == "account_hub" {
-        if !state.cfg.account_hub_enabled
-            || actual_source != "account_hub"
-            || uid.is_empty()
-            || db::string(&user, "account_hub_uid") != uid
-            || !matches!(user.get_str("role"), Ok("user" | "sub_admin"))
-        {
-            return None;
-        }
-    } else if state.cfg.account_hub_enabled && !is_top_admin(&user, &state.cfg) {
+    let (id, source) = session_from_cookie(state, headers)?;
+    let user = accounts(state).find_one(doc! {"_id":id}).await.ok()??;
+    if db::bool_field(&user, "disabled") || db::string(&user, "auth_source") != source {
         return None;
     }
     Some(user)
 }
-
 pub fn is_top_admin(user: &Document, cfg: &crate::config::Config) -> bool {
-    db::string(user, "role") == "admin"
-        && matches!(user.get_str("auth_source"), Ok("local") | Err(_))
-        && (!cfg.account_hub_enabled
-            || key(&db::string(user, "username")) == key(&cfg.bootstrap_username))
+    db::string(user, "auth_source") == "local"
+        && db::string(user, "role") == "admin"
+        && key(&db::string(user, "username")) == key(&cfg.bootstrap_username)
 }
 pub fn is_admin(user: &Document, cfg: &crate::config::Config) -> bool {
-    db::string(user, "role") == "sub_admin" || is_top_admin(user, cfg)
+    is_top_admin(user, cfg)
 }
-
-/// Account Hub organization administrators are identified by the system role
-/// assigned to the configured portal system (for example
-/// `CVE-SYSTEM-admin`).  This is deliberately separate from the portal's
-/// local `role` field: organization administrators may manage their Hub
-/// members, but they do not become local portal administrators.
-pub fn is_organization_admin(user: &Document, _cfg: &crate::config::Config) -> bool {
-    db::string(user, "auth_source") == "account_hub"
-        && db::bool_field(user, "account_hub_is_organization_admin")
-        && !db::string(user, "account_hub_organization_id").is_empty()
+pub fn is_organization_admin(_user: &Document, _cfg: &crate::config::Config) -> bool {
+    false
 }
-
-fn value_text(value: &Value) -> Option<String> {
-    value
-        .as_str()
-        .map(str::to_owned)
-        .or_else(|| value.as_i64().map(|number| number.to_string()))
-        .or_else(|| value.as_u64().map(|number| number.to_string()))
-        .or_else(|| value.as_f64().map(|number| number.to_string()))
+pub(crate) fn zimbra_email(user: &Document) -> Option<String> {
+    let email = db::string(user, "email").trim().to_lowercase();
+    (db::string(user, "auth_source") == "zimbra" && valid_email(&email)).then_some(email)
 }
-
-fn role_name(value: &Value) -> Option<String> {
-    value_text(value).or_else(|| {
-        value
-            .get("roleName")
-            .or_else(|| value.get("name"))
-            .or_else(|| value.get("label"))
-            .and_then(value_text)
-    })
-}
-
-fn role_names(data: &Value, fields: &[&str]) -> Vec<String> {
-    fields
-        .iter()
-        .flat_map(|field| data.get(*field).into_iter())
-        .flat_map(|value| value.as_array().into_iter().flatten())
-        .filter_map(role_name)
-        .map(|role| role.trim().to_owned())
-        .filter(|role| !role.is_empty())
-        .collect()
-}
-
-fn organization_admin_role(role: &str, required: &str) -> bool {
-    let role = key(role);
-    let required = key(required);
-    if role.is_empty() || required.is_empty() {
-        return false;
-    }
-    [
-        format!("{required}-admin"),
-        format!("{required}_admin"),
-        format!("{required}/admin"),
-        format!("{required}:admin"),
-    ]
-    .iter()
-    .any(|candidate| role == *candidate)
-}
-
-fn account_hub_organization(data: &Value) -> (String, String) {
-    let name = ["organization", "organizationName", "orgName"]
-        .iter()
-        .find_map(|field| data.get(*field).and_then(value_text))
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
-    let id = ["organizationId", "organizationID", "orgId"]
-        .iter()
-        .find_map(|field| data.get(*field).and_then(value_text))
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
-    (name, id)
-}
-
-fn account_hub_email_from_data(data: &Value) -> Option<String> {
-    let email = data
-        .get("email")
-        .and_then(Value::as_str)?
-        .trim()
-        .to_lowercase();
-    (!email.is_empty() && valid_email(&email)).then_some(email)
-}
-
-fn account_hub_email_from_access_token(
-    access_token: &str,
-    expected_uid: &str,
-    expected_username: &str,
-) -> Option<String> {
-    let payload = access_token.split('.').nth(1)?;
-    let payload = URL_SAFE_NO_PAD.decode(payload).ok()?;
-    let claims: Value = serde_json::from_slice(&payload).ok()?;
-    let claim_uid = claims
-        .get("uid")
-        .or_else(|| claims.get("userId"))
-        .map(value_string)
-        .unwrap_or_default();
-    if claim_uid != expected_uid {
-        return None;
-    }
-    let claim_username = claims
-        .get("username")
-        .or_else(|| claims.get("userName"))
-        .or_else(|| claims.get("account"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if !claim_username.eq_ignore_ascii_case(expected_username) {
-        return None;
-    }
-    account_hub_email_from_data(&claims)
-}
-
-fn bson_strings(values: &[String]) -> Bson {
-    Bson::Array(values.iter().cloned().map(Bson::String).collect())
-}
-
-fn account_hub_profile_fields(data: &Value, required_role: &str) -> Document {
-    let (organization, organization_id) = account_hub_organization(data);
-    let roles = role_names(data, &["roles", "role_names"]);
-    let system_roles = role_names(data, &["systemRole", "systemRoles"]);
-    let organization_admin = system_roles
-        .iter()
-        .any(|role| organization_admin_role(role, required_role));
-    doc! {
-        "account_hub_organization": organization,
-        "account_hub_organization_id": organization_id,
-        "account_hub_roles": bson_strings(&roles),
-        "account_hub_system_roles": bson_strings(&system_roles),
-        "account_hub_is_organization_admin": organization_admin,
-    }
-}
-
-fn stored_role_names(user: &Document, field: &str) -> Vec<String> {
-    user.get_array(field)
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(|value| value.as_str().map(str::to_owned))
-        .collect()
-}
-
 pub(crate) fn organization_filter(user: &Document) -> Option<Document> {
-    let organization_id = db::string(user, "account_hub_organization_id");
-    if !organization_id.is_empty() {
-        return Some(doc! {"account_hub_organization_id": organization_id});
+    let id = db::string(user, "organization_id");
+    if !id.is_empty() {
+        return Some(doc! {"organization_id": id});
     }
-    let organization = db::string(user, "account_hub_organization");
-    (!organization.is_empty()).then(|| doc! {"account_hub_organization": organization})
+    let name = db::string(user, "organization");
+    (!name.is_empty()).then(|| doc! {"organization":name})
 }
-
 pub(crate) fn same_organization(manager: &Document, member: &Document) -> bool {
-    let manager_id = db::string(manager, "account_hub_organization_id");
-    let member_id = db::string(member, "account_hub_organization_id");
-    if !manager_id.is_empty() || !member_id.is_empty() {
-        return !manager_id.is_empty() && manager_id == member_id;
+    let left = db::string(manager, "organization_id");
+    let right = db::string(member, "organization_id");
+    if !left.is_empty() || !right.is_empty() {
+        return !left.is_empty() && left == right;
     }
-    let manager_name = db::string(manager, "account_hub_organization");
-    let member_name = db::string(member, "account_hub_organization");
-    !manager_name.is_empty() && key(&manager_name) == key(&member_name)
-}
-
-pub(crate) fn account_hub_email(user: &Document) -> Option<String> {
-    if db::string(user, "auth_source") != "account_hub" {
-        return None;
-    }
-    let email = db::string(user, "account_hub_email").trim().to_lowercase();
-    (!email.is_empty() && valid_email(&email)).then_some(email)
+    let left = db::string(manager, "organization");
+    let right = db::string(member, "organization");
+    !left.is_empty() && key(&left) == key(&right)
 }
 
 pub fn public_user(user: &Document) -> Value {
-    json!({"id":db::id_string(user),"username":db::string(user,"username"),"email":db::string(user,"email"),
-        "role":user.get_str("role").unwrap_or("user"),"must_change_password":db::bool_field(user,"must_change_password"),
-        "disabled":db::bool_field(user,"disabled"),"pause_managed_subscriptions_when_disabled":db::bool_field(user,"pause_managed_subscriptions_when_disabled"),
-        "auth_source":user.get_str("auth_source").unwrap_or("local"),"account_hub_uid":db::string(user,"account_hub_uid"),
-        "account_hub_username":db::string(user,"account_hub_username"),"account_hub_bound":!db::string(user,"account_hub_uid").is_empty(),
-        "account_hub_email":account_hub_email(user).unwrap_or_default(),
-        "organization":db::string(user,"account_hub_organization"),
-        "organization_id":db::string(user,"account_hub_organization_id"),
-        "organization_admin":db::bool_field(user,"account_hub_is_organization_admin"),
-        "account_hub_roles":stored_role_names(user,"account_hub_roles"),
-        "account_hub_system_roles":stored_role_names(user,"account_hub_system_roles"),
-        "role_source":"local"})
+    json!({
+        "id": db::id_string(user), "username": db::string(user,"username"),
+        "email": db::string(user,"email"), "role": db::string(user,"role"),
+        "auth_source": db::string(user,"auth_source"), "disabled": db::bool_field(user,"disabled"),
+        "must_change_password": db::bool_field(user,"must_change_password"),
+        "zimbra_email": if db::string(user,"auth_source")=="zimbra" { db::string(user,"email") } else { String::new() },
+        "zimbra_folder_id": db::string(user,"zimbra_folder_id"),
+        "zimbra_folder_path": db::string(user,"zimbra_folder_path"),
+        "organization": db::string(user,"organization"), "organization_id": db::string(user,"organization_id"),
+        "account_hub_email": "", "account_hub_bound": false, "organization_admin": false,
+        "account_hub_roles": [], "account_hub_system_roles": [], "role_source": "local"
+    })
 }
+
 pub async fn ensure_bootstrap(state: &AppState) -> Result<(), Box<dyn std::error::Error>> {
-    let coll = db::collection(&state.web, "auth");
+    let coll = accounts(state);
+    coll.create_index(
+        IndexModel::builder()
+            .keys(doc! {"username_key":1})
+            .options(
+                IndexOptions::builder()
+                    .unique(true)
+                    .name(Some("accounts_username_unique".to_owned()))
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
+    coll.create_index(
+        IndexModel::builder()
+            .keys(doc! {"email_key":1})
+            .options(
+                IndexOptions::builder()
+                    .unique(true)
+                    .sparse(true)
+                    .name(Some("accounts_email_unique".to_owned()))
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
     let username = state.cfg.bootstrap_username.trim();
-    if username.is_empty() {
-        return Ok(());
+    if username.is_empty() || state.cfg.bootstrap_password.is_empty() {
+        return Err("WEB_AUTH_BOOTSTRAP_USERNAME and WEB_AUTH_BOOTSTRAP_PASSWORD are required for the local administrator.".into());
     }
-    let existing = coll.find_one(doc! {"username_key":key(username)}).await?;
+    valid_password(&state.cfg.bootstrap_password)?;
     let now = bson::DateTime::now();
-    if let Some(user) = existing {
-        if !matches!(user.get_str("auth_source"), Ok("local") | Err(_)) {
-            tracing::warn!("Bootstrap username belongs to a non-local user");
-            return Ok(());
-        }
-        let id = user.get_object_id("_id")?;
-        let mut set = doc! {"role":"admin","auth_source":"local","disabled":false,"must_change_password":false,"username_key":key(username),"updated_at":now};
-        if user
-            .get_str("password")
-            .ok()
-            .is_none_or(|v| !v.starts_with("$2"))
-            && !state.cfg.bootstrap_password.is_empty()
-        {
-            set.insert(
-                "password",
-                bcrypt::hash(&state.cfg.bootstrap_password, bcrypt::DEFAULT_COST)?,
-            );
-        }
-        coll.update_one(doc!{"_id":id},doc!{"$set":set,"$unset":{"account_hub_uid":"","account_hub_username":"","account_hub_email":"","last_account_hub_sync_at":"","account_hub_organization":"","account_hub_organization_id":"","account_hub_roles":"","account_hub_system_roles":"","account_hub_is_organization_admin":""}}).await?;
-    } else if !state.cfg.bootstrap_password.is_empty() {
-        valid_password(&state.cfg.bootstrap_password)?;
-        let hash = bcrypt::hash(&state.cfg.bootstrap_password, bcrypt::DEFAULT_COST)?;
-        coll.insert_one(doc!{"username":username,"username_key":key(username),"password":hash,"role":"admin","auth_source":"local","disabled":false,"must_change_password":false,"created_at":now,"updated_at":now}).await?;
-    }
+    let hash = bcrypt::hash(&state.cfg.bootstrap_password, bcrypt::DEFAULT_COST)?;
+    coll.update_one(doc! {"username_key":key(username), "auth_source":"local"}, doc! {"$set":{"username":username,"username_key":key(username),"password":hash,"role":"admin","auth_source":"local","disabled":false,"must_change_password":false,"updated_at":now},"$setOnInsert":{"created_at":now}}).upsert(true).await?;
     Ok(())
 }
 
-async fn find_login(state: &AppState, username: &str) -> Option<Document> {
-    let name = username.trim();
-    if name.is_empty() {
-        return None;
-    }
-    db::find_one(&state.web, "auth", doc! {"username_key":key(name)})
-        .await
-        .ok()
-        .flatten()
-        .or_else(|| None)
-}
-async fn local_login(state: &AppState, ctx: &ReqCtx, only_bootstrap: bool) -> Response {
+async fn local_login(state: &AppState, ctx: &ReqCtx) -> Response {
     let username = ctx.field("username");
     let password = ctx.field("password");
-    if let Some(user) = find_login(state, &username).await {
-        let bootstrap = db::string(&user, "role") == "admin"
-            && db::string(&user, "auth_source") == "local"
-            && key(&db::string(&user, "username")) == key(&state.cfg.bootstrap_username);
-        let allowed = !db::bool_field(&user, "disabled") && (!only_bootstrap || bootstrap);
-        let hashed = user.get_str("password").unwrap_or("");
-        if allowed && bcrypt::verify(&password, hashed).unwrap_or(false) {
-            let target = if db::bool_field(&user, "must_change_password") {
-                "/settings"
-            } else {
-                "/subscriptions"
-            };
-            let mut response = view::redirect(target);
-            response.headers_mut().insert(
-                header::SET_COOKIE,
-                session_cookie(state, &user).parse().unwrap(),
-            );
-            return response;
-        }
+    let user = accounts(state)
+        .find_one(doc! {"username_key":key(&username),"auth_source":"local"})
+        .await
+        .ok()
+        .flatten();
+    if let Some(user) = user
+        && !db::bool_field(&user, "disabled")
+        && bcrypt::verify(password, user.get_str("password").unwrap_or("")).unwrap_or(false)
+    {
+        let next = ctx.field("next");
+        let target = if db::bool_field(&user, "must_change_password") {
+            "/settings"
+        } else {
+            safe_next(&next)
+        };
+        let mut response = view::redirect(target);
+        response.headers_mut().insert(
+            header::SET_COOKIE,
+            session_cookie(state, &user).parse().unwrap(),
+        );
+        return response;
     }
     let mut response = render(
         state,
         ctx,
         "auth/login.html",
-        json!({"local_login":only_bootstrap,"error":"Invalid username or password"}),
+        json!({"local_login":true,"error":"Invalid username or password."}),
     );
     *response.status_mut() = StatusCode::UNAUTHORIZED;
     response
@@ -379,354 +208,66 @@ fn safe_next(next: &str) -> &str {
         "/subscriptions"
     }
 }
-async fn hub_login(state: &AppState, ctx: &ReqCtx) -> Response {
-    if state.cfg.account_hub_login_url.is_empty()
-        || state.cfg.account_hub_token_check_url.is_empty()
-    {
-        let mut response = render(
+
+async fn zimbra_login(state: &AppState, ctx: &ReqCtx) -> Response {
+    let email = ctx.field("username").trim().to_lowercase();
+    let password = ctx.field("password");
+    if !valid_email(&email) || password.is_empty() {
+        let mut r = render(
             state,
             ctx,
             "auth/login.html",
-            json!({"error":"Account Hub is not configured."}),
+            json!({"error":"Enter your full Zimbra email address and password."}),
         );
-        *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
-        return response;
+        *r.status_mut() = StatusCode::UNAUTHORIZED;
+        return r;
     }
-    let username = ctx.field("username");
-    let password = ctx.field("password");
-    if username.trim().is_empty() || password.is_empty() {
-        return hub_error(
-            state,
-            ctx,
-            "Invalid username or password",
-            StatusCode::UNAUTHORIZED,
-        );
-    }
-    let encoded = STANDARD.encode(password.as_bytes());
-    let captcha = ctx.field("captchaVerification");
-    let mut payload = json!({"username":username,"password":encoded});
-    if !captcha.is_empty() {
-        payload["captchaVerification"] = json!(captcha);
-    }
-    let login = state
-        .http
-        .post(&state.cfg.account_hub_login_url)
-        .header(header::ACCEPT, "application/json")
-        .json(&payload)
-        .send()
-        .await;
-    let Ok(login) = login else {
-        return hub_error(
-            state,
-            ctx,
-            "Account Hub is unavailable.",
-            StatusCode::SERVICE_UNAVAILABLE,
-        );
-    };
-    if !login.status().is_success() {
-        return hub_error(
-            state,
-            ctx,
-            "Invalid Account Hub username, password, or CAPTCHA.",
-            StatusCode::UNAUTHORIZED,
-        );
-    }
-    let cookie_header = login
-        .headers()
-        .get_all(header::SET_COOKIE)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .filter_map(|value| value.split(';').next())
-        .collect::<Vec<_>>()
-        .join("; ");
-    let payload: Value = match login.json().await {
+    let (_session, folder_id, folder_path) =
+        match zimbra::login_and_prepare(state, &email, &password).await {
+            Ok(v) => v,
+            Err(error) => {
+                let mut r = render(state, ctx, "auth/login.html", json!({"error":error}));
+                *r.status_mut() = StatusCode::UNAUTHORIZED;
+                return r;
+            }
+        };
+    let encrypted = match zimbra::encrypt_password(&state.cfg, &password) {
         Ok(v) => v,
-        Err(_) => {
-            return hub_error(
-                state,
-                ctx,
-                "Account Hub returned invalid JSON.",
-                StatusCode::SERVICE_UNAVAILABLE,
-            );
-        }
+        Err(e) => return view::error(StatusCode::SERVICE_UNAVAILABLE, &e),
     };
-    if !business_success(&payload) {
-        return hub_error(
-            state,
-            ctx,
-            "Invalid Account Hub username, password, or CAPTCHA.",
-            StatusCode::UNAUTHORIZED,
-        );
-    }
-    let data = payload
-        .get("data")
-        .filter(|v| v.is_object())
-        .unwrap_or(&payload);
-    let access = data
-        .get("accessToken")
-        .or_else(|| data.get("access_token"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let refresh = data
-        .get("refreshToken")
-        .or_else(|| data.get("refresh_token"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if access.is_empty() || refresh.is_empty() {
-        return hub_error(
-            state,
-            ctx,
-            "Account Hub did not return usable tokens.",
-            StatusCode::UNAUTHORIZED,
-        );
-    }
-    let mut check_request = state
-        .http
-        .get(&state.cfg.account_hub_token_check_url)
-        .bearer_auth(access);
-    if state
-        .cfg
-        .account_hub_token_check_url
-        .contains("/token/check")
-    {
-        check_request = check_request.query(&[("accessToken", access), ("refreshToken", refresh)]);
-    }
-    if !cookie_header.is_empty() {
-        check_request = check_request.header(header::COOKIE, cookie_header);
-    }
-    let check = check_request.send().await;
-    let Ok(check) = check else {
-        return hub_error(
-            state,
-            ctx,
-            "Account Hub is unavailable.",
-            StatusCode::SERVICE_UNAVAILABLE,
-        );
-    };
-    if !check.status().is_success() {
-        return hub_error(
-            state,
-            ctx,
-            "Account Hub session is no longer valid.",
-            StatusCode::UNAUTHORIZED,
-        );
-    }
-    let claims: Value = match check.json().await {
-        Ok(v) => v,
-        Err(_) => {
-            return hub_error(
-                state,
-                ctx,
-                "Account Hub returned invalid JSON.",
-                StatusCode::SERVICE_UNAVAILABLE,
-            );
-        }
-    };
-    if !business_success(&claims) {
-        return hub_error(
-            state,
-            ctx,
-            "Account Hub session is no longer valid.",
-            StatusCode::UNAUTHORIZED,
-        );
-    }
-    let data = claims
-        .get("data")
-        .filter(|v| v.is_object())
-        .unwrap_or(&claims);
-    let uid = data
-        .get("uid")
-        .or_else(|| data.get("userId"))
-        .map(value_string)
-        .unwrap_or_default();
-    let hub_username = data
-        .get("username")
-        .or_else(|| data.get("userName"))
-        .or_else(|| data.get("account"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim();
-    let role_ok = has_required_role(data, &state.cfg.account_hub_required_role);
-    if !role_ok {
-        let message = format!("{} role is required.", state.cfg.account_hub_required_role);
-        return hub_error(state, ctx, &message, StatusCode::FORBIDDEN);
-    }
-    if uid.is_empty()
-        || hub_username.is_empty()
-        || key(hub_username) == key(&state.cfg.bootstrap_username)
-    {
-        return hub_error(
-            state,
-            ctx,
-            "Account Hub identity is incomplete.",
-            StatusCode::FORBIDDEN,
-        );
-    }
-    for name in [
-        "accountNonExpired",
-        "credentialsNonExpired",
-        "accountNonLocked",
-        "enabled",
-    ] {
-        if data.get(name).is_some_and(|v| v != &Value::Bool(true)) {
-            return hub_error(
-                state,
-                ctx,
-                "Account Hub account is not active.",
-                StatusCode::UNAUTHORIZED,
-            );
-        }
-    }
-    if data
-        .get("anonymousFlag")
-        .is_some_and(|v| v != &Value::Bool(false))
-    {
-        return hub_error(
-            state,
-            ctx,
-            "Anonymous Account Hub sessions are not allowed.",
-            StatusCode::UNAUTHORIZED,
-        );
-    }
-    let hub_email = account_hub_email_from_data(data)
-        .or_else(|| account_hub_email_from_access_token(access, &uid, hub_username));
-    let hub_profile = account_hub_profile_fields(data, &state.cfg.account_hub_required_role);
-    let coll = db::collection(&state.web, "auth");
-    let by_uid = coll
-        .find_one(doc! {"account_hub_uid":&uid})
+    let now = bson::DateTime::now();
+    let coll = accounts(state);
+    let existing = coll
+        .find_one(doc! {"email_key":&email,"auth_source":"zimbra"})
         .await
         .ok()
         .flatten();
-    let by_name = find_login(state, hub_username).await;
-    if by_uid
-        .as_ref()
-        .is_some_and(|u| db::string(u, "auth_source") != "account_hub")
-        || by_name
-            .as_ref()
-            .is_some_and(|u| db::string(u, "auth_source") != "account_hub")
-        || by_uid
-            .as_ref()
-            .zip(by_name.as_ref())
-            .is_some_and(|(a, b)| a.get("_id") != b.get("_id"))
-    {
-        return hub_error(
-            state,
-            ctx,
-            "Account Hub identity conflicts with a local user.",
-            StatusCode::FORBIDDEN,
-        );
-    }
-    let user = if let Some(user) = by_uid.or(by_name) {
-        user
+    let set = doc! {"username":&email,"username_key":&email,"email":&email,"email_key":&email,"auth_source":"zimbra","role":"user","disabled":false,"must_change_password":false,"zimbra_password":encrypted,"zimbra_folder_id":folder_id,"zimbra_folder_path":folder_path,"last_login_at":now,"updated_at":now};
+    let user = if let Some(old) = existing {
+        let id = old.get_object_id("_id").unwrap();
+        if coll
+            .update_one(doc! {"_id":id}, doc! {"$set":set})
+            .await
+            .is_err()
+        {
+            return view::error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Unable to save the Zimbra account.",
+            );
+        }
+        coll.find_one(doc! {"_id":id}).await.ok().flatten().unwrap()
     } else {
-        let now = bson::DateTime::now();
-        let mut document = doc! {"username":hub_username,"username_key":key(hub_username),"auth_source":"account_hub","role":"user","disabled":false,"must_change_password":false,"created_at":now,"updated_at":now};
-        for (field, value) in &hub_profile {
-            document.insert(field, value.clone());
-        }
-        if let Some(email) = hub_email.as_ref() {
-            document.insert("email", email.clone());
-            document.insert("account_hub_email", email.clone());
-        }
-        let inserted = match coll.insert_one(document).await {
-            Ok(r) => r,
+        let mut d = set;
+        d.insert("created_at", now);
+        let result = match coll.insert_one(d.clone()).await {
+            Ok(v) => v,
             Err(_) => {
-                return hub_error(
-                    state,
-                    ctx,
-                    "Unable to establish the Account Hub session.",
-                    StatusCode::SERVICE_UNAVAILABLE,
-                );
+                return view::error(StatusCode::CONFLICT, "This email is already registered.");
             }
         };
-        match coll
-            .find_one(doc! {"_id":inserted.inserted_id})
-            .await
-            .ok()
-            .flatten()
-        {
-            Some(v) => v,
-            None => {
-                return hub_error(
-                    state,
-                    ctx,
-                    "Unable to establish the Account Hub session.",
-                    StatusCode::SERVICE_UNAVAILABLE,
-                );
-            }
-        }
+        d.insert("_id", result.inserted_id);
+        d
     };
-    if db::bool_field(&user, "disabled") {
-        return hub_error(
-            state,
-            ctx,
-            "This portal account is disabled.",
-            StatusCode::FORBIDDEN,
-        );
-    }
-    if !db::string(&user, "account_hub_uid").is_empty()
-        && db::string(&user, "account_hub_uid") != uid
-    {
-        return hub_error(
-            state,
-            ctx,
-            "Account Hub identity does not match the local user.",
-            StatusCode::FORBIDDEN,
-        );
-    }
-    let incoming_organization_id = db::string(&hub_profile, "account_hub_organization_id");
-    let stored_organization_id = db::string(&user, "account_hub_organization_id");
-    if !stored_organization_id.is_empty() && stored_organization_id != incoming_organization_id {
-        return hub_error(
-            state,
-            ctx,
-            "Account Hub organization does not match the portal member.",
-            StatusCode::FORBIDDEN,
-        );
-    }
-    let id = user.get_object_id("_id").unwrap();
-    let now = bson::DateTime::now();
-    let mut set = doc! {
-        "auth_source":"account_hub",
-        "account_hub_uid":&uid,
-        "account_hub_username":hub_username,
-        "role":if db::string(&user,"role")=="sub_admin"{"sub_admin"}else{"user"},
-        "must_change_password":false,
-        "last_account_hub_sync_at":now,
-        "updated_at":now,
-    };
-    for (field, value) in &hub_profile {
-        set.insert(field, value.clone());
-    }
-    let mut unset = doc! {"password":""};
-    if hub_email.is_none() {
-        unset.insert("account_hub_email", "");
-    } else if let Some(email) = hub_email.as_ref() {
-        set.insert("account_hub_email", email.clone());
-    }
-    if coll
-        .update_one(doc! {"_id":id}, doc! {"$set":set,"$unset":unset})
-        .await
-        .is_err()
-    {
-        return hub_error(
-            state,
-            ctx,
-            "Unable to establish the Account Hub session.",
-            StatusCode::SERVICE_UNAVAILABLE,
-        );
-    }
-    let Some(user) = coll.find_one(doc! {"_id":id}).await.ok().flatten() else {
-        return hub_error(
-            state,
-            ctx,
-            "Unable to establish the Account Hub session.",
-            StatusCode::SERVICE_UNAVAILABLE,
-        );
-    };
-    if let Some(email) = hub_email.as_ref() {
-        sync_account_hub_subscription_email(state, &user, email).await;
-    }
     let mut response = view::redirect(safe_next(&ctx.field("next")));
     response.headers_mut().insert(
         header::SET_COOKIE,
@@ -734,94 +275,18 @@ async fn hub_login(state: &AppState, ctx: &ReqCtx) -> Response {
     );
     response
 }
-fn business_success(value: &Value) -> bool {
-    matches!(value.get("code"), None | Some(Value::Null))
-        || matches!(value.get("code"),Some(Value::Number(n)) if n.as_i64().is_some_and(|code| matches!(code, 0 | 200 | 1000)))
-        || matches!(value.get("code"),Some(Value::String(s)) if matches!(s.as_str(), "0" | "200" | "1000"))
-}
-fn value_string(value: &Value) -> String {
-    value
-        .as_str()
-        .map(str::to_owned)
-        .unwrap_or_else(|| value.to_string())
-}
-fn has_required_role(data: &Value, required: &str) -> bool {
-    let required = required.trim();
-    if required.is_empty() {
-        return false;
-    }
-    ["roles", "role_names", "systemRole", "systemRoles"]
-        .into_iter()
-        .flat_map(|key| data.get(key).into_iter())
-        .flat_map(|value| value.as_array().into_iter().flatten())
-        .filter_map(|role| {
-            role.as_str().map(str::to_owned).or_else(|| {
-                role.get("roleName")
-                    .or_else(|| role.get("name"))
-                    .or_else(|| role.get("label"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-        })
-        .map(|role| role.trim().to_owned())
-        .any(|role| {
-            role.eq_ignore_ascii_case(required)
-                || role
-                    .strip_prefix(required)
-                    .is_some_and(|suffix| suffix.starts_with(['-', '_', '/', ' ']))
-                || role
-                    .split('/')
-                    .any(|part| part.trim().eq_ignore_ascii_case(required))
-        })
-}
-fn hub_error(state: &AppState, ctx: &ReqCtx, message: &str, status: StatusCode) -> Response {
-    let mut r = render(state, ctx, "auth/login.html", json!({"error":message}));
-    *r.status_mut() = status;
-    r
-}
-
-pub(crate) async fn sync_account_hub_subscription_email(
-    state: &AppState,
-    user: &Document,
-    email: &str,
-) {
-    let mut ownership = Vec::new();
-    if let Ok(owner_id) = user.get_object_id("_id") {
-        ownership.push(Bson::Document(doc! {"owner_user_id": owner_id}));
-    }
-    let username = db::string(user, "username");
-    if !username.trim().is_empty() {
-        ownership.push(Bson::Document(doc! {
-            "username": {
-                "$regex": format!("^{}$", regex::escape(username.trim())),
-                "$options": "i"
-            }
-        }));
-    }
-    if ownership.is_empty() {
-        return;
-    }
-    if let Err(error) = db::collection(&state.web, "sub_account")
-        .update_many(
-            doc! {"$or": ownership},
-            doc! {"$set":{"email":email,"emails":vec![email.to_owned()],"account_hub_email":email}},
-        )
-        .await
-    {
-        tracing::error!(%error, user_id = %db::id_string(user), "Unable to synchronize Account Hub subscription email");
-    }
-}
 
 pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
     match (ctx.method.clone(), ctx.path.as_str()) {
-        (Method::GET, "/login") => return Some(render(state, ctx, "auth/login.html", json!({}))),
-        (Method::POST, "/login") => {
-            return Some(if state.cfg.account_hub_enabled {
-                hub_login(state, ctx).await
-            } else {
-                local_login(state, ctx, false).await
-            });
+        (Method::GET, "/login") => {
+            return Some(render(
+                state,
+                ctx,
+                "auth/login.html",
+                json!({"local_login":false}),
+            ));
         }
+        (Method::POST, "/login") => return Some(zimbra_login(state, ctx).await),
         (Method::GET, "/login/local") => {
             return Some(render(
                 state,
@@ -830,53 +295,38 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 json!({"local_login":true}),
             ));
         }
-        (Method::POST, "/login/local") => return Some(local_login(state, ctx, true).await),
-        (_, "/auth/account-hub/callback") => return Some(view::redirect("/login")),
+        (Method::POST, "/login/local") => return Some(local_login(state, ctx).await),
         (_, "/logout") => {
-            let mut response = view::redirect("/login");
-            response.headers_mut().insert(
+            let mut r = view::redirect("/login");
+            r.headers_mut().insert(
                 header::SET_COOKIE,
                 format!("{COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
                     .parse()
                     .unwrap(),
             );
-            return Some(response);
+            return Some(r);
         }
         (Method::GET, "/settings") => {
             return Some(render(state, ctx, "auth/settings.html", json!({})));
         }
-        (Method::GET, "/admin/sub-admins") => {
-            return Some(if state.cfg.account_hub_enabled {
-                view::redirect("/admin/account-users")
-            } else {
-                render(state, ctx, "auth/sub_admins_legacy.html", json!({}))
-            });
-        }
-        (Method::GET, "/admin/account-users") => {
-            return Some(if state.cfg.account_hub_enabled {
-                view::redirect("/organization/members")
-            } else {
-                view::redirect("/admin/sub-admins")
-            });
-        }
-        (Method::GET, "/organization/members") => {
-            return Some(if state.cfg.account_hub_enabled {
-                render(
-                    state,
-                    ctx,
-                    "auth/organization_members.html",
-                    json!({"account_hub_enabled":true}),
-                )
-            } else {
-                view::error(StatusCode::GONE, "Account Hub is disabled.")
-            });
-        }
         (Method::POST, "/api/auth/password") => return Some(change_password(state, ctx).await),
         (Method::PUT, "/api/auth/profile") => return Some(update_profile(state, ctx).await),
+        (Method::GET, "/admin/sub-admins") => {
+            return Some(view::redirect("/subscriptions"));
+        }
+        (Method::GET, "/organization/members") | (Method::GET, "/admin/account-users") => {
+            return Some(view::error(
+                StatusCode::GONE,
+                "Account Hub organization management is no longer available.",
+            ));
+        }
         _ => {}
     }
     if ctx.path.starts_with("/api/admin/") || ctx.path.starts_with("/api/organization/members") {
-        return Some(admin_api(state, ctx).await);
+        return Some(view::error(
+            StatusCode::GONE,
+            "Account Hub administration is no longer available.",
+        ));
     }
     None
 }
@@ -884,10 +334,10 @@ async fn change_password(state: &AppState, ctx: &ReqCtx) -> Response {
     let Some(user) = ctx.user.as_ref() else {
         return view::error(StatusCode::UNAUTHORIZED, "Authentication required");
     };
-    if db::string(user, "auth_source") == "account_hub" {
+    if db::string(user, "auth_source") != "local" {
         return view::error(
             StatusCode::FORBIDDEN,
-            "Password changes are managed by Account Hub.",
+            "Zimbra passwords are managed by Zimbra.",
         );
     }
     let old = ctx.field("current_password");
@@ -895,54 +345,35 @@ async fn change_password(state: &AppState, ctx: &ReqCtx) -> Response {
     if new != ctx.field("new_password_confirmation") {
         return view::error(StatusCode::BAD_REQUEST, "New passwords do not match.");
     }
-    if !bcrypt::verify(&old, user.get_str("password").unwrap_or("")).unwrap_or(false) {
+    if !bcrypt::verify(old, user.get_str("password").unwrap_or("")).unwrap_or(false) {
         return view::error(StatusCode::BAD_REQUEST, "Current password is incorrect.");
     }
     if let Err(e) = valid_password(&new) {
         return view::error(StatusCode::BAD_REQUEST, &e);
     }
-    let hash = match bcrypt::hash(&new, bcrypt::DEFAULT_COST) {
+    let hash = match bcrypt::hash(new, bcrypt::DEFAULT_COST) {
         Ok(v) => v,
         Err(_) => {
             return view::error(
-                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::SERVICE_UNAVAILABLE,
                 "Unable to change password.",
             );
         }
     };
-    if db::collection(&state.web,"auth").update_one(doc!{"_id":ctx.user_id().unwrap()},doc!{"$set":{"password":hash,"must_change_password":false,"updated_at":bson::DateTime::now()}}).await.is_err(){return view::error(StatusCode::SERVICE_UNAVAILABLE,"Unable to change password.")}
-    view::json_response(StatusCode::OK, json!({"success":true}))
+    match accounts(state).update_one(doc!{"_id":ctx.user_id().unwrap()},doc!{"$set":{"password":hash,"must_change_password":false,"updated_at":bson::DateTime::now()}}).await{Ok(_)=>view::json_response(StatusCode::OK,json!({"success":true})),Err(_)=>view::error(StatusCode::SERVICE_UNAVAILABLE,"Unable to change password.")}
 }
-
-fn profile_email_editable(user: &Document) -> bool {
-    db::string(user, "auth_source") != "account_hub"
-}
-
-fn account_hub_email_change_requested(hub: bool, payload: &Value) -> bool {
-    hub && payload.get("email").is_some()
-}
-
 async fn update_profile(state: &AppState, ctx: &ReqCtx) -> Response {
-    let Some(user_id) = ctx.user_id() else {
+    let Some(user) = ctx.user.as_ref() else {
         return view::error(StatusCode::UNAUTHORIZED, "Authentication required");
     };
-    if ctx
-        .user
-        .as_ref()
-        .is_some_and(|user| !profile_email_editable(user))
-    {
-        return view::error(
-            StatusCode::FORBIDDEN,
-            "Account Hub email is managed by Account Hub.",
-        );
+    if db::string(user, "auth_source") != "local" {
+        return view::error(StatusCode::FORBIDDEN, "Zimbra email is managed by Zimbra.");
     }
-    if !ctx.json.is_object() {
-        return view::error(StatusCode::BAD_REQUEST, "Profile update must be an object.");
-    }
-    if ctx
-        .json
-        .as_object()
-        .is_some_and(|fields| fields.keys().any(|field| field != "email"))
+    if !ctx.json.is_object()
+        || ctx
+            .json
+            .as_object()
+            .is_some_and(|o| o.keys().any(|k| k != "email"))
     {
         return view::error(
             StatusCode::BAD_REQUEST,
@@ -956,376 +387,43 @@ async fn update_profile(state: &AppState, ctx: &ReqCtx) -> Response {
         .unwrap_or("")
         .trim()
         .to_lowercase();
-    if !valid_email(&email) {
+    if !email.is_empty() && !valid_email(&email) {
         return view::error(StatusCode::BAD_REQUEST, "Invalid email address.");
     }
-    let coll = db::collection(&state.web, "auth");
-    if coll
-        .update_one(
-            doc! {"_id":user_id},
-            doc! {"$set":{"email":email,"updated_at":bson::DateTime::now()}},
-        )
-        .await
-        .is_err()
-    {
-        return view::error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Unable to update your profile.",
-        );
-    }
-    let Some(user) = coll.find_one(doc! {"_id":user_id}).await.ok().flatten() else {
-        return view::error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Unable to load your profile.",
-        );
-    };
-    view::json_response(StatusCode::OK, json!({"data":public_user(&user)}))
-}
-
-async fn admin_api(state: &AppState, ctx: &ReqCtx) -> Response {
-    let organization_members = ctx.path.starts_with("/api/organization/members");
-    let hub = organization_members || ctx.path.starts_with("/api/admin/account-users");
-    if hub != state.cfg.account_hub_enabled {
-        return view::error(
-            StatusCode::GONE,
-            if hub {
-                "Account Hub is disabled."
-            } else {
-                "Account Hub user management has replaced sub-admin management."
-            },
-        );
-    }
-    if hub && !ctx.is_organization_admin(state) {
-        return view::error(
-            StatusCode::FORBIDDEN,
-            "Organization administrator access required.",
-        );
-    }
-    let base = if hub {
-        if organization_members {
-            "/api/organization/members"
-        } else {
-            "/api/admin/account-users"
-        }
-    } else {
-        "/api/admin/sub-admins"
-    };
-    let coll = db::collection(&state.web, "auth");
-    let id = ctx
-        .path
-        .strip_prefix(&format!("{base}/"))
-        .and_then(db::object_id);
-    if ctx.method == Method::GET && ctx.path == base {
-        let filter = if hub {
-            let Some(organization) = ctx.user.as_ref().and_then(organization_filter) else {
-                return view::error(
-                    StatusCode::FORBIDDEN,
-                    "Your Account Hub organization is not available.",
-                );
-            };
-            doc! {
-                "$and":[
-                    {"auth_source":"account_hub"},
-                    organization,
-                    {"_id":{"$ne":ctx.user_id().unwrap()}},
-                ]
-            }
-        } else {
-            doc! {"role":"sub_admin"}
-        };
-        return match db::find_sorted(&state.web, "auth", filter, doc! {"username_key":1}, 500).await
-        {
-            Ok(rows) => view::json_response(
-                StatusCode::OK,
-                json!({"data":rows.iter().map(public_user).collect::<Vec<_>>()}),
-            ),
-            Err(_) => view::error(StatusCode::SERVICE_UNAVAILABLE, "Unable to load users."),
-        };
-    }
-    if ctx.method == Method::POST && ctx.path == base {
-        if hub {
-            return view::error(
-                StatusCode::METHOD_NOT_ALLOWED,
-                "Account Hub members must be created in Account Hub.",
-            );
-        }
-        let username = ctx.field("username").trim().to_owned();
-        let email = ctx.field("email").trim().to_lowercase();
-        if username.is_empty() {
-            return view::error(StatusCode::BAD_REQUEST, "Username is required.");
-        }
-        if key(&username) == key(&state.cfg.bootstrap_username) {
-            return view::error(
-                StatusCode::BAD_REQUEST,
-                "Username is reserved for the local administrator.",
-            );
-        }
-        if !valid_email(&email) {
-            return view::error(StatusCode::BAD_REQUEST, "Invalid email address.");
-        }
-        if coll
-            .find_one(doc! {"username_key":key(&username)})
-            .await
-            .ok()
-            .flatten()
-            .is_some()
-        {
-            return view::error(StatusCode::CONFLICT, "Username is already in use.");
-        }
-        let now = bson::DateTime::now();
-        let mut document = doc! {"username":&username,"username_key":key(&username),"email":&email,"role":"sub_admin","auth_source":"local","disabled":ctx.json_field("disabled").as_bool().unwrap_or(false),"pause_managed_subscriptions_when_disabled":ctx.json_field("pause_managed_subscriptions_when_disabled").as_bool().unwrap_or(false),"must_change_password":false,"created_at":now,"updated_at":now};
-        let password = ctx.field("password");
-        if let Err(e) = valid_password(&password) {
-            return view::error(StatusCode::BAD_REQUEST, &e);
-        };
-        document.insert(
-            "password",
-            bcrypt::hash(password, bcrypt::DEFAULT_COST).unwrap(),
-        );
-        if let Some(owner) = ctx.user_id() {
-            document.insert("parent_admin_id", owner);
-        }
-        return match coll.insert_one(document.clone()).await {
-            Ok(result) => {
-                document.insert("_id", result.inserted_id);
-                view::json_response(StatusCode::CREATED, json!({"data":public_user(&document)}))
-            }
-            Err(_) => view::error(StatusCode::SERVICE_UNAVAILABLE, "Unable to create user."),
-        };
-    }
-    let Some(id) = id else {
-        return view::error(StatusCode::NOT_FOUND, "User not found.");
-    };
-    let Some(user) = coll.find_one(doc! {"_id":id}).await.ok().flatten() else {
-        return view::error(StatusCode::NOT_FOUND, "User not found.");
-    };
-    if hub && db::string(&user, "auth_source") != "account_hub"
-        || !hub && db::string(&user, "role") != "sub_admin"
-    {
-        return view::error(StatusCode::NOT_FOUND, "User not found.");
-    }
-    if hub {
-        let Some(manager) = ctx.user.as_ref() else {
-            return view::error(StatusCode::UNAUTHORIZED, "Authentication required");
-        };
-        if ctx.user_id().is_some_and(|manager_id| manager_id == id)
-            || !same_organization(manager, &user)
-        {
-            return view::error(
-                StatusCode::FORBIDDEN,
-                "You can only manage members of your organization.",
-            );
-        }
-    }
-    if ctx.method == Method::DELETE && !hub {
-        if let Some(owner) = ctx.user_id() {
-            for name in ["sub_account", "report_jobs", "newsletter_deliveries"] {
-                let _ = db::collection(&state.web, name)
-                    .update_many(
-                        doc! {"managed_by_user_id":id},
-                        doc! {"$set":{"managed_by_user_id":owner}},
-                    )
-                    .await;
-            }
-        }
-        return match coll.delete_one(doc! {"_id":id}).await {
-            Ok(_) => view::json_response(StatusCode::OK, json!({"success":true})),
-            Err(_) => view::error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Unable to remove sub-admin.",
-            ),
-        };
-    }
-    if ctx.method == Method::PUT {
-        if account_hub_email_change_requested(hub, &ctx.json) {
-            return view::error(
-                StatusCode::FORBIDDEN,
-                "Account Hub email is managed by Account Hub.",
-            );
-        }
-        if ctx.json.get("username").is_some()
-            || hub
-                && (ctx.json.get("password").is_some() || ctx.json.get("account_hub_uid").is_some())
-        {
-            return view::error(
-                StatusCode::BAD_REQUEST,
-                "Identity fields cannot be changed.",
-            );
-        }
-        let mut update = doc! {"updated_at":bson::DateTime::now()};
-        if let Some(email) = ctx.json.get("email").and_then(Value::as_str) {
-            if !valid_email(email) {
-                return view::error(StatusCode::BAD_REQUEST, "Invalid email address.");
-            };
-            update.insert("email", email.trim().to_lowercase());
-        }
-        for field in ["disabled", "pause_managed_subscriptions_when_disabled"] {
-            if let Some(value) = ctx.json.get(field) {
-                let Some(value) = value.as_bool() else {
-                    return view::error(StatusCode::BAD_REQUEST, "Boolean field is invalid.");
-                };
-                update.insert(field, value);
-            }
-        }
-        if hub {
-            if ctx.json.get("role").is_some() {
-                return view::error(
-                    StatusCode::FORBIDDEN,
-                    "Account Hub roles are managed by Account Hub.",
-                );
-            }
-        } else if let Some(password) = ctx
-            .json
-            .get("password")
-            .and_then(Value::as_str)
-            .filter(|v| !v.is_empty())
-        {
-            if let Err(e) = valid_password(password) {
-                return view::error(StatusCode::BAD_REQUEST, &e);
-            };
-            update.insert(
-                "password",
-                bcrypt::hash(password, bcrypt::DEFAULT_COST).unwrap(),
-            );
-            update.insert("must_change_password", false);
-        }
-        if coll
-            .update_one(doc! {"_id":id}, doc! {"$set":update})
-            .await
-            .is_err()
-        {
-            return view::error(StatusCode::SERVICE_UNAVAILABLE, "Unable to update user.");
-        }
-        let updated = coll
-            .find_one(doc! {"_id":id})
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or(user);
-        return view::json_response(StatusCode::OK, json!({"data":public_user(&updated)}));
-    }
-    view::error(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed")
+    match accounts(state).update_one(doc!{"_id":ctx.user_id().unwrap()},doc!{"$set":{"email":&email,"email_key":if email.is_empty(){bson::Bson::Null}else{bson::Bson::String(email.clone())},"updated_at":bson::DateTime::now()}}).await{Ok(_)=>view::json_response(StatusCode::OK,json!({"data":public_user(&accounts(state).find_one(doc!{"_id":ctx.user_id().unwrap()}).await.ok().flatten().unwrap_or_else(||user.clone()))})),Err(_)=>view::error(StatusCode::CONFLICT,"Unable to update your profile.")}
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn account_hub_role_matches_system_role_suffix() {
-        let data = json!({
-            "roles": [{"roleName": "user"}],
-            "systemRole": ["accounthub-user", "CVE-SYSTEM-admin"]
-        });
-        assert!(has_required_role(&data, "CVE-SYSTEM"));
-        assert!(!has_required_role(&data, "OTHER-SYSTEM"));
+    fn normalizes_account_keys() {
+        assert_eq!(key(" User@Example.COM "), "user@example.com");
     }
-
     #[test]
-    fn account_hub_success_code_includes_current_api() {
-        assert!(business_success(&json!({"code":1000})));
-        assert!(!business_success(&json!({"code":2010})));
+    fn zimbra_users_cannot_be_local_admins() {
+        let u = doc! {"auth_source":"zimbra","role":"user","username":"x@example.com"};
+        assert!(!is_top_admin(&u, &dummy()));
     }
-
-    #[test]
-    fn organization_admin_role_is_scoped_to_required_system() {
-        assert!(organization_admin_role("CVE-SYSTEM-admin", "CVE-SYSTEM"));
-        assert!(organization_admin_role("cve-system/admin", "CVE-SYSTEM"));
-        assert!(!organization_admin_role("CVE-SYSTEM-user", "CVE-SYSTEM"));
-        assert!(!organization_admin_role("OTHER-SYSTEM-admin", "CVE-SYSTEM"));
-    }
-
-    #[test]
-    fn account_hub_profile_persists_organization_and_roles() {
-        let profile = account_hub_profile_fields(
-            &json!({
-                "organization": "SW-ENG",
-                "organizationId": 1,
-                "roles": ["user", "admin"],
-                "systemRole": ["accounthub-user", "CVE-SYSTEM-admin"]
-            }),
-            "CVE-SYSTEM",
-        );
-        assert_eq!(db::string(&profile, "account_hub_organization"), "SW-ENG");
-        assert_eq!(db::string(&profile, "account_hub_organization_id"), "1");
-        assert!(db::bool_field(
-            &profile,
-            "account_hub_is_organization_admin"
-        ));
-        assert_eq!(
-            profile.get_array("account_hub_system_roles").unwrap().len(),
-            2
-        );
-    }
-
-    #[test]
-    fn account_hub_email_requires_a_valid_non_empty_value() {
-        assert_eq!(
-            account_hub_email_from_data(&json!({"email":"User@Example.com"})),
-            Some("user@example.com".into())
-        );
-        assert_eq!(account_hub_email_from_data(&json!({"email":""})), None);
-        assert_eq!(
-            account_hub_email_from_data(&json!({"email":"not-an-email"})),
-            None
-        );
-    }
-
-    #[test]
-    fn account_hub_email_can_fall_back_to_a_matching_access_token_claim() {
-        let claims = URL_SAFE_NO_PAD.encode(
-            serde_json::to_vec(&json!({
-                "uid": 271,
-                "username": "s2487",
-                "email": "Ben.Chan@Example.com"
-            }))
-            .unwrap(),
-        );
-        let token = format!("header.{claims}.signature");
-        assert_eq!(
-            account_hub_email_from_access_token(&token, "271", "s2487"),
-            Some("ben.chan@example.com".into())
-        );
-        assert_eq!(
-            account_hub_email_from_access_token(&token, "272", "s2487"),
-            None
-        );
-    }
-
-    #[test]
-    fn public_user_exposes_the_synced_account_hub_email() {
-        let user = doc! {
-            "_id": ObjectId::new(),
-            "username": "member",
-            "email": "profile@example.com",
-            "account_hub_email": "hub@example.com",
-            "auth_source": "account_hub",
-        };
-        let value = public_user(&user);
-        assert_eq!(value["email"], "profile@example.com");
-        assert_eq!(value["account_hub_email"], "hub@example.com");
-    }
-
-    #[test]
-    fn only_local_users_can_edit_profile_email() {
-        assert!(!profile_email_editable(&doc! {"auth_source":"account_hub"}));
-        assert!(profile_email_editable(&doc! {"auth_source":"local"}));
-        assert!(profile_email_editable(&doc! {"role":"admin"}));
-    }
-
-    #[test]
-    fn organization_member_email_changes_are_account_hub_managed() {
-        assert!(account_hub_email_change_requested(
-            true,
-            &json!({"email":"member@example.com"})
-        ));
-        assert!(!account_hub_email_change_requested(
-            true,
-            &json!({"disabled":true})
-        ));
-        assert!(!account_hub_email_change_requested(
-            false,
-            &json!({"email":"local@example.com"})
-        ));
+    fn dummy() -> crate::config::Config {
+        crate::config::Config {
+            root: Default::default(),
+            file: json!({}),
+            mongo_uri: String::new(),
+            web_database: "web".into(),
+            vulnerabilities_database: "vulnerabilities".into(),
+            secret: "x".into(),
+            bootstrap_username: "admin".into(),
+            bootstrap_password: "pw".into(),
+            zimbra_base_url: String::new(),
+            zimbra_folder_name: "news".into(),
+            zimbra_timeout_seconds: 10,
+            zimbra_verify_tls: true,
+            zimbra_credential_key: String::new(),
+            account_collection: "accounts".into(),
+            newsletter_root: Default::default(),
+            review_view_suffix: "_review".into(),
+            port: 9100,
+        }
     }
 }

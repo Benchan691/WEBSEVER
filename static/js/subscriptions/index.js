@@ -631,7 +631,7 @@
         showModalMessage('', '');
         editingId = subscription && subscription.id ? subscription.id : null;
         editorLocalSubscription = Boolean(subscription && subscription.local_subscription)
-            || (organizationDashboard && !subscription);
+            || (isAdmin && !subscription);
         document.getElementById('modal-title').textContent = editingId
             ? t('Edit Subscription')
             : (editorLocalSubscription ? t('Add Local Subscription') : t('Add Subscription'));
@@ -639,21 +639,15 @@
         username.value = subscription ? (subscription.username || '') : '';
         username.readOnly = !isAdmin;
         recipientLocked = !editorLocalSubscription && (
-            accountHubUser || !!(subscription && (subscription.account_hub_email || subscription.recipientLocked))
+            accountHubUser || !!(subscription && (subscription.zimbra_email || subscription.account_hub_email || subscription.recipientLocked))
         );
         renderRecipientInputs(subscription ? (subscription.emails || (subscription.email ? [subscription.email] : [''])) : [''], recipientLocked);
         const addRecipientButton = document.getElementById('add-recipient-btn');
         if (addRecipientButton) addRecipientButton.classList.toggle('d-none', recipientLocked);
         const organization = document.getElementById('organization');
         if (organization) {
-            organization.value = subscription ? (subscription.organization || currentOrganization || '') : (currentOrganization || '');
+            organization.value = subscription ? (subscription.organization || currentOrganization || (isAdmin ? 'local' : '')) : (currentOrganization || (isAdmin ? 'local' : ''));
             organization.readOnly = organizationDashboard || selfManagement;
-        }
-        if (isAdmin && !accountHubEnabled) {
-            document.getElementById('password').value = '';
-            document.getElementById('password-help').textContent = editingId
-                ? t('Leave blank to keep the current password.')
-                : t('Required when creating a subscription.');
         }
         const newsletter = subscription && subscription.newsletter_profile ? subscription.newsletter_profile : {enabled:false,filters:{}};
         const report = subscription && subscription.report_profile ? subscription.report_profile : {enabled:false,filters:{},generation_mode:'template',report_language:'en'};
@@ -771,7 +765,7 @@
                 : '';
             tr.children[0].querySelector('.email').textContent = localSubscription
                 ? localEmails
-                : (item.account_hub_email || t('Account Hub email unavailable'));
+                : (item.zimbra_email || t('Zimbra email unavailable'));
             tr.children[0].querySelector('.role').textContent = localSubscription
                 ? t('Local subscription')
                 : (item.organization_admin ? t('Organization administrator') : t('Organization member'));
@@ -815,20 +809,20 @@
                 edit.onclick = function () {
                     openEditor(Object.assign({}, subscription, {
                         username: item.username || subscription.username,
-                        email: item.account_hub_email || subscription.email,
-                        emails: item.account_hub_email ? [item.account_hub_email] : (subscription.emails || []),
-                        account_hub_email: item.account_hub_email || subscription.account_hub_email || '',
+                        email: item.zimbra_email || subscription.email,
+                        emails: item.zimbra_email ? [item.zimbra_email] : (subscription.emails || []),
+                        zimbra_email: item.zimbra_email || subscription.zimbra_email || '',
                         recipientLocked: true
                     }));
                 };
-                edit.disabled = !item.account_hub_email;
-                if (edit.disabled) edit.title = t('Account Hub email unavailable');
+                edit.disabled = !item.zimbra_email;
+                if (edit.disabled) edit.title = t('Zimbra email unavailable');
                 actions.append(edit);
             } else {
                 const add = document.createElement('button'); add.className = 'btn btn-outline-primary btn-sm'; add.type = 'button'; add.textContent = t('Add Subscription');
-                add.disabled = !item.account_hub_email;
-                if (add.disabled) add.title = t('Account Hub email unavailable');
-                add.onclick = function () { openEditor({username:item.username, email:item.account_hub_email || '', emails:item.account_hub_email ? [item.account_hub_email] : [], organization:item.organization || '', account_hub_email:item.account_hub_email || '', recipientLocked:true}); };
+                add.disabled = !item.zimbra_email;
+                if (add.disabled) add.title = t('Zimbra email unavailable');
+                add.onclick = function () { openEditor({username:item.username, email:item.zimbra_email || '', emails:item.zimbra_email ? [item.zimbra_email] : [], organization:item.organization || '', zimbra_email:item.zimbra_email || '', recipientLocked:true}); };
                 actions.append(add);
             }
             tr.children[4].append(actions); rows.append(tr);
@@ -910,11 +904,7 @@
             return;
         }
         showModalMessage('', '');
-        const password = isAdmin && !accountHubEnabled ? document.getElementById('password').value : '';
-        if (isAdmin && !accountHubEnabled && !editingId && !password) {
-            showModalMessage(t('Password is required.'), 'danger');
-            return;
-        }
+        const password = '';
         const organization = document.getElementById('organization');
         const payload = {
             newsletter_profile:{
@@ -928,7 +918,6 @@
         if (isAdmin || organizationDashboard || (selfManagement && !editingId)) {
             payload.username = document.getElementById('username').value;
             payload.emails = recipientValues();
-            if (!accountHubEnabled) payload.password = password;
         }
         requestJson(editingId ? apiUrl(editingId) : manageSubscriptionsUrl, {method:editingId?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(){modal.hide();showMessage(t('Subscription saved.'),'success');return load();}).catch(function(e){showModalMessage(e.message,'danger');});
     };

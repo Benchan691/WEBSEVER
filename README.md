@@ -1,32 +1,45 @@
 # webserver-rust
 
-Rust implementation of the cybersecurity portal in the neighboring `webserver` project. It uses the same MongoDB databases and the existing browser templates and assets. The Python project is not needed at runtime.
+Rust implementation of the security newsletter portal. The new authentication store is `web.accounts`; the legacy `web.auth` and `web.subscriptions` collections are never read or migrated.
 
-## Run locally
+## Configure and run
 
-1. Copy `.env.example` to `.env` and set `LOCAL_MONGO_URI`, `FLASK_SECRET_KEY`, and the bootstrap administrator credentials.
-2. Run `cargo run --release` from this folder.
-3. Open `http://localhost:9100`.
+1. Copy `.env.example` to `.env`.
+2. Set `LOCAL_MONGO_URI`, `FLASK_SECRET_KEY`, `WEB_AUTH_BOOTSTRAP_USERNAME`, and `WEB_AUTH_BOOTSTRAP_PASSWORD`.
+3. Generate a dedicated 32-byte key for `ZIMBRA_CREDENTIAL_KEY`, for example:
 
-`PORT` changes the listening port. `WEBSERVER_ROOT` changes the folder containing `templates`, `static`, and `config`. `WEB_DATABASE` and `VULNERABILITIES_DATABASE` can point to separate test databases. `APP_CONFIG` selects a different JSON config file. Environment variables override JSON settings.
+   ```sh
+   openssl rand -base64 32
+   ```
 
-The app creates or repairs the configured local bootstrap administrator at startup. Account Hub login is enabled with `ACCOUNT_HUB_ENABLED=true` and its two configured URLs. For the current Account Hub deployment, use the `/accounthub-api-gateway/auth/user/oauth/login` login API and `/accounthub-api-gateway/user/open-api/v1/user/view/info` user-info API. Account Hub users must have the configured system role (set `ACCOUNT_HUB_REQUIRED_ROLE` in `.env`; it defaults to `CVE-SYSTEM` and accepts values such as `CVE-SYSTEM-admin`). A system role matching `<required-role>-admin` makes the user an organization administrator; the portal stores the organization ID returned by Account Hub and scopes the **Organization members** panel to that organization. Every user, including the local bootstrap account and organization administrators, can edit only their own profile in **Settings**. Local administrator sign-in remains at `/login/local`. Set `RUST_SCHEDULER_ENABLED=true` after validating subscription filters and SMTP output in your environment.
+4. Set the Zimbra URL and SMTP settings. Keep `ZIMBRA_VERIFY_TLS=true` in production.
+5. Run `cargo run --release` and open `http://localhost:9100`.
 
-When Account Hub is enabled, the scheduler can reconcile local Hub identities every five minutes. Set `ACCOUNT_HUB_DIRECTORY_URL` to the complete user-directory API endpoint (the current UI route `/oganization-user` uses `/accounthub-api-gateway/user/open-api/v1/getAllPersonnelList` behind the scenes) and put its Bearer service token in `ACCOUNT_HUB_DIRECTORY_TOKEN`; the token is never stored in MongoDB. `ACCOUNT_HUB_SYNC_INTERVAL_SECONDS` controls the interval and defaults to 300 seconds. The synchronizer updates active users and removes a user plus its portal subscriptions only after a successful, complete directory response confirms that the identity is disabled or missing. Network failures, unauthorized responses, empty lists, and incomplete pages leave local data unchanged. The Operations page reports the last synchronization status and counts.
+The first startup creates unique username and email indexes and bootstraps one local administrator in `web.accounts`. It does not copy records from the legacy collections. Local administrator login is `/login/local`; normal users submit their full Zimbra email address and password at `/login`.
 
-## Features
+## Authentication and mail delivery
 
-- Signed login sessions, local and Account Hub login, account administration, and role based access.
-- Subscription profiles, email recipients, vendor/product CSV import, structured vendor/product matching, previews, and MongoDB storage.
-- Review collection browsing, search, selection scoring, and JSON export.
-- Fixed template and enriched report jobs, progress, preview/download, cancellation, and translation.
-- Source specific newsletter rendering, including HPE and Zimbra layouts, and operations pages. Scheduled reports and newsletter delivery are available behind `RUST_SCHEDULER_ENABLED`.
-- SMTP delivery configured through the same `SMTP_*` environment variables as the Python app.
+After a successful Zimbra `AuthRequest`, the service ensures the configured `news` folder with `GetFolderRequest`/`CreateFolderRequest`, then stores the mailbox credential encrypted with AES-256-GCM. Passwords are never returned to a browser or written to logs. Zimbra recipients receive MIME messages directly in `news`; addresses without a Zimbra account use the configured SMTP transport and arrive in the normal Inbox.
 
-## Validation
+## Subscriptions
 
-Run `cargo check` and `cargo test`. For an end to end check, use separate `WEB_DATABASE` and `PORT` values before starting the server, then test sign-in and the API routes with that isolated database. Enriched reports additionally require Tavily and a reachable llama-server.
+Zimbra users can manage only their own `sub_account` record and their recipient is fixed to their Zimbra email. The local administrator can manage every new subscription and may enter multiple external recipients. New delivery history includes `subscription_id`, so records from older deployments cannot suppress delivery for a new subscription.
 
-## Source compatibility
+The scheduler is disabled by default. Enable it only after direct Zimbra delivery and SMTP fallback have been tested:
 
-The frontend assets are carried over from the current Python working tree. The Rust service uses the existing `web` and `vulnerabilities` collection names and does not migrate data. The Rust code covers the browser and API routes, but its enriched report pipeline, cache behavior, and some source formatting and scheduled delivery details are still simpler than the Python implementation. Compare those outputs with your production data before replacing a deployment. Scheduled delivery is disabled by default.
+```sh
+RUST_SCHEDULER_ENABLED=true cargo run --release
+```
+
+## Checks
+
+```sh
+cargo fmt -- --check
+cargo test
+cargo build --release
+node --check static/js/subscriptions/index.js
+```
+
+## Docker deployment
+
+`Dockerfile` builds the Rust binary in a pinned Rust builder image and copies only the runtime assets into a Debian image. Use `docker-compose.example.yml` as the candidate service. Deploy beside the existing service on an alternate port with `RUST_SCHEDULER_ENABLED=false`, verify local login, a test Zimbra login, `web.accounts`, folder setup, subscription ownership, direct delivery, and SMTP fallback, then switch the port mapping. Keep the previous image, compose file, source tree, `.env`, and MongoDB backups for rollback.

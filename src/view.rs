@@ -223,20 +223,19 @@ mod tests {
                 "current_user":{
                     "username":"s2487",
                     "role":"user",
-                    "auth_source":"account_hub",
+                    "auth_source":"zimbra",
                     "email":"hub@example.com",
                     "organization":"SW-ENG",
-                    "organization_admin":true,
                     "must_change_password":false
                 },
-                "config":{"ACCOUNT_HUB_ENABLED":true},
+                "config":{"ZIMBRA_ENABLED":true},
                 "request":{"path":"/settings","full_path":"/settings","blueprint":"auth","endpoint":"auth.settings"}
             }))
             .unwrap();
         assert!(html.contains("s2487"));
         assert!(html.contains("组织"));
-        assert!(html.contains("组织管理员"));
-        assert!(html.contains("您的密码和访问权限由 Account Hub 管理。"));
+        assert!(html.contains("Zimbra"));
+        assert!(html.contains("Zimbra"));
         assert!(!html.contains("profile-form"));
         assert!(!html.contains("profile-email"));
         assert!(!html.contains("Save profile"));
@@ -337,11 +336,11 @@ mod tests {
                 "locale":"ch",
                 "html_lang":"zh-Hans",
                 "i18n_catalog":{},
-                "current_user":{"username":"member","email":"member@example.com","account_hub_email":"hub@example.com","organization":"SW-ENG","role":"user","auth_source":"account_hub"},
+                "current_user":{"username":"member","email":"hub@example.com","organization":"SW-ENG","role":"user","auth_source":"zimbra"},
                 "is_admin":false,
                 "is_top_admin":false,
                 "is_organization_admin":false,
-                "config":{"ACCOUNT_HUB_ENABLED":true},
+                "config":{"ZIMBRA_ENABLED":true},
                 "request":{"path":"/subscriptions","full_path":"/subscriptions","blueprint":"subscription","endpoint":""}
             }))
             .unwrap();
