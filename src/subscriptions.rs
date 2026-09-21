@@ -510,9 +510,10 @@ pub async fn ensure_zimbra_subscription(state: &AppState, user: &Document) -> Re
     else {
         return Err("Unable to reload the Zimbra subscription.".into());
     };
-    // Remove only exact legacy copies of the automatic disabled row. Manual
-    // rows with different profiles are preserved and explicitly marked as
-    // user-created, so their delete action remains available to the owner.
+    // Remove exact copies of the automatic disabled row. A manually submitted
+    // copy with the same identity and default profiles has no independent
+    // meaning, while manual rows with different profiles remain available to
+    // the owner.
     let rows = if owner_rows.is_empty() {
         db::find_sorted(
             &state.web,
@@ -534,10 +535,10 @@ pub async fn ensure_zimbra_subscription(state: &AppState, user: &Document) -> Re
             continue;
         }
         let duplicate_auto = db::bool_field(&row, "auto_provisioned");
-        let duplicate_legacy = is_legacy_subscription(&row)
+        let duplicate_default = !db::bool_field(&row, "auto_provisioned")
             && same_subscription_identity(&row, &canonical)
             && is_default_zimbra_subscription(&row);
-        if duplicate_auto || duplicate_legacy {
+        if duplicate_auto || duplicate_default {
             if let Err(error) = coll.delete_one(doc! {"_id": id}).await {
                 tracing::warn!(%error, subscription_id = %id, "Unable to remove duplicate Zimbra subscription");
             }
