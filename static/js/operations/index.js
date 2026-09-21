@@ -26,8 +26,31 @@
 
     function formatTime(value) {
         if (!value) return '—';
-        const date = new Date(value);
-        if (Number.isNaN(date.getTime())) return escapeHtml(value);
+
+        // MongoDB's extended JSON represents BSON dates as either
+        // {$date: "..."} or {$date: {$numberLong: "..."}}. Passing that
+        // object directly to Date turns the fallback into "[object Object]".
+        let input = value;
+        if (typeof value === 'object') {
+            const extended = value.$date;
+            if (typeof extended === 'string' || typeof extended === 'number') {
+                input = extended;
+            } else if (extended && typeof extended === 'object' && extended.$numberLong != null) {
+                input = Number(extended.$numberLong);
+            }
+        }
+
+        let date = new Date(input);
+        if (Number.isNaN(date.getTime()) && typeof input === 'string') {
+            // Rust's BSON formatter uses `YYYY-MM-DD H:MM:SS.sss +HH:MM:SS`.
+            // Normalize that form for browsers that only accept ISO-8601.
+            const bson = /^(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2}:\d{2}(?:\.\d+)?)\s+([+-]\d{2}):(\d{2})(?::\d{2})?$/.exec(input);
+            if (bson) date = new Date(bson[1] + 'T' + bson[2] + bson[3] + ':' + bson[4]);
+        }
+        if (Number.isNaN(date.getTime())) {
+            const fallback = typeof value === 'string' ? value : JSON.stringify(value);
+            return escapeHtml(fallback || '—');
+        }
         return escapeHtml(date.toLocaleString());
     }
 
