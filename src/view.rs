@@ -350,10 +350,12 @@ mod tests {
                 "is_organization_admin":false,
                 "config":{"ZIMBRA_ENABLED":true},
                 "request":{"path":"/subscriptions","full_path":"/subscriptions","blueprint":"subscription","endpoint":""}
-            }))
-            .unwrap();
+        }))
+        .unwrap();
         assert!(html.contains("我的订阅"));
-        assert!(html.contains("仅管理您自己的订阅。"));
+        assert!(html.contains("管理您的订阅。"));
+        assert!(!html.contains("您只能管理自己的订阅。"));
+        assert!(html.contains("id=\"add-btn\""));
         assert!(html.contains("for=\"organization\""));
         assert!(!html.contains("团队"));
         assert!(html.contains("\"selfManagement\":true"));

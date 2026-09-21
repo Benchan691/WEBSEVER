@@ -7,11 +7,10 @@
     <div class="d-flex justify-content-between align-items-center mb-4">
         <div>
             <h2 class="mb-1"><i class="bi bi-people me-2"></i>{{ t('Organization Subscription Dashboard') if is_organization_admin else t('Subscription Management' if is_admin else 'My Subscription') }}</h2>
-            <p class="text-muted mb-0">{{ t('Manage subscriptions for members in your organization.') if is_organization_admin else t('Manage independent newsletter feeds and report profiles.' if is_admin else 'Manage only your own subscription.') }}</p>
+            <p class="text-muted mb-0">{{ t('Manage subscriptions for members in your organization.') if is_organization_admin else t('Manage independent newsletter feeds and report profiles.' if is_admin else 'Manage your subscriptions.') }}</p>
         </div>
-        {% if is_admin or is_organization_admin or (not is_admin and not is_organization_admin) %}<button id="add-btn" class="btn btn-primary"><i class="bi bi-plus-lg me-1"></i>{{ t('Add Subscription') }}</button>{% endif %}
+        <button id="add-btn" class="btn btn-primary"><i class="bi bi-plus-lg me-1"></i>{{ t('Add Subscription') }}</button>
     </div>
-    {% if not is_admin and not is_organization_admin %}<div class="alert alert-info small" role="status"><i class="bi bi-person-check me-1"></i>{{ t('You can only manage your own subscription.') }}</div>{% endif %}
     <div id="message" class="alert d-none"></div>
     <div class="card shadow-sm border-0 overflow-hidden">
         <div class="table-responsive">
@@ -106,5 +105,5 @@
     'accountHubEnabled': true,
 }|tojson }}</script>
 <script src="{{ url_for('static', filename='js/shared/collection-picker.js') }}"></script>
-<script src="{{ url_for('static', filename='js/subscriptions/index.js', v='20260921-1') }}"></script>
+<script src="{{ url_for('static', filename='js/subscriptions/index.js', v='20260921-2') }}"></script>
 {% endblock %}
