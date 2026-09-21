@@ -289,6 +289,129 @@ fn zimbra_recipient(user: &Document) -> Result<Option<String>, String> {
     Ok(Some(email))
 }
 
+fn default_zimbra_subscription_document(
+    user: &Document,
+    owner_id: bson::oid::ObjectId,
+    email: &str,
+    now: bson::DateTime,
+) -> Document {
+    doc! {
+        "owner_user_id": owner_id,
+        "managed_by_user_id": owner_id,
+        "username": db::string(user, "username"),
+        "emails": [email],
+        "email": email,
+        "zimbra_email": email,
+        "organization": db::string(user, "organization"),
+        "delivery_mode": "individual",
+        "local_subscription": false,
+        "newsletter_profile": db::json_doc(&default_profile("newsletter")).unwrap_or_default(),
+        "report_profile": db::json_doc(&default_profile("report")).unwrap_or_default(),
+        "created_at": now,
+        "updated_at": now,
+    }
+}
+
+/// Ensure that every Zimbra account has one owner-scoped subscription record.
+/// The record is deliberately created with both delivery profiles disabled so
+/// logging in never starts mail delivery without the user's action.
+pub async fn ensure_zimbra_subscription(state: &AppState, user: &Document) -> Result<(), String> {
+    if db::string(user, "auth_source") != "zimbra" {
+        return Ok(());
+    }
+    let owner_id = user
+        .get_object_id("_id")
+        .map_err(|_| "Zimbra account has no valid owner id.".to_owned())?;
+    let Some(email) = zimbra_recipient(user)? else {
+        return Err("Zimbra email is unavailable. Ask the user to sign in again.".into());
+    };
+    let now = bson::DateTime::now();
+    let coll = db::collection(&state.web, "sub_account");
+    let identity = doc! {
+        "owner_user_id": owner_id,
+        "managed_by_user_id": owner_id,
+        "username": db::string(user, "username"),
+        "email": &email,
+        "emails": [&email],
+        "zimbra_email": &email,
+        "organization": db::string(user, "organization"),
+        "delivery_mode": "individual",
+        "updated_at": now,
+    };
+    if let Some(existing) = coll
+        .find_one(doc! {"owner_user_id": owner_id})
+        .await
+        .map_err(|_| "Unable to load the Zimbra subscription.".to_owned())?
+    {
+        coll.update_one(
+            doc! {"_id": existing.get_object_id("_id").map_err(|_| "Zimbra subscription has no valid id.".to_owned())?},
+            doc! {"$set": identity},
+        )
+        .await
+        .map_err(|_| "Unable to update the Zimbra subscription.".to_owned())?;
+        return Ok(());
+    }
+
+    // Adopt a prior Rust subscription created before owner_user_id was set,
+    // but never take over a manually managed local subscription.
+    let zimbra_pattern = format!("^{}$", regex::escape(&email));
+    if let Some(existing) = coll
+        .find_one(doc! {
+            "local_subscription": {"$ne": true},
+            "zimbra_email": {"$regex": zimbra_pattern, "$options": "i"},
+        })
+        .await
+        .map_err(|_| "Unable to inspect existing Zimbra subscriptions.".to_owned())?
+    {
+        coll.update_one(
+            doc! {"_id": existing.get_object_id("_id").map_err(|_| "Zimbra subscription has no valid id.".to_owned())?},
+            doc! {"$set": identity},
+        )
+        .await
+        .map_err(|_| "Unable to claim the Zimbra subscription.".to_owned())?;
+        return Ok(());
+    }
+
+    let document = default_zimbra_subscription_document(user, owner_id, &email, now);
+    match coll.insert_one(document).await {
+        Ok(_) => Ok(()),
+        Err(_) => {
+            // A concurrent login may have created the record. Re-check the
+            // owner before reporting a failure to the caller.
+            if coll
+                .find_one(doc! {"owner_user_id": owner_id})
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                Ok(())
+            } else {
+                Err("Unable to create the Zimbra subscription.".into())
+            }
+        }
+    }
+}
+
+/// Backfill active Zimbra accounts when the service starts. This keeps users
+/// created by an earlier deployment on the same self-management path.
+pub async fn ensure_zimbra_subscriptions(state: &AppState) -> Result<(), String> {
+    let users = db::find_many(
+        &state.web,
+        &state.cfg.account_collection,
+        doc! {"auth_source": "zimbra", "disabled": {"$ne": true}},
+        5000,
+    )
+    .await
+    .map_err(|_| "Unable to load Zimbra accounts for subscription setup.".to_owned())?;
+    for user in users {
+        if let Err(error) = ensure_zimbra_subscription(state, &user).await {
+            tracing::warn!(username = %db::string(&user, "username"), %error, "Unable to initialize Zimbra subscription");
+        }
+    }
+    Ok(())
+}
+
 fn self_recipient(user: &Document) -> Result<String, String> {
     if let Some(email) = zimbra_recipient(user)? {
         return Ok(email);
@@ -1662,5 +1785,32 @@ mod tests {
         assert!(zimbra_recipient(&missing).is_err());
         let local = doc! {"auth_source":"local","email":"local@example.com"};
         assert_eq!(zimbra_recipient(&local).unwrap(), None);
+    }
+
+    #[test]
+    fn new_zimbra_subscription_starts_with_both_profiles_disabled() {
+        let owner_id = ObjectId::new();
+        let user = doc! {
+            "_id": owner_id,
+            "username": "user@example.com",
+            "auth_source": "zimbra",
+            "organization": "",
+        };
+        let document = default_zimbra_subscription_document(
+            &user,
+            owner_id,
+            "user@example.com",
+            bson::DateTime::now(),
+        );
+        assert_eq!(document.get_object_id("owner_user_id").unwrap(), owner_id);
+        assert_eq!(
+            document.get_object_id("managed_by_user_id").unwrap(),
+            owner_id
+        );
+        assert_eq!(document["email"], "user@example.com".into());
+        assert_eq!(document["emails"].as_array().unwrap().len(), 1);
+        assert_eq!(document["newsletter_profile"]["enabled"], false.into());
+        assert_eq!(document["report_profile"]["enabled"], false.into());
+        assert_eq!(document["local_subscription"], false.into());
     }
 }

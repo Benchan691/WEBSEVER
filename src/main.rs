@@ -346,6 +346,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg,
     };
     auth::ensure_bootstrap(&state).await?;
+    if let Err(error) = subscriptions::ensure_zimbra_subscriptions(&state).await {
+        tracing::warn!(%error, "Unable to backfill Zimbra subscriptions");
+    }
     if env::var("RUST_SCHEDULER_ENABLED")
         .ok()
         .is_some_and(|value| matches!(value.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))

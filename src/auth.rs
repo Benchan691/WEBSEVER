@@ -1,4 +1,4 @@
-use crate::{AppState, ReqCtx, db, render, view, zimbra};
+use crate::{AppState, ReqCtx, db, render, subscriptions, view, zimbra};
 use axum::{
     http::{HeaderMap, Method, StatusCode, header},
     response::Response,
@@ -299,6 +299,9 @@ async fn zimbra_login(state: &AppState, ctx: &ReqCtx) -> Response {
         d.insert("_id", result.inserted_id);
         d
     };
+    if let Err(error) = subscriptions::ensure_zimbra_subscription(state, &user).await {
+        return view::error(StatusCode::SERVICE_UNAVAILABLE, &error);
+    }
     let mut response = view::redirect(safe_next(&ctx.field("next")));
     response.headers_mut().insert(
         header::SET_COOKIE,
