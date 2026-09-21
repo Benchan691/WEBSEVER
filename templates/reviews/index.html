@@ -1,6 +1,6 @@
 {% extends 'layouts/base.html' %}
 {% block title %}{{ t('Vulnerability Reviews') }}{% endblock %}
-{% block styles %}<link href="{{ url_for('static', filename='css/reviews.css') }}" rel="stylesheet">{% endblock %}
+{% block styles %}<link href="{{ url_for('static', filename='css/reviews.css', v='20260921-3') }}" rel="stylesheet">{% endblock %}
 
 {% block content %}
 <div class="container-fluid px-3 px-lg-4">
@@ -174,7 +174,7 @@
 </div>
 
 <div class="modal fade" id="document-modal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-dialog review-email-modal-dialog modal-dialog-scrollable">
         <div class="modal-content">
             <div class="modal-header">
                 <h5 id="document-modal-title" class="modal-title">{{ t('Review Document') }}</h5>

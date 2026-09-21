@@ -62,6 +62,21 @@
     background: var(--bs-tertiary-bg);
 }
 
+/* Review document previews stay readable at half the desktop window. The
+ * Operations latest-email viewer intentionally uses a full-screen dialog. */
+.review-email-modal-dialog {
+    width: 50vw;
+    max-width: 50vw;
+}
+
+@media (max-width: 767.98px) {
+    .review-email-modal-dialog {
+        width: 100vw;
+        max-width: 100vw;
+        margin: 0;
+    }
+}
+
 .review-email-preview-frame {
     display: block;
     width: 100%;
