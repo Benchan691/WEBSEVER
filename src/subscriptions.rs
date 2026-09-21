@@ -1372,7 +1372,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 value
             }
         };
-        let organization = if self_only {
+        let organization = if self_only && submitted_organization.trim().is_empty() {
             ctx.user
                 .as_ref()
                 .map(|user| db::string(user, "zimbra_organization"))
@@ -1817,14 +1817,6 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 && let Some(organization) = data.get("team").and_then(Value::as_str)
             {
                 data["organization"] = json!(organization);
-            }
-            if is_self_manager(state, ctx) && !local_subscription {
-                let current_organization = ctx
-                    .user
-                    .as_ref()
-                    .map(|user| db::string(user, "organization"))
-                    .unwrap_or_default();
-                data["organization"] = json!(current_organization);
             }
             let mut emails = match recipients(&data) {
                 Ok(v) => v,

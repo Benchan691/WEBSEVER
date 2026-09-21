@@ -32,7 +32,7 @@
                 <div id="subscription-modal-message" class="alert d-none" role="alert" aria-live="assertive"></div>
                 <div class="row g-3 mb-4">
                     <div class="col-md-4"><label class="form-label" for="username">{{ t('Username') }}</label><input id="username" type="text" class="form-control" autocomplete="username" required{% if not is_admin and not is_organization_admin %} readonly{% endif %}></div>
-                    <div class="col-md-4"><label class="form-label" for="organization">{{ t('Organization') }}</label><input id="organization" class="form-control"{% if is_admin or is_organization_admin %} required{% else %} readonly{% endif %}></div>
+                    <div class="col-md-4"><label class="form-label" for="organization">{{ t('Organization') }}</label><input id="organization" class="form-control"{% if is_admin or is_organization_admin %} required{% elif current_user.auth_source != 'zimbra' %} readonly{% endif %}></div>
                     <div class="col-12">
                         <label class="form-label" for="recipient-list">{{ t('Email recipients') }}</label>
                         <div id="recipient-list" class="vstack gap-2"></div>

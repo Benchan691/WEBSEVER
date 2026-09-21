@@ -663,7 +663,7 @@
         const organization = document.getElementById('organization');
         if (organization) {
             organization.value = subscription ? (subscription.organization || currentOrganization || (isAdmin ? 'local' : '')) : (currentOrganization || (isAdmin ? 'local' : ''));
-            organization.readOnly = organizationDashboard || selfManagement;
+            organization.readOnly = organizationDashboard || (selfManagement && !accountHubUser);
         }
         const newsletter = subscription && subscription.newsletter_profile ? subscription.newsletter_profile : {enabled:false,filters:{}};
         const report = subscription && subscription.report_profile ? subscription.report_profile : {enabled:false,filters:{},generation_mode:'template',report_language:'en'};

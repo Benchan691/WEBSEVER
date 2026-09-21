@@ -368,6 +368,7 @@ mod tests {
         assert!(html.contains("添加订阅"));
         assert!(!html.contains("添加本地订阅"));
         assert!(html.contains("for=\"organization\""));
+        assert!(html.contains("<input id=\"organization\" class=\"form-control\">"));
         assert!(!html.contains("团队"));
         assert!(html.contains("\"selfManagement\":true"));
         assert!(html.contains("\"currentUsername\":\"member\""));
