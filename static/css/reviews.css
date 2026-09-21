@@ -54,12 +54,21 @@
 .review-results-table { min-width: 900px; }
 .review-results-table { table-layout: fixed; }
 
+.review-email-preview-scroll {
+    max-height: min(70vh, 52rem);
+    overflow: auto;
+    padding: 1rem;
+    background: var(--bs-tertiary-bg);
+}
+
 .review-email-preview-frame {
+    display: block;
     width: 100%;
-    height: 70vh;
     min-height: 30rem;
+    height: 30rem;
     border: 0;
     background: #fff;
+    box-shadow: 0 0.125rem 0.35rem rgba(0, 0, 0, 0.08);
 }
 
 .truncate-cell {

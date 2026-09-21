@@ -185,7 +185,9 @@
                     <div class="spinner-border spinner-border-sm me-2" aria-hidden="true"></div>{{ t('Loading email preview...') }}
                 </div>
                 <div id="document-preview-error" class="alert alert-danger m-3 d-none" role="alert"></div>
-                <iframe id="document-email-frame" class="review-email-preview-frame d-none" title="{{ t('Rendered email preview') }}" sandbox=""></iframe>
+                <div class="review-email-preview-scroll">
+                    <iframe id="document-email-frame" class="review-email-preview-frame d-none" title="{{ t('Rendered email preview') }}" sandbox="allow-same-origin"></iframe>
+                </div>
             </div>
         </div>
     </div>
@@ -236,6 +238,6 @@
     'vendorProductImportUrl': url_for('subscription.import_vendor_products'),
     'vendorProductTemplateUrl': url_for('subscription.vendor_product_template'),
 }|tojson }}</script>
-<script src="{{ url_for('static', filename='js/reviews/email-preview.js', v='20260921-1') }}"></script>
-<script src="{{ url_for('static', filename='js/reviews/index.js', v='20260921-1') }}"></script>
+<script src="{{ url_for('static', filename='js/reviews/email-preview.js', v='20260921-2') }}"></script>
+<script src="{{ url_for('static', filename='js/reviews/index.js', v='20260921-2') }}"></script>
 {% endblock %}

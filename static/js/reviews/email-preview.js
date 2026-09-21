@@ -16,6 +16,23 @@
         return t('Unable to render email preview.');
     }
 
+    function resizeFrame(frame) {
+        try {
+            const documentElement = frame.contentDocument && frame.contentDocument.documentElement;
+            const body = frame.contentDocument && frame.contentDocument.body;
+            const contentHeight = Math.max(
+                documentElement ? documentElement.scrollHeight : 0,
+                body ? body.scrollHeight : 0,
+                480
+            );
+            frame.style.height = contentHeight + 'px';
+        } catch (error) {
+            // A browser may keep a sandboxed document isolated. The fixed
+            // minimum height still leaves the preview usable in that case.
+            frame.style.height = '30rem';
+        }
+    }
+
     window.loadReviewEmailPreview = function (options) {
         const frame = options.frame;
         const loading = options.loading;
@@ -27,6 +44,8 @@
         setVisible(frame, false);
         setVisible(error, false);
         setVisible(loading, true);
+        frame.onload = null;
+        frame.style.height = '30rem';
 
         if (!url) {
             loading.classList.add('d-none');
@@ -45,9 +64,14 @@
             })
             .then(function (body) {
                 if (frame.dataset.previewToken !== token) return;
+                frame.onload = function () {
+                    if (frame.dataset.previewToken !== token) return;
+                    resizeFrame(frame);
+                };
                 frame.srcdoc = body;
                 setVisible(loading, false);
                 setVisible(frame, true);
+                resizeFrame(frame);
             })
             .catch(function (reason) {
                 if (frame.dataset.previewToken !== token) return;
@@ -60,7 +84,9 @@
     window.clearReviewEmailPreview = function (frame, loading, error) {
         if (!frame) return;
         frame.dataset.previewToken = String(Number(frame.dataset.previewToken || '0') + 1);
+        frame.onload = null;
         frame.srcdoc = '';
+        frame.style.height = '30rem';
         setVisible(frame, false);
         setVisible(error, false);
         setVisible(loading, true);
