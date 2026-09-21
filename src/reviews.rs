@@ -439,7 +439,7 @@ fn normalized_document(document: &Document) -> Value {
     data
 }
 
-fn preview_url(source_name: &str, id: &str) -> String {
+pub(crate) fn preview_url(source_name: &str, id: &str) -> String {
     format!(
         "/generated-newsletters/{}/{}/preview",
         urlencoding::encode(source_name),

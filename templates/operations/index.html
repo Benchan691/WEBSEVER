@@ -2,7 +2,7 @@
 {% block title %}{{ t('Operations') }}{% endblock %}
 {% block styles %}<link href="{{ url_for('static', filename='css/operations.css') }}" rel="stylesheet">{% endblock %}
 {% block content %}
-<div class="container">
+<div class="container-fluid operations-page px-3 px-xl-4">
     <div class="d-flex justify-content-between align-items-center mb-3">
         <div>
             <h1 class="h3 mb-1">{{ t('Operations') }}</h1>
@@ -64,30 +64,14 @@
                         <th>{{ t('Delivery cursor') }}</th>
                         <th>{{ t('CVE cutoff') }}</th>
                         <th>{{ t('Delivered') }}</th>
+                        <th>{{ t('Latest email') }}</th>
+                        <th class="text-end">{{ t('Action') }}</th>
                     </tr>
                 </thead>
                 <tbody id="newsletter-rows"></tbody>
             </table>
         </div>
         <div id="newsletters-empty" class="text-center text-muted py-4 d-none">{{ t('No newsletter profiles found.') }}</div>
-        </div>
-
-        <h2 class="h5 mb-2">{{ t('Recent newsletter deliveries') }}</h2>
-        <div class="card shadow-sm border-0 overflow-hidden mb-4">
-        <div class="table-responsive">
-            <table class="table table-sm table-hover align-middle mb-0">
-                <thead class="table-dark">
-                    <tr>
-                        <th>{{ t('Sent') }}</th>
-                        <th>{{ t('Email') }}</th>
-                        <th>{{ t('Collection') }}</th>
-                        <th>{{ t('Title') }}</th>
-                    </tr>
-                </thead>
-                <tbody id="delivery-rows"></tbody>
-            </table>
-        </div>
-        <div id="deliveries-empty" class="text-center text-muted py-4 d-none">{{ t('No recent newsletter deliveries.') }}</div>
         </div>
     </section>
 
@@ -215,6 +199,29 @@
     </section>
     </div>
 </div>
+
+<div class="modal fade" id="newsletter-email-modal" tabindex="-1" aria-labelledby="newsletter-email-modal-title" aria-hidden="true">
+    <div class="modal-dialog modal-fullscreen">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div>
+                    <h5 class="modal-title" id="newsletter-email-modal-title">{{ t('Latest newsletter') }}</h5>
+                    <div class="small text-muted" id="newsletter-email-modal-recipient"></div>
+                </div>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{ t('Close') }}"></button>
+            </div>
+            <div class="modal-body p-0">
+                <div id="newsletter-email-preview-loading" class="text-center text-muted py-5" role="status">
+                    <div class="spinner-border spinner-border-sm me-2" aria-hidden="true"></div>{{ t('Loading email preview...') }}
+                </div>
+                <div id="newsletter-email-preview-error" class="alert alert-danger m-3 d-none" role="alert"></div>
+                <div class="operations-email-preview-scroll">
+                    <iframe id="newsletter-email-frame" class="operations-email-preview-frame d-none" title="{{ t('Rendered email preview') }}" sandbox="allow-same-origin"></iframe>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
 {% endblock %}
 {% block script %}
 <script id="page-config" type="application/json">{{ {
@@ -224,5 +231,6 @@
     'editorPreviewUrl': url_for('operations.preview_newsletter_editor'),
     'sourceListUrl': url_for('operations.get_source_list'),
 } | tojson }}</script>
-<script src="{{ url_for('static', filename='js/operations/index.js', v='20260918-1') }}"></script>
+<script src="{{ url_for('static', filename='js/reviews/email-preview.js', v='20260921-2') }}"></script>
+<script src="{{ url_for('static', filename='js/operations/index.js', v='20260921-1') }}"></script>
 {% endblock %}

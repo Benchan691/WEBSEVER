@@ -170,28 +170,61 @@
                 '<td>' + (row.enabled ? t('Yes') : t('No')) + '</td>' +
                 '<td class="small">' + escapeHtml(row.delivery_cursor || '—') + '</td>' +
                 '<td class="small">' + escapeHtml(row.cve_delivery_cutoff || '—') + '</td>' +
-                '<td>' + escapeHtml(row.total_delivered) + '</td>';
+                '<td>' + escapeHtml(row.total_delivered != null ? row.total_delivered : 0) + '</td>';
+            const latestCell = document.createElement('td');
+            latestCell.className = 'small operations-latest-email';
+            const actionCell = document.createElement('td');
+            actionCell.className = 'text-end';
+            const latest = row.latest_delivery;
+            if (!latest) {
+                latestCell.innerHTML = '<span class="text-muted">' + t('No email sent') + '</span>';
+                actionCell.innerHTML = '<span class="text-muted">—</span>';
+            } else {
+                latestCell.innerHTML =
+                    '<div class="fw-semibold text-truncate" title="' + escapeHtml(latest.title || latest.source_collection || '') + '">' +
+                    escapeHtml(latest.title || latest.source_collection || latest.selection_id || t('Newsletter')) + '</div>' +
+                    '<div class="text-muted">' + formatTime(latest.sent_at) + '</div>' +
+                    '<div class="text-muted text-truncate" title="' + escapeHtml(latest.email || '') + '">' +
+                    escapeHtml(latest.email || '') + '</div>';
+                if (latest.preview_url) {
+                    const button = document.createElement('button');
+                    button.type = 'button';
+                    button.className = 'btn btn-outline-primary btn-sm';
+                    button.innerHTML = '<i class="bi bi-eye me-1" aria-hidden="true"></i>' + escapeHtml(t('View'));
+                    button.addEventListener('click', function () {
+                        openNewsletterPreview(latest, row);
+                    });
+                    actionCell.appendChild(button);
+                } else {
+                    actionCell.innerHTML = '<span class="text-muted">—</span>';
+                }
+            }
+            tr.append(latestCell, actionCell);
             body.appendChild(tr);
         });
     }
 
-    function renderDeliveries(rows) {
-        const body = document.getElementById('delivery-rows');
-        const empty = document.getElementById('deliveries-empty');
-        body.innerHTML = '';
-        if (!rows.length) {
-            empty.classList.remove('d-none');
-            return;
-        }
-        empty.classList.add('d-none');
-        rows.forEach(function (row) {
-            const tr = document.createElement('tr');
-            tr.innerHTML =
-                '<td class="small">' + formatTime(row.sent_at) + '</td>' +
-                '<td>' + escapeHtml(row.email) + '</td>' +
-                '<td class="small">' + escapeHtml(row.source_collection) + '</td>' +
-                '<td>' + escapeHtml(row.title || row.selection_id || '—') + '</td>';
-            body.appendChild(tr);
+    function openNewsletterPreview(delivery, row) {
+        const modalElement = document.getElementById('newsletter-email-modal');
+        const frame = document.getElementById('newsletter-email-frame');
+        const loading = document.getElementById('newsletter-email-preview-loading');
+        const error = document.getElementById('newsletter-email-preview-error');
+        document.getElementById('newsletter-email-modal-title').textContent =
+            delivery.title || t('Latest newsletter');
+        document.getElementById('newsletter-email-modal-recipient').textContent =
+            row.username || delivery.email || row.email || '';
+        loadReviewEmailPreview({frame: frame, loading: loading, error: error, url: delivery.preview_url});
+        bootstrap.Modal.getOrCreateInstance(modalElement).show();
+    }
+
+    function setupNewsletterPreview() {
+        const modalElement = document.getElementById('newsletter-email-modal');
+        const frame = document.getElementById('newsletter-email-frame');
+        const loading = document.getElementById('newsletter-email-preview-loading');
+        const error = document.getElementById('newsletter-email-preview-error');
+        modalElement.addEventListener('hidden.bs.modal', function () {
+            clearReviewEmailPreview(frame, loading, error);
+            document.getElementById('newsletter-email-modal-recipient').textContent = '';
         });
     }
 
@@ -432,7 +465,6 @@
                 renderScheduler(body.scheduler || {});
                 renderReports(body.reports || []);
                 renderNewsletters(body.newsletters || []);
-                renderDeliveries(body.recent_newsletter_deliveries || []);
             })
             .catch(function (error) {
                 showMessage(error.message || t('Unable to load scheduler health.'), 'danger');
@@ -489,6 +521,7 @@
         }
     });
     document.getElementById('save-template-btn').addEventListener('click', saveEditor);
+    setupNewsletterPreview();
     loadHealth();
     setInterval(loadHealth, refreshMs);
 })();

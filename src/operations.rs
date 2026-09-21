@@ -3,7 +3,7 @@ use axum::{
     http::{Method, StatusCode},
     response::Response,
 };
-use mongodb::bson::{self, doc};
+use mongodb::bson::{self, Bson, doc};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
@@ -152,22 +152,50 @@ async fn health(state: &AppState, ctx: &ReqCtx) -> Value {
                     .filter(|team| !team.trim().is_empty())
             })
             .unwrap_or("");
+        let delivery_filter = match item.get("_id") {
+            Some(Bson::ObjectId(id)) => doc! {
+                "$or": [
+                    {"subscription_id": id.to_owned()},
+                    {"subscription_id": id.to_hex()},
+                ]
+            },
+            Some(id) => doc! {"subscription_id": id.to_owned()},
+            None => doc! {"subscription_id": Bson::Null},
+        };
+        let latest_delivery = db::find_sorted(
+            &state.web,
+            "newsletter_deliveries",
+            delivery_filter.clone(),
+            doc! {"sent_at": -1},
+            1,
+        )
+        .await
+        .ok()
+        .and_then(|mut rows| rows.pop());
+        let total_delivered = db::collection(&state.web, "newsletter_deliveries")
+            .count_documents(delivery_filter)
+            .await
+            .unwrap_or(0);
+        let latest_delivery = latest_delivery.map(|delivery| {
+            let delivery_json = db::bson_json(&delivery);
+            let source = db::string(&delivery, "source_collection");
+            let selection_id = db::string(&delivery, "selection_id");
+            let mut row = json!({
+                "sent_at": delivery_json.get("sent_at").cloned().unwrap_or(Value::Null),
+                "email": db::string(&delivery, "email"),
+                "source_collection": source,
+                "selection_id": selection_id,
+                "title": db::string(&delivery, "title"),
+            });
+            if !source.is_empty() && !selection_id.is_empty() {
+                row["preview_url"] = json!(reviews::preview_url(&source, &selection_id));
+            }
+            row
+        });
         reports.push(json!({"username":value["username"],"emails":emails,"email":email,"organization":organization,"enabled":report["enabled"],"schedule_enabled":report["schedule_enabled"],"schedule_weekday":report["schedule_weekday"],"schedule_time":report["schedule_time"],"generation_mode":report["generation_mode"],"report_language":report["report_language"],"next_run_at":report["next_run_at"],"due":false,"last_run_at":report["last_run_at"],"last_error":report["last_error"],"last_job_id":report["last_job_id"],"last_match_count":report["last_match_count"],"delivery":{}}));
-        newsletters.push(json!({"username":value["username"],"emails":emails,"email":email,"organization":organization,"enabled":newsletter["enabled"],"delivery_cursor":newsletter["delivery_cursor"],"cve_delivery_cutoff":newsletter["cve_delivery_cutoff"],"total_delivered":0,"by_collection":[]}));
+        newsletters.push(json!({"username":value["username"],"emails":emails,"email":email,"organization":organization,"enabled":newsletter["enabled"],"delivery_cursor":newsletter["delivery_cursor"],"cve_delivery_cutoff":newsletter["cve_delivery_cutoff"],"total_delivered":total_delivered,"by_collection":[],"latest_delivery":latest_delivery.unwrap_or(Value::Null)}));
     }
-    let deliveries = db::find_sorted(
-        &state.web,
-        "newsletter_deliveries",
-        filter,
-        doc! {"sent_at":-1},
-        20,
-    )
-    .await
-    .unwrap_or_default()
-    .iter()
-    .map(db::bson_json)
-    .collect::<Vec<_>>();
-    json!({"generated_at":chrono::Utc::now().to_rfc3339(),"scheduler":{"alive":alive,"last_tick_at":last.map(|v|v.to_string()).unwrap_or_default(),"hostname":heartbeat.as_ref().map(|v|db::string(v,"hostname")).unwrap_or_default(),"pid":heartbeat.as_ref().and_then(|v|v.get_i64("pid").ok()),"retention":heartbeat.as_ref().and_then(|v|v.get_document("retention").ok()).map(db::bson_json).unwrap_or(json!({})),"zimbra":zimbra_status},"reports":reports,"newsletters":newsletters,"recent_newsletter_deliveries":deliveries})
+    json!({"generated_at":chrono::Utc::now().to_rfc3339(),"scheduler":{"alive":alive,"last_tick_at":last.map(|v|v.to_string()).unwrap_or_default(),"hostname":heartbeat.as_ref().map(|v|db::string(v,"hostname")).unwrap_or_default(),"pid":heartbeat.as_ref().and_then(|v|v.get_i64("pid").ok()),"retention":heartbeat.as_ref().and_then(|v|v.get_document("retention").ok()).map(db::bson_json).unwrap_or(json!({})),"zimbra":zimbra_status},"reports":reports,"newsletters":newsletters})
 }
 pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
     if ctx.path == "/operations" && ctx.method == Method::GET {
