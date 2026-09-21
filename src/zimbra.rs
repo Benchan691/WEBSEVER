@@ -94,6 +94,15 @@ fn soap_context(body: &str, token: &str) -> String {
         xml_escape(token)
     )
 }
+fn mark_unread_request(item_id: &str, token: &str) -> String {
+    soap_context(
+        &format!(
+            r#"<MsgActionRequest xmlns="urn:zimbraMail"><action id="{}" op="!read"/></MsgActionRequest>"#,
+            xml_escape(item_id)
+        ),
+        token,
+    )
+}
 fn token_from_xml(xml: &str) -> Option<String> {
     Regex::new(r#"(?is)<(?:\w+:)?authToken[^>]*>([^<]+)</(?:\w+:)?authToken>"#)
         .ok()?
@@ -208,7 +217,7 @@ impl ZimbraSession {
     ) -> Result<(), String> {
         let http = client(config)?;
         let path = format!(
-            "home/{}/{}",
+            "home/{}/{}?fmt=sync&nohdr=1",
             urlencoding::encode(email),
             urlencoding::encode(folder)
         );
@@ -226,6 +235,32 @@ impl ZimbraSession {
         {
             return Err("Zimbra mailbox authentication failed.".into());
         }
+        let item_id = response
+            .headers()
+            .get("X-Zimbra-ItemId")
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        response_text(response).await?;
+        let item_id = item_id.ok_or_else(|| {
+            "Zimbra did not return the imported message ID; unread status could not be set."
+                .to_owned()
+        })?;
+        self.mark_unread(config, &item_id).await
+    }
+
+    async fn mark_unread(&self, config: &Config, item_id: &str) -> Result<(), String> {
+        let http = client(config)?;
+        let response = http
+            .post(endpoint(config, "service/soap"))
+            .header(header::CONTENT_TYPE, "application/soap+xml; charset=utf-8")
+            .header("Cookie", format!("ZM_AUTH_TOKEN={}", self.token))
+            .header("X-Zimbra-Auth-Token", &self.token)
+            .body(mark_unread_request(item_id, &self.token))
+            .send()
+            .await
+            .map_err(|_| "Zimbra unread status update failed.".to_owned())?;
         response_text(response).await.map(|_| ())
     }
 }
@@ -292,5 +327,11 @@ mod tests {
             )
         );
         assert!(request.contains("<soap:Body><GetFolderRequest"));
+        let unread = mark_unread_request("42", "token");
+        assert!(
+            unread.contains(
+                r#"<MsgActionRequest xmlns="urn:zimbraMail"><action id="42" op="!read"/>"#
+            )
+        );
     }
 }
