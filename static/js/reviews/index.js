@@ -1,5 +1,5 @@
 (function () {
-    const {exportUrl, searchUrl, autoSelectUrl} = JSON.parse(
+    const {exportUrl, searchUrl, autoSelectUrl, vendorProductImportUrl, vendorProductTemplateUrl} = JSON.parse(
         document.getElementById('page-config').textContent
     );
     const error = document.getElementById('error-alert');
@@ -27,6 +27,11 @@
     const autoSelectButton = document.getElementById('auto-select-btn');
     const selectedCount = document.getElementById('selected-count');
     const generateReportButton = document.getElementById('generate-report-btn');
+    const vendorProductFile = document.getElementById('filter-vendor-product-file');
+    const vendorProductTemplate = document.getElementById('filter-vendor-product-template');
+    const vendorProductStatus = document.getElementById('filter-vendor-product-status');
+    const vendorProductSummary = document.getElementById('filter-vendor-product-summary');
+    const includePossibleMatches = document.getElementById('filter-include-possible-matches');
     const documentModal = bootstrap.Modal.getOrCreateInstance(document.getElementById('document-modal'));
     const documentModalTitle = document.getElementById('document-modal-title');
     const documentJson = document.getElementById('document-json');
@@ -47,6 +52,8 @@
     let currentBody = null;
     let currentRelated = [];
     let restoreRelatedModalAfterDocument = false;
+    let vendorProductFilter = {enabled: false, schema_version: 1, include_possible_matches: false, rows: []};
+    let vendorProductImportBusy = false;
 
     function getSelections() {
         try {
@@ -114,16 +121,94 @@
         return '';
     }
 
+    function hasVendorProductFilter() {
+        return vendorProductFilter.enabled === true
+            && Array.isArray(vendorProductFilter.rows)
+            && vendorProductFilter.rows.length > 0;
+    }
+
+    function updateVendorProductSummary() {
+        vendorProductSummary.textContent = hasVendorProductFilter()
+            ? t('{count} vendor/product row(s) loaded.', {count: vendorProductFilter.rows.length})
+            : t('No vendor/product CSV loaded.');
+    }
+
+    function showVendorProductStatus(message, kind) {
+        vendorProductStatus.textContent = message || '';
+        vendorProductStatus.className = message
+            ? 'alert alert-' + (kind || 'info') + ' small py-2 mt-2 mb-0'
+            : 'alert small py-2 mt-2 mb-0 d-none';
+    }
+
+    function normalizeVendorProductFilter(value) {
+        const rows = Array.isArray(value && value.rows) ? value.rows : [];
+        return {
+            enabled: value && value.enabled === true,
+            schema_version: 1,
+            include_possible_matches: value && value.include_possible_matches === true,
+            rows: rows.map(function (row, index) {
+                return {
+                    vendor: String(row.vendor || '').trim(),
+                    product: String(row.product || '').trim(),
+                    vendor_aliases: Array.isArray(row.vendor_aliases) ? row.vendor_aliases.map(String) : [],
+                    product_aliases: Array.isArray(row.product_aliases) ? row.product_aliases.map(String) : [],
+                    row_number: row.row_number || index + 2,
+                };
+            }).filter(function (row) { return row.vendor && row.product; }),
+        };
+    }
+
+    function ensureVendorProductFilter() {
+        if (hasVendorProductFilter()) return true;
+        showError(t('Upload a vendor/product CSV filter before searching review documents.'));
+        vendorProductFile.focus();
+        return false;
+    }
+
+    function importVendorProductCsv(file) {
+        if (!file || vendorProductImportBusy) return;
+        vendorProductImportBusy = true;
+        vendorProductFile.disabled = true;
+        showVendorProductStatus(t('Validating CSV...'), 'info');
+        const form = new FormData();
+        form.append('file', file);
+        fetch(vendorProductImportUrl, {method: 'POST', body: form})
+            .then(function (response) { return parseJsonResponse(response, t('Unable to import the vendor/product CSV.')); })
+            .then(function (body) {
+                const imported = normalizeVendorProductFilter(body.vendor_product_filter);
+                if (!imported.enabled || !imported.rows.length) {
+                    throw new Error(t('The CSV did not contain any valid vendor/product rows.'));
+                }
+                imported.include_possible_matches = includePossibleMatches.checked;
+                vendorProductFilter = imported;
+                updateVendorProductSummary();
+                showVendorProductStatus(
+                    t('Validated and loaded {count} vendor/product row(s).', {count: imported.rows.length}),
+                    body.warnings && body.warnings.length ? 'warning' : 'success'
+                );
+            })
+            .catch(function (reason) {
+                vendorProductFilter = {enabled: false, schema_version: 1, include_possible_matches: false, rows: []};
+                updateVendorProductSummary();
+                showVendorProductStatus(reason.message, 'danger');
+            })
+            .finally(function () {
+                vendorProductImportBusy = false;
+                vendorProductFile.disabled = false;
+                vendorProductFile.value = '';
+            });
+    }
+
     function buildFilterPayload() {
-        const payload = { mode: 'cve' };
-        const search = document.getElementById('filter-search').value.trim();
+        const payload = {
+            vendor_product_filter: Object.assign({}, vendorProductFilter, {
+                include_possible_matches: includePossibleMatches.checked,
+            }),
+        };
         const statuses = Array.from(document.querySelectorAll('input[name="status"]:checked'))
             .map(function (input) { return input.value.trim(); })
             .filter(Boolean);
         const windowValue = timeWindow.value;
-        if (search) {
-            payload.search = search;
-        }
         if (statuses.length) {
             payload.status = statuses;
         }
@@ -140,26 +225,6 @@
             }
         }
         return payload;
-    }
-
-    function buildFilterParams() {
-        const payload = buildFilterPayload();
-        const params = new URLSearchParams();
-        Object.keys(payload).forEach(function (key) {
-            const value = payload[key];
-            if (key === 'status' && Array.isArray(value)) {
-                value.forEach(function (status) {
-                    params.append('status', status);
-                });
-                return;
-            }
-            if (key === 'include_unknown' && value === true) {
-                params.set('include_unknown', 'true');
-                return;
-            }
-            params.set(key, value);
-        });
-        return params;
     }
 
     function parseJsonResponse(response, fallback) {
@@ -240,7 +305,8 @@
     function renderHeaders() {
         resultsHead.replaceChildren();
         addHeader(t('Select'));
-        addHeader(t('CVE'));
+        addHeader(t('Collection'));
+        addHeader(t('Code / CVE'));
         addHeader(t('Severity'));
         addHeader(t('Description'));
         addHeader(t('Vendor'));
@@ -375,12 +441,13 @@
         const keys = selectedKeys();
         resultsBody.replaceChildren();
         renderHeaders();
-        resultsTitle.textContent = t('CVE Results');
+        resultsTitle.textContent = t('Review Results');
 
         body.data.forEach(function (item) {
             const projectedDocument = item.document;
             const row = document.createElement('tr');
             renderSelectCell(row, item, keys);
+            addCell(row, item.collection, 'small', true);
             addCell(
                 row,
                 firstValue(projectedDocument, ['code', 'cve', 'title']),
@@ -430,7 +497,10 @@
     }
 
     function runSearch(page) {
-        activeFilters = buildFilterParams();
+        if (!ensureVendorProductFilter()) return;
+        activeFilters = buildFilterPayload();
+        activeFilters.page = page;
+        activeFilters.page_size = Number(pageSize.value);
         resultsLoading.classList.remove('d-none');
         resultsEmpty.classList.add('d-none');
         resultsTableWrap.classList.add('d-none');
@@ -439,10 +509,11 @@
         statusAlert.classList.add('d-none');
         refresh.disabled = true;
 
-        const params = new URLSearchParams(activeFilters);
-        params.set('page', page);
-        params.set('page_size', pageSize.value);
-        fetch(searchUrl + '?' + params.toString())
+        fetch(searchUrl, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(activeFilters),
+        })
             .then(function (response) { return parseJsonResponse(response, t('Unable to search review documents.')); })
             .then(renderResults)
             .catch(function (reason) {
@@ -464,8 +535,18 @@
     });
     clearFilter.addEventListener('click', function () {
         filterForm.reset();
+        vendorProductFilter = {enabled: false, schema_version: 1, include_possible_matches: false, rows: []};
+        showVendorProductStatus('', 'info');
+        updateVendorProductSummary();
         updateCustomWindow();
         runSearch(1);
+    });
+    vendorProductTemplate.href = vendorProductTemplateUrl;
+    vendorProductFile.addEventListener('change', function () {
+        importVendorProductCsv(vendorProductFile.files && vendorProductFile.files[0]);
+    });
+    includePossibleMatches.addEventListener('change', function () {
+        vendorProductFilter.include_possible_matches = includePossibleMatches.checked;
     });
     previousPage.addEventListener('click', function () { runSearch(currentPage - 1); });
     nextPage.addEventListener('click', function () { runSearch(currentPage + 1); });
@@ -503,8 +584,9 @@
     }
 
     autoSelectButton.addEventListener('click', function () {
-        activeFilters = buildFilterParams();
         const payload = buildAutoSelectPayload();
+        if (!ensureVendorProductFilter()) return;
+        activeFilters = payload;
         if (!payload.count || payload.count < 1 || payload.count > 500) {
             showError(t('Auto-select count must be between 1 and 500.'));
             return;
@@ -607,6 +689,6 @@
     });
 
     updateSelectedCount();
+    updateVendorProductSummary();
     updateCustomWindow();
-    runSearch(1);
 })();

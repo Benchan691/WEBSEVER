@@ -204,6 +204,14 @@ mod tests {
                 .render(context.clone())
                 .unwrap_or_else(|error| panic!("{name}: {error}"));
         }
+        let reviews_html = env
+            .get_template("reviews/index.html")
+            .unwrap()
+            .render(context.clone())
+            .unwrap();
+        assert!(reviews_html.contains("href=\"&#x2f;reviews\""));
+        assert!(reviews_html.contains("filter-vendor-product-file"));
+        assert!(!reviews_html.contains("filter-search"));
         let translated = env
             .render_str("{{ t('{n} per page', n=25) }}", json!({"locale":"en"}))
             .unwrap();

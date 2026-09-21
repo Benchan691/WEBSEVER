@@ -1,4 +1,4 @@
-use crate::{AppState, ReqCtx, db, render, view};
+use crate::{AppState, ReqCtx, db, render, vendor_matcher, view};
 use axum::{
     http::{Method, StatusCode},
     response::Response,
@@ -81,6 +81,72 @@ fn parse_review_datetime(value: &str) -> Option<DateTime<Utc>> {
         })
 }
 
+fn filter_arg(ctx: &ReqCtx, key: &str) -> String {
+    if ctx.method == Method::GET {
+        return ctx.arg(key);
+    }
+    ctx.json
+        .get(key)
+        .and_then(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| value.as_i64().map(|number| number.to_string()))
+                .or_else(|| value.as_u64().map(|number| number.to_string()))
+        })
+        .unwrap_or_default()
+}
+
+fn filter_args(ctx: &ReqCtx, key: &str) -> Vec<String> {
+    if ctx.method == Method::GET {
+        return ctx.args(key);
+    }
+    match ctx.json.get(key) {
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+        Some(Value::String(value)) if !value.trim().is_empty() => vec![value.clone()],
+        _ => Vec::new(),
+    }
+}
+
+fn required_vendor_product_filter(ctx: &ReqCtx) -> Result<Value, String> {
+    let value = if ctx.method == Method::GET {
+        let raw = ctx.arg("vendor_product_filter");
+        if raw.trim().is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_str::<Value>(&raw)
+                .map_err(|_| "Vendor/product CSV filter is invalid JSON.".to_owned())?
+        }
+    } else {
+        ctx.json
+            .get("vendor_product_filter")
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    vendor_matcher::validate(&value)?;
+    let rows = value
+        .get("rows")
+        .and_then(Value::as_array)
+        .filter(|rows| !rows.is_empty());
+    if value.get("enabled") != Some(&Value::Bool(true)) || rows.is_none() {
+        return Err("Upload a vendor/product CSV filter before searching review documents.".into());
+    }
+    Ok(value)
+}
+
+fn reject_keyword_search(ctx: &ReqCtx) -> Result<(), String> {
+    if !filter_arg(ctx, "search").trim().is_empty() {
+        return Err(
+            "Keyword search has been replaced by the required vendor/product CSV filter.".into(),
+        );
+    }
+    Ok(())
+}
+
 fn filter(ctx: &ReqCtx) -> Result<Document, String> {
     let mut clauses = Vec::<Bson>::new();
     for (arg, fields) in [
@@ -88,12 +154,12 @@ fn filter(ctx: &ReqCtx) -> Result<Document, String> {
         ("title", &["title"][..]),
         ("affected", &["affected", "affected_products"][..]),
     ] {
-        let value = ctx.arg(arg);
+        let value = filter_arg(ctx, arg);
         if !value.trim().is_empty() {
             clauses.push(Bson::Document(doc! {"$or": fields.iter().map(|field| regex_clause(field, value.trim())).collect::<Vec<_>>() }));
         }
     }
-    let statuses = ctx.args("status");
+    let statuses = filter_args(ctx, "status");
     if statuses
         .iter()
         .any(|s| !matches!(s.as_str(), "Critical" | "High" | "Medium" | "Low"))
@@ -105,30 +171,7 @@ fn filter(ctx: &ReqCtx) -> Result<Document, String> {
             doc! {"$or": statuses.iter().map(|s| regex_clause("severity",s)).collect::<Vec<_>>() },
         ));
     }
-    let search = ctx.arg("search");
-    if !search.trim().is_empty() {
-        let fields = [
-            "code",
-            "cve",
-            "cve_ids",
-            "title",
-            "severity",
-            "affected",
-            "affected_products",
-            "description",
-            "impacts",
-            "recommendation",
-            "vendor",
-            "product",
-            "details.description",
-            "details.summary",
-            "details.affected.vendor",
-            "details.affected.product",
-            "details.vulnerability_identifiers.cve_id",
-        ];
-        clauses.push(Bson::Document(doc! {"$or": search.split_whitespace().flat_map(|term| fields.iter().map(move |field| regex_clause(field,term))).collect::<Vec<_>>() }));
-    }
-    let window = ctx.arg("time_window");
+    let window = filter_arg(ctx, "time_window");
     let now = Utc::now();
     let hong_kong = FixedOffset::east_opt(8 * 3600).unwrap();
     let bounds = match window.as_str() {
@@ -148,8 +191,8 @@ fn filter(ctx: &ReqCtx) -> Result<Document, String> {
         "7d" => Some((now - chrono::Duration::days(7), now)),
         "30d" => Some((now - chrono::Duration::days(30), now)),
         "custom" => {
-            let start = parse_review_datetime(&ctx.arg("start"));
-            let end = parse_review_datetime(&ctx.arg("end"));
+            let start = parse_review_datetime(&filter_arg(ctx, "start"));
+            let end = parse_review_datetime(&filter_arg(ctx, "end"));
             if start.is_none_or(|start| end.is_none_or(|end| start >= end)) {
                 return Err("Custom scrape time requires a valid start before end.".into());
             }
@@ -472,6 +515,31 @@ pub(crate) async fn query_rows(
     }
     Ok((count, rows))
 }
+
+async fn filtered_rows(
+    state: &AppState,
+    names: &[String],
+    filter: Document,
+    vendor_product_filter: &Value,
+) -> Result<Vec<(String, Document)>, mongodb::error::Error> {
+    let mut rows = Vec::new();
+    for name in names {
+        let (total, _) = query_rows(state, name, filter.clone(), 0, 1).await?;
+        if total == 0 {
+            continue;
+        }
+        let limit = total.min(i64::MAX as u64) as i64;
+        let (_, documents) = query_rows(state, name, filter.clone(), 0, limit).await?;
+        for document in documents {
+            if vendor_matcher::classify(&db::bson_json(&document), vendor_product_filter).is_some()
+            {
+                rows.push((name.clone(), document));
+            }
+        }
+    }
+    Ok(rows)
+}
+
 pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
     if ctx.path == "/reviews" && ctx.method == Method::GET {
         return Some(render(state, ctx, "reviews/index.html", json!({})));
@@ -510,43 +578,35 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         }
         return Some(view::json_response(StatusCode::OK, json!({"data":data})));
     }
-    if ctx.path == "/api/reviews/search" && ctx.method == Method::GET {
+    if ctx.path == "/api/reviews/search" && matches!(ctx.method, Method::GET | Method::POST) {
+        let vendor_product_filter = match required_vendor_product_filter(ctx) {
+            Ok(value) => value,
+            Err(error) => return Some(view::error(StatusCode::BAD_REQUEST, &error)),
+        };
+        if let Err(error) = reject_keyword_search(ctx) {
+            return Some(view::error(StatusCode::BAD_REQUEST, &error));
+        }
         let filter = match filter(ctx) {
             Ok(v) => v,
             Err(e) => return Some(view::error(StatusCode::BAD_REQUEST, &e)),
         };
-        let names = views(state)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|n| source(state, n) == "cve")
-            .collect::<Vec<_>>();
-        let page = ctx.arg("page").parse::<u64>().unwrap_or(1).max(1);
-        let size = ctx
-            .arg("page_size")
+        let names = views(state).await.unwrap_or_default();
+        let page = filter_arg(ctx, "page").parse::<u64>().unwrap_or(1).max(1);
+        let size = filter_arg(ctx, "page_size")
             .parse::<u64>()
             .unwrap_or(25)
             .clamp(1, 100);
         let offset = (page - 1).saturating_mul(size);
-        let window = offset.saturating_add(size).min(i64::MAX as u64);
-        let mut rows = Vec::new();
-        let mut total = 0_u64;
-        for name in names {
-            match query_rows(state, &name, filter.clone(), 0, window as i64).await {
-                Ok((name_total, documents)) => {
-                    total = total.saturating_add(name_total);
-                    for document in documents {
-                        rows.push((name.clone(), document));
-                    }
-                }
-                Err(_) => {
-                    return Some(view::error(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "Unable to query the vulnerabilities database.",
-                    ));
-                }
+        let mut rows = match filtered_rows(state, &names, filter, &vendor_product_filter).await {
+            Ok(rows) => rows,
+            Err(_) => {
+                return Some(view::error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Unable to query the vulnerabilities database.",
+                ));
             }
-        }
+        };
+        let total = rows.len() as u64;
         rows.sort_by(|a, b| {
             format!("{:?}", b.1.get("observed_at")).cmp(&format!("{:?}", a.1.get("observed_at")))
         });
@@ -569,25 +629,33 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 "Select between 1 and 500 vulnerability records.",
             ));
         }
+        if let Err(error) = reject_keyword_search(ctx) {
+            return Some(view::error(StatusCode::BAD_REQUEST, &error));
+        }
         let filter = match filter(ctx) {
             Ok(v) => v,
             Err(e) => return Some(view::error(StatusCode::BAD_REQUEST, &e)),
         };
-        let names = views(state)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|n| source(state, n) == "cve")
-            .collect::<Vec<_>>();
-        let mut rows = Vec::new();
-        for name in names {
-            if let Ok((_, documents)) = query_rows(state, &name, filter.clone(), 0, 2001).await {
-                for document in documents {
+        let vendor_product_filter = match required_vendor_product_filter(ctx) {
+            Ok(value) => value,
+            Err(error) => return Some(view::error(StatusCode::BAD_REQUEST, &error)),
+        };
+        let names = views(state).await.unwrap_or_default();
+        let mut rows = match filtered_rows(state, &names, filter, &vendor_product_filter).await {
+            Ok(documents) => documents
+                .into_iter()
+                .map(|(name, document)| {
                     let (selection_score, patch_priority, severity, cve_id) = score(&document);
-                    rows.push(json!({"collection":name,"selection_id":db::id_string(&document),"selection_score":selection_score,"patch_priority":patch_priority,"severity":severity,"cve_id":cve_id}));
-                }
+                    json!({"collection":name,"selection_id":db::id_string(&document),"selection_score":selection_score,"patch_priority":patch_priority,"severity":severity,"cve_id":cve_id})
+                })
+                .collect::<Vec<_>>(),
+            Err(_) => {
+                return Some(view::error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Unable to query the vulnerabilities database.",
+                ));
             }
-        }
+        };
         if rows.len() > 2000 {
             return Some(view::error(
                 StatusCode::BAD_REQUEST,
@@ -739,6 +807,29 @@ mod tests {
         .expect("valid custom scrape time");
         assert!(custom.get("observed_at").is_some());
         assert!(filter(&filter_context(vec![("time_window", "invalid")])).is_err());
+    }
+
+    #[test]
+    fn review_filter_rejects_keyword_search() {
+        assert!(reject_keyword_search(&filter_context(vec![("search", "openssl")])).is_err());
+    }
+
+    #[test]
+    fn review_search_requires_vendor_product_filter() {
+        let missing = filter_context(Vec::new());
+        assert!(required_vendor_product_filter(&missing).is_err());
+
+        let mut valid = filter_context(Vec::new());
+        valid.method = Method::POST;
+        valid.json = json!({
+            "vendor_product_filter": {
+                "enabled": true,
+                "schema_version": 1,
+                "include_possible_matches": false,
+                "rows": [{"vendor": "Acme", "product": "Widget", "vendor_aliases": [], "product_aliases": []}]
+            }
+        });
+        assert!(required_vendor_product_filter(&valid).is_ok());
     }
 
     #[test]
