@@ -163,7 +163,38 @@ pub async fn ensure_bootstrap(state: &AppState) -> Result<(), Box<dyn std::error
     valid_password(&state.cfg.bootstrap_password)?;
     let now = bson::DateTime::now();
     let hash = bcrypt::hash(&state.cfg.bootstrap_password, bcrypt::DEFAULT_COST)?;
-    coll.update_one(doc! {"username_key":key(username), "auth_source":"local"}, doc! {"$set":{"username":username,"username_key":key(username),"password":hash,"role":"admin","auth_source":"local","disabled":false,"must_change_password":false,"updated_at":now},"$setOnInsert":{"created_at":now}}).upsert(true).await?;
+    let target_filter = doc! {"username_key":key(username), "auth_source":"local"};
+    if let Some(existing) = coll.find_one(target_filter.clone()).await? {
+        coll.update_one(
+            doc! {"_id": existing.get_object_id("_id")?},
+            doc! {"$set":{"username":username,"username_key":key(username),"password":hash,"role":"admin","auth_source":"local","disabled":false,"must_change_password":false,"updated_at":now}},
+        )
+        .await?;
+    } else if let Some(existing) = coll
+        .find_one(doc! {"auth_source":"local","role":"admin"})
+        .await?
+    {
+        // Keep one break-glass administrator when its configured username is
+        // changed between deployments; do not create a second local admin.
+        coll.update_one(
+            doc! {"_id": existing.get_object_id("_id")?},
+            doc! {"$set":{"username":username,"username_key":key(username),"password":hash,"role":"admin","auth_source":"local","disabled":false,"must_change_password":false,"updated_at":now}},
+        )
+        .await?;
+    } else {
+        let mut account = doc! {
+            "username": username,
+            "username_key": key(username),
+            "password": hash,
+            "role": "admin",
+            "auth_source": "local",
+            "disabled": false,
+            "must_change_password": false,
+            "updated_at": now,
+            "created_at": now,
+        };
+        coll.insert_one(&mut account).await?;
+    }
     Ok(())
 }
 
