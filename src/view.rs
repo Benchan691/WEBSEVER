@@ -375,6 +375,41 @@ mod tests {
         assert!(html.contains("\"currentOrganization\":\"SW-ENG\""));
         assert!(!html.contains("id=\"delivery-mode\""));
     }
+
+    #[test]
+    fn subscription_notification_email_renders_details_and_profiles() {
+        let env = environment(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
+        let html = env
+            .get_template("subscriptions/notification_email.html")
+            .unwrap()
+            .render(json!({
+                "details": {
+                    "subject": "Security portal subscription updated",
+                    "heading": "Subscription updated",
+                    "badge": "Updated",
+                    "intro": "Your subscription settings were updated successfully.",
+                    "username": "member@example.com",
+                    "organization": "SW-ENG",
+                    "recipients": "member@example.com",
+                    "event_time": "2026-09-21 15:00 UTC",
+                    "footer": "Automated subscription notification from Security Portal."
+                },
+                "kind": "updated",
+                "changes": ["Newsletter feed: Enabled", "Report profile: Disabled"],
+                "cards": [
+                    {"name":"Newsletter feed","enabled":true,"status":"Enabled","summary_lines":["Collections: cve_review"]},
+                    {"name":"Report profile","enabled":false,"status":"Disabled","summary_lines":[]}
+                ]
+            }))
+            .unwrap();
+        assert!(html.contains("Subscription details"));
+        assert!(html.contains("Configuration summary"));
+        assert!(html.contains("Delivery profiles"));
+        assert!(html.contains("details-table"));
+        assert!(html.contains("member@example.com"));
+        assert!(html.contains("badge-updated"));
+    }
+
     #[test]
     fn report_templates_render() {
         let env = environment(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));

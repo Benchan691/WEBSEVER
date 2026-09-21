@@ -781,18 +781,158 @@ async fn notify(
     kind: &str,
     username: &str,
     organization: &str,
+    newsletter: &Value,
+    report: &Value,
 ) -> Result<(), String> {
-    let subject = match kind {
-        "created" => "Security portal subscription confirmed",
-        "updated" => "Security portal subscription updated",
-        _ => "Security portal subscription cancelled",
+    let (kind, subject, heading, badge, intro) = match kind {
+        "created" => (
+            "created",
+            "Security portal subscription confirmed",
+            "Subscription confirmed",
+            "Confirmed",
+            "Your Security Portal subscription has been created successfully.",
+        ),
+        "updated" => (
+            "updated",
+            "Security portal subscription updated",
+            "Subscription updated",
+            "Updated",
+            "Your Security Portal subscription settings were updated successfully.",
+        ),
+        _ => (
+            "cancelled",
+            "Security portal subscription cancelled",
+            "Subscription cancelled",
+            "Cancelled",
+            "Your Security Portal subscription was cancelled and scheduled deliveries will stop.",
+        ),
     };
-    let body = format!(
-        "<html><body><h2>{subject}</h2><p>Username: {}</p><p>Organization: {}</p></body></html>",
-        escape_html(username),
-        escape_html(organization)
-    );
+    let recipient_text = if emails.is_empty() {
+        "No recipients".to_owned()
+    } else {
+        emails
+            .iter()
+            .map(|email| escape_html(email))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let organization = if organization.trim().is_empty() {
+        "Not specified"
+    } else {
+        organization.trim()
+    };
+    let event_time = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
+    let newsletter_enabled = newsletter["enabled"].as_bool().unwrap_or(false);
+    let report_enabled = report["enabled"].as_bool().unwrap_or(false);
+    let changes = vec![
+        format!(
+            "Newsletter feed: {}",
+            if newsletter_enabled {
+                "Enabled"
+            } else {
+                "Disabled"
+            }
+        ),
+        format!(
+            "Report profile: {}",
+            if report_enabled {
+                "Enabled"
+            } else {
+                "Disabled"
+            }
+        ),
+        format!("Recipients: {recipient_text}"),
+    ];
+    let details = json!({
+        "subject": subject,
+        "heading": heading,
+        "badge": badge,
+        "intro": intro,
+        "username": escape_html(username.trim()),
+        "organization": escape_html(organization),
+        "recipients": recipient_text,
+        "event_time": event_time,
+        "footer": "Automated subscription notification from Security Portal.",
+    });
+    let cards = vec![
+        notification_profile_card("Newsletter feed", newsletter, true),
+        notification_profile_card("Report profile", report, false),
+    ];
+    let body = state
+        .templates
+        .get_template("subscriptions/notification_email.html")
+        .map_err(|error| error.to_string())?
+        .render(json!({
+            "details": details,
+            "kind": kind,
+            "changes": changes,
+            "cards": cards,
+        }))
+        .map_err(|error| error.to_string())?;
     mail::send(state, emails, "individual", subject, &body).await
+}
+
+fn notification_profile_card(name: &str, profile: &Value, newsletter: bool) -> Value {
+    let enabled = profile["enabled"].as_bool().unwrap_or(false);
+    let mut summary_lines = Vec::new();
+    let filters = &profile["filters"];
+    let collections = filters["collections"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(escape_html)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "No collections selected".to_owned());
+    summary_lines.push(format!("Collections: {collections}"));
+
+    if newsletter {
+        if profile["statistic_schedule_enabled"] == true {
+            summary_lines.push("Monthly delivery statistics: Enabled".to_owned());
+        } else {
+            summary_lines.push("Monthly delivery statistics: Disabled".to_owned());
+        }
+    } else {
+        let generation = match profile["generation_mode"].as_str().unwrap_or("template") {
+            "enriched_weekly" => "Enriched Weekly",
+            _ => "Fixed Template",
+        };
+        let language = match profile["report_language"].as_str().unwrap_or("en") {
+            "zh" => "Traditional Chinese",
+            "ch" => "Simplified Chinese",
+            _ => "English",
+        };
+        summary_lines.push(format!("Generation: {generation}"));
+        summary_lines.push(format!("Language: {language}"));
+        if profile["schedule_enabled"] == true {
+            let weekday = match profile["schedule_weekday"].as_str().unwrap_or("mon") {
+                "tue" => "Tuesday",
+                "wed" => "Wednesday",
+                "thu" => "Thursday",
+                "fri" => "Friday",
+                "sat" => "Saturday",
+                "sun" => "Sunday",
+                _ => "Monday",
+            };
+            let time = profile["schedule_time"].as_str().unwrap_or("09:00");
+            summary_lines.push(format!(
+                "Schedule: Every {weekday} at {} HKT",
+                escape_html(time)
+            ));
+        } else {
+            summary_lines.push("Schedule: Disabled".to_owned());
+        }
+    }
+    json!({
+        "name": name,
+        "enabled": enabled,
+        "status": if enabled { "Enabled" } else { "Disabled" },
+        "summary_lines": summary_lines,
+    })
 }
 async fn vendor_import(ctx: &ReqCtx) -> Response {
     let content_type = ctx
@@ -1376,6 +1516,8 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                             "created",
                             username.trim(),
                             &manager_organization,
+                            &newsletter,
+                            &report,
                         )
                         .await
                         .is_err()
@@ -1485,9 +1627,17 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 .await
             {
                 Ok(v) => {
-                    if notify(state, &emails, "created", &username, &organization)
-                        .await
-                        .is_err()
+                    if notify(
+                        state,
+                        &emails,
+                        "created",
+                        &username,
+                        &organization,
+                        &newsletter,
+                        &report,
+                    )
+                    .await
+                    .is_err()
                     {
                         view::error(
                             StatusCode::SERVICE_UNAVAILABLE,
@@ -1591,9 +1741,17 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             let organization = subscription_organization(&old);
             return Some(match coll.delete_one(doc! {"_id":id}).await {
                 Ok(_) => {
-                    if notify(state, &emails, "cancelled", username, organization)
-                        .await
-                        .is_err()
+                    if notify(
+                        state,
+                        &emails,
+                        "cancelled",
+                        username,
+                        organization,
+                        &old["newsletter_profile"],
+                        &old["report_profile"],
+                    )
+                    .await
+                    .is_err()
                     {
                         view::error(
                             StatusCode::SERVICE_UNAVAILABLE,
@@ -1897,9 +2055,17 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                             || ctx.json.get("organization").is_some()
                             || ctx.json.get("team").is_some();
                         if changed
-                            && notify(state, &emails, "updated", username, organization)
-                                .await
-                                .is_err()
+                            && notify(
+                                state,
+                                &emails,
+                                "updated",
+                                username,
+                                organization,
+                                &newsletter,
+                                &report,
+                            )
+                            .await
+                            .is_err()
                         {
                             view::error(
                                 StatusCode::SERVICE_UNAVAILABLE,

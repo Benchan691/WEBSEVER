@@ -5,39 +5,43 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ details.subject }}</title>
     <style>
-        body { margin: 0; padding: 0; background: #f5f3f8; color: #20242a; font-family: Arial, sans-serif; line-height: 1.5; }
-        .email-shell { width: 100%; background: #f5f3f8; padding: 32px 12px; }
-        .email-card { width: 100%; max-width: 640px; margin: 0 auto; background: #ffffff; border: 1px solid #e5e0eb; border-radius: 12px; overflow: hidden; }
-        .header { background: #45237b; color: #ffffff; padding: 28px 32px; }
-        .brand { margin: 0; font-size: 14px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
-        .title { margin: 10px 0 0; font-size: 28px; line-height: 1.25; }
-        .content { padding: 30px 32px; }
-        .badge { display: inline-block; margin: 0 0 16px; padding: 5px 10px; border-radius: 999px; color: #ffffff; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
-        .badge-confirmed { background: #16794b; }
-        .badge-updated { background: #6f42c1; }
-        .badge-cancelled { background: #b42318; }
-        .intro { margin: 0 0 24px; color: #4b5563; font-size: 16px; }
-        .section-title { margin: 28px 0 10px; color: #45237b; font-size: 17px; }
+        body { margin: 0; padding: 0; background: #eef1f6; color: #20242a; font-family: Arial, Helvetica, sans-serif; line-height: 1.5; }
+        .email-shell { width: 100%; background: #eef1f6; padding: 32px 12px; }
+        .email-card { width: 100%; max-width: 680px; margin: 0 auto; background: #ffffff; border: 1px solid #dce2eb; border-radius: 14px; overflow: hidden; box-shadow: 0 5px 18px rgba(23, 34, 52, 0.08); }
+        .header { background: linear-gradient(135deg, #172554 0%, #28458a 100%); color: #ffffff; padding: 30px 36px; }
+        .brand { margin: 0; font-size: 13px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; opacity: 0.9; }
+        .title { margin: 12px 0 0; font-size: 30px; line-height: 1.2; }
+        .content { padding: 32px 36px; }
+        .badge { display: inline-block; margin: 0 0 16px; padding: 6px 11px; border-radius: 999px; color: #ffffff; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+        .badge-confirmed { background: #11835b; }
+        .badge-updated { background: #5b46c9; }
+        .badge-cancelled { background: #c2413a; }
+        .intro { margin: 0 0 24px; color: #344054; font-size: 16px; }
+        .section-title { margin: 28px 0 12px; color: #172554; font-size: 17px; }
+        .details-table { width: 100%; border-collapse: separate; border-spacing: 0; border: 1px solid #dce2eb; border-radius: 10px; overflow: hidden; }
+        .details-table td { padding: 12px 14px; border-top: 1px solid #e8ecf2; vertical-align: top; font-size: 14px; }
+        .details-table tr:first-child td { border-top: 0; }
+        .details-label { width: 34%; color: #667085; font-weight: 700; background: #f8fafc; }
+        .details-value { color: #1d2939; word-break: break-word; }
         .changes { margin: 0; padding: 0; list-style: none; }
-        .changes li { margin: 0 0 8px; padding: 10px 12px; border-left: 3px solid #6f42c1; background: #faf8ff; }
-        .profile-card { margin: 12px 0; padding: 16px; border: 1px solid #ded6e8; border-radius: 8px; background: #fcfbfd; }
+        .changes li { margin: 0 0 8px; padding: 11px 13px; border-left: 3px solid #5b46c9; border-radius: 0 6px 6px 0; background: #f7f6ff; color: #344054; font-size: 14px; }
+        .profile-card { margin: 12px 0; padding: 17px; border: 1px solid #dce2eb; border-radius: 10px; background: #fbfcfe; }
         .profile-header { width: 100%; border-collapse: collapse; }
-        .profile-name { color: #2c164d; font-size: 16px; font-weight: 700; }
-        .profile-status { color: #475467; font-size: 13px; font-weight: 700; text-align: right; }
-        .profile-status.enabled { color: #16794b; }
+        .profile-name { color: #172554; font-size: 16px; font-weight: 700; }
+        .profile-status { color: #667085; font-size: 13px; font-weight: 700; text-align: right; }
+        .profile-status.enabled { color: #11835b; }
         .profile-lines { margin: 12px 0 0; padding-left: 18px; color: #475467; font-size: 14px; }
         .profile-lines li { margin-bottom: 5px; }
         .disabled-copy { margin: 12px 0 0; color: #667085; font-size: 14px; }
-        .button-wrap { margin: 28px 0 18px; }
-        .button { display: inline-block; padding: 12px 18px; background: #6f42c1; border-radius: 6px; color: #ffffff; font-weight: 700; text-decoration: none; }
-        .fallback-link { margin: 0; color: #667085; font-size: 12px; }
-        .fallback-link a { color: #5a32a3; }
-        .footer { padding: 20px 32px; border-top: 1px solid #e5e0eb; background: #fcfbfd; color: #667085; font-size: 12px; }
+        .cancelled-note { margin-top: 24px; padding: 14px 16px; border: 1px solid #f0c8c4; border-radius: 8px; background: #fff7f6; color: #8e211b; font-size: 14px; }
+        .event-time { margin: 22px 0 0; color: #667085; font-size: 12px; }
+        .footer { padding: 20px 36px; border-top: 1px solid #e1e6ee; background: #f8fafc; color: #667085; font-size: 12px; }
         @media only screen and (max-width: 600px) {
             .email-shell { padding: 0; }
             .email-card { border: 0; border-radius: 0; }
             .header, .content, .footer { padding-left: 20px; padding-right: 20px; }
             .title { font-size: 24px; }
+            .details-label { width: 38%; }
         }
     </style>
 </head>
@@ -51,12 +55,19 @@
             <div class="content">
                 <span class="badge badge-{{ kind }}">{{ details.badge }}</span>
                 <p class="intro">{{ details.intro }}</p>
+                <h2 class="section-title">Subscription details</h2>
+                <table class="details-table" role="presentation" cellpadding="0" cellspacing="0">
+                    <tr><td class="details-label">Subscriber</td><td class="details-value">{{ details.username }}</td></tr>
+                    <tr><td class="details-label">Organization</td><td class="details-value">{{ details.organization }}</td></tr>
+                    <tr><td class="details-label">Recipients</td><td class="details-value">{{ details.recipients }}</td></tr>
+                    <tr><td class="details-label">Event time</td><td class="details-value">{{ details.event_time }}</td></tr>
+                </table>
                 {% if changes %}
-                <h2 class="section-title">What changed</h2>
+                <h2 class="section-title">Configuration summary</h2>
                 <ul class="changes">{% for change in changes %}<li>{{ change }}</li>{% endfor %}</ul>
                 {% endif %}
                 {% if kind != 'cancelled' %}
-                <h2 class="section-title">Your subscription</h2>
+                <h2 class="section-title">Delivery profiles</h2>
                 {% for card in cards %}
                 <div class="profile-card">
                     <table class="profile-header" role="presentation"><tr>
@@ -70,11 +81,10 @@
                     {% endif %}
                 </div>
                 {% endfor %}
-                {% if cancellation_url %}
-                <div class="button-wrap"><a class="button" href="{{ cancellation_url }}">Manage or cancel subscription</a></div>
-                <p class="fallback-link">If the button does not work, copy this link into your browser: <a href="{{ cancellation_url }}">{{ cancellation_url }}</a></p>
+                {% else %}
+                <div class="cancelled-note">This subscription is no longer scheduled for newsletter or report delivery. You can create a new subscription from the Security Portal at any time.</div>
                 {% endif %}
-                {% endif %}
+                <p class="event-time">Keep this message for your records.</p>
             </div>
             <div class="footer">{{ details.footer }}</div>
         </td></tr></table>
