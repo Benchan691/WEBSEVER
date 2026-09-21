@@ -26,10 +26,18 @@
                 480
             );
             frame.style.height = contentHeight + 'px';
+            if (frame.parentElement) {
+                // Expanding the iframe must start the outer preview viewport
+                // at the greeting. Browser scroll anchoring can otherwise
+                // preserve the clicked table row and open in a blank-looking
+                // middle section of the email.
+                frame.parentElement.scrollTop = 0;
+            }
         } catch (error) {
             // A browser may keep a sandboxed document isolated. The fixed
             // minimum height still leaves the preview usable in that case.
             frame.style.height = '30rem';
+            if (frame.parentElement) frame.parentElement.scrollTop = 0;
         }
     }
 

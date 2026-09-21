@@ -57,6 +57,7 @@
 .review-email-preview-scroll {
     max-height: min(70vh, 52rem);
     overflow: auto;
+    overflow-anchor: none;
     padding: 1rem;
     background: var(--bs-tertiary-bg);
 }
