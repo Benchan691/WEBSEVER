@@ -686,8 +686,6 @@
     }
     function renderSubscriptionRows() {
         rows.replaceChildren(); document.getElementById('empty').classList.toggle('d-none', subscriptions.length !== 0);
-        const addButton = document.getElementById('add-btn');
-        if (addButton && selfManagement) addButton.classList.toggle('d-none', subscriptions.length !== 0);
         subscriptions.forEach(function (item) {
             const tr = document.createElement('tr');
             tr.innerHTML = '<td><strong></strong><div class="text-muted small recipients"></div><div class="text-muted small organization"></div></td><td></td><td></td><td></td>';
@@ -736,6 +734,26 @@
             const actions = document.createElement('div'); actions.className = 'd-flex flex-wrap gap-1';
             actions.innerHTML = '<button class="btn btn-outline-primary btn-sm edit" type="button">' + t('Edit') + '</button>';
             actions.querySelector('.edit').onclick = function () { openEditor(item); };
+            if (selfManagement && !item.auto_provisioned) {
+                const remove = document.createElement('button');
+                remove.className = 'btn btn-outline-danger btn-sm';
+                remove.type = 'button';
+                remove.textContent = t('Delete');
+                remove.onclick = function () {
+                    if (!window.confirm(t('Delete subscription?'))) return;
+                    remove.disabled = true;
+                    requestJson(apiUrl(item.id), {method: 'DELETE'})
+                        .then(function () {
+                            showMessage(t('Subscription deleted.'), 'success');
+                            return load();
+                        })
+                        .catch(function (error) {
+                            remove.disabled = false;
+                            showMessage(error.message, 'danger');
+                        });
+                };
+                actions.append(remove);
+            }
             tr.children[3].append(actions); rows.append(tr);
         });
     }

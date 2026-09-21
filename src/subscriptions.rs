@@ -305,6 +305,7 @@ fn default_zimbra_subscription_document(
         "organization": db::string(user, "organization"),
         "delivery_mode": "individual",
         "local_subscription": false,
+        "auto_provisioned": true,
         "newsletter_profile": db::json_doc(&default_profile("newsletter")).unwrap_or_default(),
         "report_profile": db::json_doc(&default_profile("report")).unwrap_or_default(),
         "created_at": now,
@@ -339,7 +340,7 @@ pub async fn ensure_zimbra_subscription(state: &AppState, user: &Document) -> Re
         "updated_at": now,
     };
     if let Some(existing) = coll
-        .find_one(doc! {"owner_user_id": owner_id})
+        .find_one(doc! {"owner_user_id": owner_id, "auto_provisioned": true})
         .await
         .map_err(|_| "Unable to load the Zimbra subscription.".to_owned())?
     {
@@ -358,6 +359,7 @@ pub async fn ensure_zimbra_subscription(state: &AppState, user: &Document) -> Re
     if let Some(existing) = coll
         .find_one(doc! {
             "local_subscription": {"$ne": true},
+            "$or": [{"owner_user_id": {"$exists": false}}, {"owner_user_id": Bson::Null}],
             "zimbra_email": {"$regex": zimbra_pattern, "$options": "i"},
         })
         .await
@@ -1127,6 +1129,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 "email": &emails[0],
                 "organization": manager_organization.clone(),
                 "delivery_mode": "individual",
+                "auto_provisioned": false,
                 "newsletter_profile": db::json_doc(&newsletter).unwrap(),
                 "report_profile": db::json_doc(&report).unwrap(),
                 "created_at": now,
@@ -1217,7 +1220,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             }
         }
         let existing=db::find_one(&state.web,"sub_account",doc!{"username":{"$regex":format!("^{}$",regex::escape(username.trim())),"$options":"i"}}).await.ok().flatten();
-        if existing.is_some() {
+        if existing.is_some() && !self_only {
             return json_error(
                 StatusCode::CONFLICT,
                 "A subscription already exists for this username.",
@@ -1247,7 +1250,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             );
         };
         let now = bson::DateTime::now();
-        let mut document = doc! {"owner_user_id":owner_id,"managed_by_user_id":ctx.user_id().unwrap(),"username":username.trim(),"emails":emails.clone(),"email":&emails[0],"organization":organization.trim(),"delivery_mode":mode,"newsletter_profile":db::json_doc(&newsletter).unwrap(),"report_profile":db::json_doc(&report).unwrap(),"created_at":now,"updated_at":now};
+        let mut document = doc! {"owner_user_id":owner_id,"managed_by_user_id":ctx.user_id().unwrap(),"username":username.trim(),"emails":emails.clone(),"email":&emails[0],"organization":organization.trim(),"delivery_mode":mode,"auto_provisioned":false,"newsletter_profile":db::json_doc(&newsletter).unwrap(),"report_profile":db::json_doc(&report).unwrap(),"created_at":now,"updated_at":now};
         if let Some(email) = owner_zimbra_email {
             document.insert("zimbra_email", email);
         }
@@ -1344,6 +1347,12 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             );
         }
         if action.is_empty() && ctx.method == Method::DELETE {
+            if is_self_manager(state, ctx) && db::bool_field(&existing, "auto_provisioned") {
+                return json_error(
+                    StatusCode::FORBIDDEN,
+                    "The automatic Zimbra subscription cannot be deleted.",
+                );
+            }
             if ctx.is_organization_admin(state) && !db::bool_field(&existing, "local_subscription")
             {
                 return json_error(

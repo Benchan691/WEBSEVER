@@ -23,7 +23,7 @@ After a successful Zimbra `AuthRequest`, the service ensures the configured `new
 
 ## Subscriptions
 
-Each Zimbra account receives one owner-scoped `sub_account` record when it first signs in (and existing accounts are backfilled at startup). Its newsletter and report profiles start disabled, so the user can enable and configure delivery without waiting for a separate subscription record. Zimbra users can view and manage only their own record and their recipient is fixed to their Zimbra email. The local administrator can manage every subscription and may enter multiple external recipients. New delivery history includes `subscription_id`, so records from older deployments cannot suppress delivery for a new subscription.
+Each Zimbra account receives one protected, owner-scoped `sub_account` record when it first signs in (and existing accounts are backfilled at startup). Its newsletter and report profiles start disabled, so the user can enable and configure delivery without waiting for a separate subscription record. Zimbra users can add more subscriptions and view or manage only their own records; the automatic record cannot be deleted by the Zimbra user, while user-created records can be deleted. Recipients on Zimbra-owned records remain fixed to the Zimbra email. The local administrator can manage every subscription and may enter multiple external recipients. New delivery history includes `subscription_id`, so records from older deployments cannot suppress delivery for a new subscription.
 
 The scheduler is disabled by default. Enable it only after direct Zimbra delivery and SMTP fallback have been tested:
 
