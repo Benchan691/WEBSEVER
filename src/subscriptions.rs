@@ -199,31 +199,12 @@ fn organization_name(user: &Document) -> String {
     db::string(user, "zimbra_organization").trim().to_owned()
 }
 
-fn organization_id(user: &Document) -> String {
-    db::string(user, "zimbra_organization_id").trim().to_owned()
-}
-
-fn same_organization_name(left: &str, right: &str) -> bool {
-    !left.trim().is_empty() && left.trim().eq_ignore_ascii_case(right.trim())
-}
-
 fn local_subscription_scope(ctx: &ReqCtx) -> Option<Document> {
     let manager_id = ctx.user_id()?;
-    let manager = ctx.user.as_ref()?;
-    let mut filter = doc! {
+    Some(doc! {
         "local_subscription": true,
         "managed_by_user_id": manager_id,
-    };
-    let organization_id = organization_id(manager);
-    if !organization_id.is_empty() {
-        filter.insert("organization_id", organization_id);
-    } else {
-        let organization = organization_name(manager);
-        if !organization.is_empty() {
-            filter.insert("organization", organization);
-        }
-    }
-    Some(filter)
+    })
 }
 async fn organization_members(state: &AppState, ctx: &ReqCtx) -> Option<Vec<Document>> {
     let manager = ctx.user.as_ref()?;
@@ -1450,22 +1431,19 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             let Some(manager) = ctx.user.as_ref() else {
                 return json_error(StatusCode::UNAUTHORIZED, "Authentication required.");
             };
-            let manager_organization = {
+            // Local subscriptions are owned by the account that creates them.
+            // Keep the organization as optional display metadata only; it is
+            // not used to authorize or scope the subscription.
+            let local_organization = if organization.trim().is_empty() {
                 let value = organization_name(manager);
                 if value.is_empty() {
                     "local".to_owned()
                 } else {
                     value
                 }
+            } else {
+                organization.trim().to_owned()
             };
-            if !organization.trim().is_empty()
-                && !same_organization_name(&organization, &manager_organization)
-            {
-                return json_error(
-                    StatusCode::FORBIDDEN,
-                    "Local subscriptions must belong to your organization.",
-                );
-            }
             let existing = db::find_one(
                 &state.web,
                 "sub_account",
@@ -1486,13 +1464,13 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 );
             }
             let now = bson::DateTime::now();
-            let mut document = doc! {
+            let document = doc! {
                 "managed_by_user_id": ctx.user_id().unwrap(),
                 "local_subscription": true,
                 "username": username.trim(),
                 "emails": emails.clone(),
                 "email": &emails[0],
-                "organization": manager_organization.clone(),
+                "organization": &local_organization,
                 "delivery_mode": "individual",
                 "auto_provisioned": false,
                 "newsletter_profile": db::json_doc(&newsletter).unwrap(),
@@ -1500,10 +1478,6 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 "created_at": now,
                 "updated_at": now,
             };
-            let manager_organization_id = organization_id(manager);
-            if !manager_organization_id.is_empty() {
-                document.insert("organization_id", manager_organization_id);
-            }
             return Some(
                 match db::collection(&state.web, "sub_account")
                     .insert_one(document)
@@ -1515,7 +1489,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                             &emails,
                             "created",
                             username.trim(),
-                            &manager_organization,
+                            &local_organization,
                             &newsletter,
                             &report,
                         )
@@ -1852,33 +1826,6 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                     .unwrap_or_default();
                 data["organization"] = json!(current_organization);
             }
-            if local_subscription {
-                let Some(manager) = ctx.user.as_ref() else {
-                    return json_error(StatusCode::UNAUTHORIZED, "Authentication required.");
-                };
-                let manager_organization = {
-                    let value = organization_name(manager);
-                    if value.is_empty() {
-                        "local".to_owned()
-                    } else {
-                        value
-                    }
-                };
-                let submitted_organization = data
-                    .get("organization")
-                    .and_then(Value::as_str)
-                    .or_else(|| data.get("team").and_then(Value::as_str))
-                    .unwrap_or("");
-                if !submitted_organization.trim().is_empty()
-                    && !same_organization_name(submitted_organization, &manager_organization)
-                {
-                    return json_error(
-                        StatusCode::FORBIDDEN,
-                        "Local subscriptions must belong to your organization.",
-                    );
-                }
-                data["organization"] = json!(manager_organization);
-            }
             let mut emails = match recipients(&data) {
                 Ok(v) => v,
                 Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
@@ -1893,7 +1840,9 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             };
             let username = data["username"].as_str().unwrap_or("").trim();
             let organization = data["organization"].as_str().unwrap_or("").trim();
-            if username.is_empty() || (!is_self_manager(state, ctx) && organization.is_empty()) {
+            if username.is_empty()
+                || (!local_subscription && !is_self_manager(state, ctx) && organization.is_empty())
+            {
                 return json_error(
                     StatusCode::BAD_REQUEST,
                     "Username and organization are required.",
@@ -2029,13 +1978,9 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             if local_subscription {
                 update.insert("local_subscription", true);
                 update.insert("managed_by_user_id", ctx.user_id().unwrap());
-                let manager_organization_id =
-                    ctx.user.as_ref().map(organization_id).unwrap_or_default();
-                if manager_organization_id.is_empty() {
-                    unset.insert("organization_id", "");
-                } else {
-                    update.insert("organization_id", manager_organization_id);
-                }
+                // Ownership is the creator account. An organization value is
+                // optional display metadata and must never restrict access.
+                unset.insert("organization_id", "");
                 unset.insert("owner_user_id", "");
                 unset.insert("zimbra_email", "");
             } else if current_owner_hub_email.is_none() && !identity_change {
@@ -2211,7 +2156,7 @@ mod tests {
     }
 
     #[test]
-    fn zimbra_users_scope_local_subscriptions_to_their_manager_id() {
+    fn local_subscriptions_scope_only_to_their_creator() {
         let manager_id = ObjectId::new();
         let ctx = ReqCtx {
             method: Method::GET,
@@ -2225,12 +2170,16 @@ mod tests {
                 "_id": manager_id,
                 "username": "member@example.com",
                 "auth_source": "zimbra",
+                "zimbra_organization": "SW-ENG",
+                "zimbra_organization_id": "organization-a",
             }),
         };
         assert!(is_zimbra_user(&ctx));
         let scope = local_subscription_scope(&ctx).expect("manager scope");
         assert_eq!(scope.get_bool("local_subscription"), Ok(true));
         assert_eq!(scope.get_object_id("managed_by_user_id"), Ok(manager_id));
+        assert!(scope.get("organization").is_none());
+        assert!(scope.get("organization_id").is_none());
         assert!(owns_local_subscription(
             &ctx,
             &doc! {"managed_by_user_id": manager_id}
