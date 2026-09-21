@@ -88,10 +88,11 @@ fn soap(body: &str) -> String {
     )
 }
 fn soap_context(body: &str, token: &str) -> String {
-    soap(&format!(
-        r#"<context xmlns="urn:zimbra"><authToken>{}</authToken></context>{body}"#,
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"><soap:Header><context xmlns="urn:zimbra"><authToken>{}</authToken></context></soap:Header><soap:Body>{body}</soap:Body></soap:Envelope>"#,
         xml_escape(token)
-    ))
+    )
 }
 fn token_from_xml(xml: &str) -> Option<String> {
     Regex::new(r#"(?is)<(?:\w+:)?authToken[^>]*>([^<]+)</(?:\w+:)?authToken>"#)
@@ -284,5 +285,12 @@ mod tests {
             folder_from_xml("<folder name=\"news\" id=\"42\">", "news"),
             Some(("42".into(), "news".into()))
         );
+        let request = soap_context("<GetFolderRequest xmlns=\"urn:zimbraMail\"/>", "token");
+        assert!(
+            request.contains(
+                "<soap:Header><context xmlns=\"urn:zimbra\"><authToken>token</authToken>"
+            )
+        );
+        assert!(request.contains("<soap:Body><GetFolderRequest"));
     }
 }
