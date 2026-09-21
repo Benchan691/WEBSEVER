@@ -1,5 +1,6 @@
 {% extends 'layouts/base.html' %}
 {% block title %}{{ collection_name }}{% endblock %}
+{% block styles %}<link href="{{ url_for('static', filename='css/reviews.css') }}" rel="stylesheet">{% endblock %}
 
 {% block content %}
 <div class="container-fluid px-3 px-lg-4">
@@ -13,7 +14,7 @@
     <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
         <div>
             <h2 class="mb-1"><i class="bi bi-database me-2"></i>{{ collection_name }}</h2>
-            <p class="text-muted mb-0">{{ t('Click View to inspect the complete MongoDB document.') }}</p>
+            <p class="text-muted mb-0">{{ t('Click View to preview the rendered email.') }}</p>
         </div>
         <div class="d-flex align-items-center gap-2">
             <span id="selected-count" class="badge text-bg-primary"></span>
@@ -119,8 +120,12 @@
                 <h5 class="modal-title" id="detail-modal-title">{{ t('Document Detail') }}</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{ t('Close') }}"></button>
             </div>
-            <div class="modal-body bg-dark">
-                <pre id="detail-json" class="text-light mb-0" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+            <div class="modal-body p-0">
+                <div id="detail-preview-loading" class="text-center text-muted py-5" role="status">
+                    <div class="spinner-border spinner-border-sm me-2" aria-hidden="true"></div>{{ t('Loading email preview...') }}
+                </div>
+                <div id="detail-preview-error" class="alert alert-danger m-3 d-none" role="alert"></div>
+                <iframe id="detail-email-frame" class="review-email-preview-frame d-none" title="{{ t('Rendered email preview') }}" sandbox=""></iframe>
             </div>
         </div>
     </div>
@@ -132,5 +137,6 @@
     'collectionName': collection_name,
     'apiUrl': url_for('review.get_review_documents', collection_name=collection_name),
 }|tojson }}</script>
-<script src="{{ url_for('static', filename='js/reviews/collection.js') }}"></script>
+<script src="{{ url_for('static', filename='js/reviews/email-preview.js', v='20260921-1') }}"></script>
+<script src="{{ url_for('static', filename='js/reviews/collection.js', v='20260921-1') }}"></script>
 {% endblock %}

@@ -54,6 +54,14 @@
 .review-results-table { min-width: 900px; }
 .review-results-table { table-layout: fixed; }
 
+.review-email-preview-frame {
+    width: 100%;
+    height: 70vh;
+    min-height: 30rem;
+    border: 0;
+    background: #fff;
+}
+
 .truncate-cell {
     max-width: 1px;
     overflow: hidden;

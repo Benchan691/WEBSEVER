@@ -14,7 +14,9 @@
     const previous = document.getElementById('previous-btn');
     const next = document.getElementById('next-btn');
     const modal = new bootstrap.Modal(document.getElementById('detail-modal'));
-    const detailJson = document.getElementById('detail-json');
+    const detailEmailFrame = document.getElementById('detail-email-frame');
+    const detailPreviewLoading = document.getElementById('detail-preview-loading');
+    const detailPreviewError = document.getElementById('detail-preview-error');
     const detailTitle = document.getElementById('detail-modal-title');
     const selectedCount = document.getElementById('selected-count');
     const clearSelection = document.getElementById('clear-selection-btn');
@@ -163,10 +165,20 @@
     rows.addEventListener('click', function (event) {
         const button = event.target.closest('button[data-index]');
         if (!button) return;
-        const document = currentDocuments[Number(button.dataset.index)].document;
+        const item = currentDocuments[Number(button.dataset.index)];
+        const document = item.document;
         detailTitle.textContent = document.code || document.cve || document.title || t('Document Detail');
-        detailJson.textContent = JSON.stringify(document, null, 2);
+        loadReviewEmailPreview({
+            frame: detailEmailFrame,
+            loading: detailPreviewLoading,
+            error: detailPreviewError,
+            url: item.preview_url,
+        });
         modal.show();
+    });
+
+    document.getElementById('detail-modal').addEventListener('hidden.bs.modal', function () {
+        clearReviewEmailPreview(detailEmailFrame, detailPreviewLoading, detailPreviewError);
     });
 
     rows.addEventListener('change', function (event) {

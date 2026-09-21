@@ -104,9 +104,11 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         if ctx.method == Method::GET {
             if let Some((source, tail)) = rest.split_once('/') {
                 if let Some(id) = tail.strip_suffix("/preview") {
+                    let decoded_source = urlencoding::decode(source)
+                        .unwrap_or_else(|_| std::borrow::Cow::Borrowed(source));
                     let decoded =
                         urlencoding::decode(id).unwrap_or_else(|_| std::borrow::Cow::Borrowed(id));
-                    return Some(preview(state, ctx, source, &decoded, None).await);
+                    return Some(preview(state, ctx, &decoded_source, &decoded, None).await);
                 }
             }
         }

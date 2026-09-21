@@ -212,6 +212,15 @@ mod tests {
         assert!(reviews_html.contains("href=\"&#x2f;reviews\""));
         assert!(reviews_html.contains("filter-vendor-product-file"));
         assert!(!reviews_html.contains("filter-search"));
+        assert!(reviews_html.contains("document-email-frame"));
+        assert!(!reviews_html.contains("document-json"));
+        let collection_html = env
+            .get_template("reviews/collection.html")
+            .unwrap()
+            .render(context.clone())
+            .unwrap();
+        assert!(collection_html.contains("detail-email-frame"));
+        assert!(!collection_html.contains("detail-json"));
         let translated = env
             .render_str("{{ t('{n} per page', n=25) }}", json!({"locale":"en"}))
             .unwrap();
@@ -356,6 +365,7 @@ mod tests {
         assert!(html.contains("管理您的订阅。"));
         assert!(!html.contains("您只能管理自己的订阅。"));
         assert!(html.contains("id=\"add-btn\""));
+        assert!(html.contains("添加本地订阅"));
         assert!(html.contains("for=\"organization\""));
         assert!(!html.contains("团队"));
         assert!(html.contains("\"selfManagement\":true"));

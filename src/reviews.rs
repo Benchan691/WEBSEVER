@@ -48,7 +48,11 @@ pub async fn resolve(state: &AppState, source_name: &str, id: &str) -> Option<Do
     if id.trim().is_empty() {
         return None;
     }
-    db::find_one(&state.vuln, source_name, doc! {"_id": id})
+    if let Ok(Some(document)) = db::find_one(&state.vuln, source_name, doc! {"_id": id}).await {
+        return Some(document);
+    }
+    let object_id = db::object_id(id)?;
+    db::find_one(&state.vuln, source_name, doc! {"_id": object_id})
         .await
         .ok()
         .flatten()
@@ -435,10 +439,19 @@ fn normalized_document(document: &Document) -> Value {
     data
 }
 
-fn response_row(name: &str, document: &Document) -> Value {
+fn preview_url(source_name: &str, id: &str) -> String {
+    format!(
+        "/generated-newsletters/{}/{}/preview",
+        urlencoding::encode(source_name),
+        urlencoding::encode(id)
+    )
+}
+
+fn response_row(name: &str, source_name: &str, document: &Document) -> Value {
     let data = normalized_document(document);
+    let selection_id = db::id_string(document);
     let (selection_score, patch_priority, _, _) = score(document);
-    json!({"collection":name,"selection_id":db::id_string(document),"document":data,"selection_score":selection_score,"patch_priority":patch_priority})
+    json!({"collection":name,"source":source_name,"preview_url":preview_url(source_name, &selection_id),"selection_id":selection_id,"document":data,"selection_score":selection_score,"patch_priority":patch_priority})
 }
 pub(crate) async fn query_rows(
     state: &AppState,
@@ -614,7 +627,10 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             .into_iter()
             .skip(offset as usize)
             .take(size as usize)
-            .map(|(name, document)| response_row(&name, &document))
+            .map(|(name, document)| {
+                let source_name = source(state, &name);
+                response_row(&name, source_name, &document)
+            })
             .collect();
         return Some(view::json_response(
             StatusCode::OK,
@@ -761,7 +777,11 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 match query_rows(state, name, filter, (page - 1) * size, size as i64).await {
                     Ok((total, documents)) => view::json_response(
                         StatusCode::OK,
-                        json!({"data":documents.iter().map(|d|json!({"selection_id":db::id_string(d),"document":normalized_document(d)})).collect::<Vec<_>>(),"page":page,"page_size":size,"total":total,"pages":((total+size-1)/size).max(1)}),
+                        json!({"data":documents.iter().map(|d| {
+                            let selection_id = db::id_string(d);
+                            let source_name = source(state, name);
+                            json!({"collection":name,"source":source_name,"preview_url":preview_url(source_name, &selection_id),"selection_id":selection_id,"document":normalized_document(d)})
+                        }).collect::<Vec<_>>(),"page":page,"page_size":size,"total":total,"pages":((total+size-1)/size).max(1)}),
                     ),
                     Err(_) => view::error(
                         StatusCode::SERVICE_UNAVAILABLE,
@@ -871,5 +891,13 @@ mod tests {
         assert_eq!(normalized["affected"], json!(["View vendor View product"]));
         assert_eq!(normalized["vendor"], "View vendor");
         assert_eq!(normalized["product"], "View product");
+    }
+
+    #[test]
+    fn rendered_preview_url_encodes_source_and_identifier() {
+        assert_eq!(
+            preview_url("f5 advisory", "cve/2026-1234"),
+            "/generated-newsletters/f5%20advisory/cve%2F2026-1234/preview"
+        );
     }
 }

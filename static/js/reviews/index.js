@@ -35,7 +35,9 @@
     const includePossibleMatches = document.getElementById('filter-include-possible-matches');
     const documentModal = bootstrap.Modal.getOrCreateInstance(document.getElementById('document-modal'));
     const documentModalTitle = document.getElementById('document-modal-title');
-    const documentJson = document.getElementById('document-json');
+    const documentEmailFrame = document.getElementById('document-email-frame');
+    const documentPreviewLoading = document.getElementById('document-preview-loading');
+    const documentPreviewError = document.getElementById('document-preview-error');
     const relatedModal = bootstrap.Modal.getOrCreateInstance(document.getElementById('related-modal'));
     const relatedModalTitle = document.getElementById('related-modal-title');
     const relatedCount = document.getElementById('related-count');
@@ -345,10 +347,15 @@
         row.append(cell);
     }
 
-    function showDocument(title, reviewDocument, options) {
+    function showDocument(title, item, options) {
         options = options || {};
         documentModalTitle.textContent = title;
-        documentJson.textContent = JSON.stringify(reviewDocument || {}, null, 2);
+        loadReviewEmailPreview({
+            frame: documentEmailFrame,
+            loading: documentPreviewLoading,
+            error: documentPreviewError,
+            url: item && item.preview_url,
+        });
 
         if (options.fromRelatedModal && relatedModalElement.classList.contains('show')) {
             restoreRelatedModalAfterDocument = true;
@@ -406,7 +413,7 @@
             viewButton.className = 'btn btn-outline-primary btn-sm';
             viewButton.innerHTML = '<i class="bi bi-eye me-1"></i>' + t('View');
             viewButton.addEventListener('click', function () {
-                showDocument(relatedItem.collection + ' ' + t('Document'), relatedItem.document, { fromRelatedModal: true });
+                showDocument(relatedItem.collection + ' ' + t('Document'), relatedItem, { fromRelatedModal: true });
             });
             actionCell.append(viewButton);
             row.append(actionCell);
@@ -483,7 +490,7 @@
             viewButton.className = 'btn btn-outline-primary btn-sm';
             viewButton.innerHTML = '<i class="bi bi-eye me-1"></i>' + t('View');
             viewButton.addEventListener('click', function () {
-                showDocument(item.collection + ' ' + t('Document'), projectedDocument);
+                showDocument(item.collection + ' ' + t('Document'), item);
             });
             actionCell.append(viewButton);
             row.append(actionCell);
@@ -502,6 +509,14 @@
         previousPage.disabled = currentPage <= 1;
         nextPage.disabled = currentPage >= totalPages;
     }
+
+    documentModalElement.addEventListener('hidden.bs.modal', function () {
+        clearReviewEmailPreview(documentEmailFrame, documentPreviewLoading, documentPreviewError);
+        if (restoreRelatedModalAfterDocument) {
+            restoreRelatedModalAfterDocument = false;
+            relatedModal.show();
+        }
+    });
 
     function runSearch(page) {
         if (!ensureVendorProductFilter()) return;
@@ -565,14 +580,6 @@
     relatedClear.addEventListener('click', function () {
         updateRelatedSelections(currentRelated, false);
     });
-    documentModalElement.addEventListener('hidden.bs.modal', function () {
-        if (!restoreRelatedModalAfterDocument || !currentRelated.length) {
-            return;
-        }
-        restoreRelatedModalAfterDocument = false;
-        relatedModal.show();
-    });
-
     function buildAutoSelectPayload() {
         const payload = buildFilterPayload();
         const count = parseInt(autoSelectCount.value, 10);

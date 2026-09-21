@@ -257,6 +257,22 @@ fn can_manage_subscriptions(state: &AppState, ctx: &ReqCtx) -> bool {
     ctx.is_admin(state) || ctx.is_organization_admin(state)
 }
 
+fn is_zimbra_user(ctx: &ReqCtx) -> bool {
+    ctx.user
+        .as_ref()
+        .is_some_and(|user| db::string(user, "auth_source") == "zimbra")
+}
+
+fn can_create_local_subscription(state: &AppState, ctx: &ReqCtx) -> bool {
+    ctx.is_top_admin(state) || ctx.is_organization_admin(state) || is_zimbra_user(ctx)
+}
+
+fn owns_local_subscription(ctx: &ReqCtx, subscription: &Document) -> bool {
+    ctx.user_id().is_some_and(|user_id| {
+        subscription.get_object_id("managed_by_user_id").ok() == Some(user_id)
+    })
+}
+
 fn is_self_manager(state: &AppState, ctx: &ReqCtx) -> bool {
     ctx.user.is_some() && !can_manage_subscriptions(state, ctx)
 }
@@ -599,7 +615,16 @@ async fn subscription_filter(state: &AppState, ctx: &ReqCtx, id: Option<&str>) -
     } else if ctx.is_admin(state) {
         doc! {"managed_by_user_id":ctx.user_id()?}
     } else {
-        self_subscription_owner_filter(ctx)?
+        let owner_filter = self_subscription_owner_filter(ctx)?;
+        if is_zimbra_user(ctx) {
+            let mut scopes = vec![Bson::Document(owner_filter)];
+            if let Some(local_scope) = local_subscription_scope(ctx) {
+                scopes.push(Bson::Document(local_scope));
+            }
+            doc! {"$or":scopes}
+        } else {
+            owner_filter
+        }
     };
     if let Some(id) = id {
         if id.is_empty() {
@@ -1131,19 +1156,19 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         ));
     }
     if ctx.path == "/api/subscriptions" && ctx.method == Method::POST {
-        let self_only = is_self_manager(state, ctx);
         let local_subscription = ctx
             .json
             .get("local_subscription")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        if local_subscription && !ctx.is_top_admin(state) {
+        let self_only = is_self_manager(state, ctx) && !local_subscription;
+        if local_subscription && !can_create_local_subscription(state, ctx) {
             return json_error(
                 StatusCode::FORBIDDEN,
-                "Only the local administrator can create local subscriptions.",
+                "Only an administrator or Zimbra user can create local subscriptions.",
             );
         }
-        if !can_manage_subscriptions(state, ctx) && !self_only {
+        if !can_manage_subscriptions(state, ctx) && !self_only && !local_subscription {
             return json_error(
                 StatusCode::FORBIDDEN,
                 "You can only manage your own subscription.",
@@ -1592,13 +1617,17 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                     "Zimbra subscriptions cannot be converted to local subscriptions.",
                 );
             }
-            if local_subscription && !ctx.is_top_admin(state) {
+            if local_subscription
+                && !ctx.is_top_admin(state)
+                && !owns_local_subscription(ctx, &existing)
+            {
                 return json_error(
                     StatusCode::FORBIDDEN,
-                    "Only the organization administrator who created this subscription can edit it.",
+                    "Only the administrator or Zimbra user who created this subscription can edit it.",
                 );
             }
             if !can_manage_subscriptions(state, ctx)
+                && !local_subscription
                 && ["username", "emails", "email", "password"]
                     .iter()
                     .any(|key| ctx.json.get(*key).is_some())
@@ -1651,7 +1680,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             {
                 data["organization"] = json!(organization);
             }
-            if is_self_manager(state, ctx) {
+            if is_self_manager(state, ctx) && !local_subscription {
                 let current_organization = ctx
                     .user
                     .as_ref()
@@ -1733,7 +1762,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 }
                 emails = vec![zimbra_email.clone()];
             }
-            if is_self_manager(state, ctx) {
+            if is_self_manager(state, ctx) && !local_subscription {
                 let Some(owner_id) = ctx.user_id() else {
                     return json_error(StatusCode::UNAUTHORIZED, "Authentication required.");
                 };
@@ -2000,6 +2029,37 @@ mod tests {
         };
         let filter = self_subscription_owner_filter(&ctx).unwrap();
         assert_eq!(filter.get_object_id("owner_user_id").unwrap(), owner_id);
+    }
+
+    #[test]
+    fn zimbra_users_scope_local_subscriptions_to_their_manager_id() {
+        let manager_id = ObjectId::new();
+        let ctx = ReqCtx {
+            method: Method::GET,
+            path: "/api/subscriptions".into(),
+            query: Vec::new(),
+            headers: axum::http::HeaderMap::new(),
+            body: Vec::new(),
+            json: Value::Null,
+            form: std::collections::HashMap::new(),
+            user: Some(doc! {
+                "_id": manager_id,
+                "username": "member@example.com",
+                "auth_source": "zimbra",
+            }),
+        };
+        assert!(is_zimbra_user(&ctx));
+        let scope = local_subscription_scope(&ctx).expect("manager scope");
+        assert_eq!(scope.get_bool("local_subscription"), Ok(true));
+        assert_eq!(scope.get_object_id("managed_by_user_id"), Ok(manager_id));
+        assert!(owns_local_subscription(
+            &ctx,
+            &doc! {"managed_by_user_id": manager_id}
+        ));
+        assert!(!owns_local_subscription(
+            &ctx,
+            &doc! {"managed_by_user_id": ObjectId::new()}
+        ));
     }
 
     #[test]

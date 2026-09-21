@@ -134,6 +134,7 @@
         const list = document.getElementById('recipient-list');
         list.replaceChildren();
         const values = Array.isArray(emails) && emails.length ? emails : [''];
+        const canEditRecipients = isAdmin || editorLocalSubscription;
         values.forEach(function (email) {
             const row = document.createElement('div');
             row.className = 'input-group';
@@ -143,10 +144,10 @@
             input.placeholder = t('recipient@example.com');
             input.value = email || '';
             input.required = true;
-            input.readOnly = locked || !isAdmin;
+            input.readOnly = locked || !canEditRecipients;
             input.setAttribute('aria-label', t('Email recipient'));
             row.append(input);
-            if (isAdmin && !locked) {
+            if (canEditRecipients && !locked) {
                 const remove = document.createElement('button');
                 remove.type = 'button';
                 remove.className = 'btn btn-outline-danger remove-recipient';
@@ -618,7 +619,15 @@
     }
     function openEditor(subscription) {
         const defaultEmail = accountHubUser ? currentAccountHubEmail : currentEmail;
-        if (!subscription && selfManagement) {
+        if (!subscription && accountHubUser) {
+            subscription = {
+                local_subscription: true,
+                username: '',
+                email: '',
+                emails: [''],
+                organization: currentOrganization || ''
+            };
+        } else if (!subscription && selfManagement) {
             subscription = {
                 username: currentUsername || '',
                 email: defaultEmail || '',
@@ -637,7 +646,7 @@
             : (editorLocalSubscription ? t('Add Local Subscription') : t('Add Subscription'));
         const username = document.getElementById('username');
         username.value = subscription ? (subscription.username || '') : '';
-        username.readOnly = !isAdmin;
+        username.readOnly = !(isAdmin || editorLocalSubscription);
         recipientLocked = !editorLocalSubscription && (
             accountHubUser || !!(subscription && (subscription.zimbra_email || subscription.account_hub_email || subscription.recipientLocked))
         );
@@ -933,7 +942,7 @@
             report_profile: buildReportProfilePayload().report_profile };
         if (organization) payload.organization = organization.value;
         if (editorLocalSubscription) payload.local_subscription = true;
-        if (isAdmin || organizationDashboard || (selfManagement && !editingId)) {
+        if (isAdmin || organizationDashboard || (selfManagement && (!editingId || editorLocalSubscription))) {
             payload.username = document.getElementById('username').value;
             payload.emails = recipientValues();
         }
