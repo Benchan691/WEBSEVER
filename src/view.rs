@@ -365,7 +365,8 @@ mod tests {
         assert!(html.contains("管理您的订阅。"));
         assert!(!html.contains("您只能管理自己的订阅。"));
         assert!(html.contains("id=\"add-btn\""));
-        assert!(html.contains("添加本地订阅"));
+        assert!(html.contains("添加订阅"));
+        assert!(!html.contains("添加本地订阅"));
         assert!(html.contains("for=\"organization\""));
         assert!(!html.contains("团队"));
         assert!(html.contains("\"selfManagement\":true"));

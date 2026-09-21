@@ -643,7 +643,7 @@
             || (isAdmin && !subscription);
         document.getElementById('modal-title').textContent = editingId
             ? t('Edit Subscription')
-            : (editorLocalSubscription ? t('Add Local Subscription') : t('Add Subscription'));
+            : t('Add Subscription');
         const username = document.getElementById('username');
         username.value = subscription ? (subscription.username || '') : '';
         username.readOnly = !(isAdmin || editorLocalSubscription);
