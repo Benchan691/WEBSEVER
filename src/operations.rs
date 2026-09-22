@@ -6,59 +6,6 @@ use axum::{
 use futures::TryStreamExt;
 use mongodb::bson::{self, Bson, doc};
 use serde_json::{Value, json};
-use std::collections::HashSet;
-
-const SOURCE_URL_FIELDS: &[&str] = &[
-    "source",
-    "source_url",
-    "reference_links",
-    "references",
-    "related_links",
-    "urls",
-    "publication_url",
-    "patch_installation_url",
-    "open_source_repo_url",
-    "details.references",
-    "details.reference_links",
-    "details.related_links",
-    "details.urls",
-    "details.publication_url",
-    "details.patch_installation_url",
-    "details.open_source_repo_url",
-];
-
-fn collect_source_urls(value: &Bson, urls: &mut HashSet<String>) {
-    match value {
-        Bson::String(text) => {
-            for part in text.split_whitespace() {
-                let candidate = part.trim_matches(|c: char| " ,;()[]<>\r\n\t".contains(c));
-                let Some((scheme, host_and_path)) = candidate.split_once("://") else {
-                    continue;
-                };
-                if !matches!(scheme, "http" | "https")
-                    || host_and_path
-                        .split('/')
-                        .next()
-                        .is_none_or(|host| host.is_empty())
-                {
-                    continue;
-                }
-                urls.insert(candidate.to_owned());
-            }
-        }
-        Bson::Array(values) => {
-            for value in values {
-                collect_source_urls(value, urls);
-            }
-        }
-        Bson::Document(document) => {
-            for value in document.values() {
-                collect_source_urls(value, urls);
-            }
-        }
-        _ => {}
-    }
-}
 
 const CATALOG: &[(&str, &str, &str)] = &[
     ("title", "Title", "The advisory or vulnerability title."),
@@ -116,6 +63,13 @@ fn field_catalog() -> Vec<Value> {
         .map(|(id, label, description)| json!({"id":id,"label":label,"description":description}))
         .collect()
 }
+fn canonical_source_url(document: &bson::Document) -> &str {
+    document
+        .get_document("source")
+        .ok()
+        .and_then(|source| source.get_str("url").ok())
+        .unwrap_or("")
+}
 async fn latest(state: &AppState) -> Vec<Value> {
     let mut rows = Vec::new();
     let collection = db::collection(&state.vuln, &state.cfg.vulnerabilities_collection);
@@ -140,7 +94,8 @@ async fn latest(state: &AppState) -> Vec<Value> {
             .get("observed_at")
             .map(|v| format!("{v:?}"))
             .unwrap_or_default();
-        rows.push(json!({"source_collection":source,"review_collections":[state.cfg.vulnerabilities_collection],"selection_id":id,"source_timestamp":timestamp}));
+        let source_url = canonical_source_url(&document);
+        rows.push(json!({"source_collection":source,"review_collections":[state.cfg.vulnerabilities_collection],"selection_id":id,"source_timestamp":timestamp,"source_url":source_url}));
     }
     rows
 }
@@ -260,25 +215,15 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         ));
     }
     if ctx.path == "/api/operations/source-list" && ctx.method == Method::GET {
-        let mut data = Vec::new();
-        for row in latest(state).await {
-            let source = row["source_collection"].as_str().unwrap_or("");
-            let coll = db::collection(&state.vuln, &state.cfg.vulnerabilities_collection);
-            let source_filter = doc! {"source.provider": source};
-            let mut urls = HashSet::new();
-            for field in SOURCE_URL_FIELDS {
-                if let Ok(values) = coll.distinct(*field, source_filter.clone()).await {
-                    for value in values {
-                        collect_source_urls(&value, &mut urls);
-                    }
-                }
-            }
-            let mut urls: Vec<_> = urls.into_iter().collect();
-            urls.sort();
-            if !urls.is_empty() {
-                data.push(json!({"collection":source,"urls":urls}))
-            }
-        }
+        let data = latest(state)
+            .await
+            .into_iter()
+            .filter_map(|row| {
+                let collection = row["source_collection"].as_str()?.to_owned();
+                let url = row["source_url"].as_str()?.trim();
+                (!url.is_empty()).then(|| json!({"collection":collection,"url":url}))
+            })
+            .collect::<Vec<_>>();
         return Some(view::json_response(StatusCode::OK, json!({"data":data})));
     }
     if ctx.path == "/api/operations/newsletter-editor" && ctx.method == Method::GET {
@@ -385,26 +330,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn collects_all_safe_source_and_reference_urls() {
-        let value = Bson::Document(doc! {
-            "url": "https://vendor.example/advisory",
-            "detail_url": "https://vendor.example/advisory/123",
-            "references": [
-                {"url": "https://tracker.example/CVE-2026-1234"},
-                "https://patch.example/fix"
-            ],
-            "unsafe": "javascript:alert(1)",
-        });
-        let mut urls = HashSet::new();
-        collect_source_urls(&value, &mut urls);
+    fn source_list_uses_the_canonical_source_url_only() {
+        let document = doc! {
+            "source": {
+                "provider": "cve",
+                "url": "https://vendor.example/advisories",
+                "detail_url": "https://vendor.example/advisories/CVE-2026-1234",
+            },
+            "details": {
+                "references": ["https://tracker.example/CVE-2026-1234"],
+            },
+        };
         assert_eq!(
-            urls,
-            HashSet::from([
-                "https://vendor.example/advisory".to_owned(),
-                "https://vendor.example/advisory/123".to_owned(),
-                "https://tracker.example/CVE-2026-1234".to_owned(),
-                "https://patch.example/fix".to_owned(),
-            ])
+            canonical_source_url(&document),
+            "https://vendor.example/advisories"
         );
     }
 }

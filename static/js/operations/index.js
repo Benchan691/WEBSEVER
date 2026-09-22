@@ -238,29 +238,28 @@
         body.replaceChildren();
         let rendered = 0;
         (rows || []).forEach(function (row) {
-            const urls = Array.isArray(row.urls) ? row.urls : [];
-            urls.forEach(function (url) {
-                let parsed;
-                try {
-                    parsed = new URL(url);
-                } catch (error) {
-                    return;
-                }
-                if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname) return;
-                const tr = document.createElement('tr');
-                const collection = document.createElement('td');
-                collection.textContent = row.collection || '—';
-                const linkCell = document.createElement('td');
-                const link = document.createElement('a');
-                link.href = parsed.href;
-                link.target = '_blank';
-                link.rel = 'noopener noreferrer';
-                link.textContent = url;
-                linkCell.appendChild(link);
-                tr.append(collection, linkCell);
-                body.appendChild(tr);
-                rendered += 1;
-            });
+            const url = typeof row.url === 'string' ? row.url.trim() : '';
+            if (!url) return;
+            let parsed;
+            try {
+                parsed = new URL(url);
+            } catch (error) {
+                return;
+            }
+            if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname) return;
+            const tr = document.createElement('tr');
+            const collection = document.createElement('td');
+            collection.textContent = row.collection || '—';
+            const linkCell = document.createElement('td');
+            const link = document.createElement('a');
+            link.href = parsed.href;
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer';
+            link.textContent = parsed.href;
+            linkCell.appendChild(link);
+            tr.append(collection, linkCell);
+            body.appendChild(tr);
+            rendered += 1;
         });
         empty.classList.toggle('d-none', rendered !== 0);
     }
