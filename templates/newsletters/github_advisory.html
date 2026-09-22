@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="{{ newsletter.language }}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ newsletter.title }}</title>
+    <style>
+        body { margin: 0; padding: 0; background: #f4f6fb; color: #24292f; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; line-height: 1.55; }
+        .shell { width: 100%; padding: 28px 12px; box-sizing: border-box; }
+        .card { max-width: 720px; margin: 0 auto; background: #fff; border: 1px solid #d8dee9; border-radius: 14px; overflow: hidden; box-shadow: 0 5px 18px rgba(27, 31, 36, .08); }
+        .header { padding: 28px 34px 24px; color: #fff; background: linear-gradient(135deg, #24292f 0%, #3b206b 100%); }
+        .brand { margin: 0 0 18px; color: #d8b4fe; font-size: 13px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+        h1 { margin: 0; color: #fff; font-size: 27px; line-height: 1.2; letter-spacing: -.02em; }
+        .header-meta { margin: 18px 0 0; color: #d0d7de; font-size: 13px; }
+        .header-meta a { color: #fff; }
+        .body { padding: 30px 34px 12px; }
+        .greeting { margin: 0 0 22px; color: #57606a; }
+        .badges { margin: 0 0 26px; }
+        .badge { display: inline-block; margin: 0 7px 7px 0; padding: 5px 11px; border-radius: 999px; background: #f1e8ff; color: #6e40c9; font-size: 12px; font-weight: 700; }
+        .badge-muted { background: #f6f8fa; color: #57606a; }
+        .section { margin: 26px 0; }
+        .section-title { margin: 0 0 10px; color: #24292f; font-size: 16px; font-weight: 750; }
+        .section-title::before { display: inline-block; width: 4px; height: 17px; margin: 0 9px -2px 0; border-radius: 3px; background: #8250df; content: ""; }
+        .description p { margin: 0 0 13px; white-space: normal; }
+        .description h3 { margin: 22px 0 8px; color: #24292f; font-size: 15px; }
+        .description ul { margin: 0 0 15px; padding-left: 21px; }
+        .description li { margin: 4px 0; }
+        .description pre { overflow-x: auto; margin: 13px 0; padding: 13px 15px; border: 1px solid #d8dee9; border-radius: 8px; background: #f6f8fa; color: #24292f; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; }
+        .description hr { border: 0; border-top: 1px solid #d8dee9; margin: 22px 0; }
+        .info-table { width: 100%; border-collapse: collapse; border: 1px solid #d8dee9; border-radius: 8px; overflow: hidden; font-size: 13px; }
+        .info-table th, .info-table td { padding: 10px 12px; border-bottom: 1px solid #d8dee9; text-align: left; vertical-align: top; }
+        .info-table th { width: 30%; background: #f6f8fa; color: #57606a; font-weight: 650; }
+        .info-table tr:last-child th, .info-table tr:last-child td { border-bottom: 0; }
+        .package { overflow-wrap: anywhere; font-weight: 650; }
+        .range { color: #cf222e; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+        .fixed { color: #1a7f37; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+        .links { margin: 0; padding-left: 19px; }
+        .links li { margin: 6px 0; overflow-wrap: anywhere; }
+        a { color: #0969da; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .footer { margin: 20px 34px 0; padding: 20px 0 26px; border-top: 1px solid #d8dee9; color: #6e7781; font-size: 12px; }
+        @media (max-width: 560px) { .header, .body { padding-left: 20px; padding-right: 20px; } .footer { margin-left: 20px; margin-right: 20px; } h1 { font-size: 23px; } .info-table th { width: 36%; } }
+    </style>
+</head>
+<body>
+<div class="shell">
+  <div class="card">
+    <header class="header">
+      <p class="brand">GitHub Security Advisory</p>
+      <h1>{{ newsletter.title }}</h1>
+      <p class="header-meta">
+        {% if newsletter.ghsa_id %}{{ newsletter.ghsa_id }}{% endif %}
+        {% if newsletter.advisory_url %} · <a href="{{ newsletter.advisory_url }}" rel="noopener">View advisory</a>{% endif %}
+      </p>
+    </header>
+
+    <main class="body">
+      <p class="greeting">{{ newsletter.labels.greeting }}</p>
+
+      <div class="badges">
+        {% for value in newsletter.severity %}<span class="badge">{{ value }}</span>{% endfor %}
+        {% for value in newsletter.cves %}<span class="badge badge-muted">{{ value }}</span>{% endfor %}
+        {% if newsletter.advisory_type %}<span class="badge badge-muted">{{ newsletter.advisory_type }}</span>{% endif %}
+      </div>
+
+      {% if newsletter.description_blocks %}
+      <section class="section">
+        <h2 class="section-title">Summary</h2>
+        <div class="description">
+          {% for block in newsletter.description_blocks %}
+            {% if block.kind == 'heading' %}<h3>{{ block.text }}</h3>
+            {% elif block.kind == 'paragraph' %}<p>{{ block.text }}</p>
+            {% elif block.kind == 'list' %}<ul>{% for item in block.items %}<li>{{ item }}</li>{% endfor %}</ul>
+            {% elif block.kind == 'code' %}<pre>{{ block.text }}</pre>
+            {% elif block.kind == 'rule' %}<hr>
+            {% endif %}
+          {% endfor %}
+        </div>
+      </section>
+      {% elif newsletter.overview %}
+      <section class="section"><h2 class="section-title">Summary</h2><p>{{ newsletter.overview }}</p></section>
+      {% endif %}
+
+      {% if newsletter.vulnerability_details %}
+      <section class="section">
+        <h2 class="section-title">Affected packages</h2>
+        <table class="info-table">
+          <thead><tr><th>Package</th><th>Vulnerable range</th><th>First patched version</th></tr></thead>
+          <tbody>
+          {% for item in newsletter.vulnerability_details %}
+            <tr><td class="package">{% if item.ecosystem %}{{ item.ecosystem }}:{% endif %}{{ item.package }}</td><td class="range">{{ item.range }}</td><td class="fixed">{% if item.patched %}{{ item.patched }}{% else %}No fix listed{% endif %}</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </section>
+      {% endif %}
+
+      {% if newsletter.cvss or newsletter.cwes or newsletter.github_reviewed_at or newsletter.nvd_published_at or newsletter.repository_url %}
+      <section class="section">
+        <h2 class="section-title">Advisory details</h2>
+        <table class="info-table">
+          {% if newsletter.cvss %}<tr><th>CVSS</th><td>{{ newsletter.cvss }}</td></tr>{% endif %}
+          {% if newsletter.cwes %}<tr><th>CWE</th><td>{% for value in newsletter.cwes %}{{ value }}{% if not loop.last %}<br>{% endif %}{% endfor %}</td></tr>{% endif %}
+          {% if newsletter.repository_url %}<tr><th>Repository</th><td><a href="{{ newsletter.repository_url }}" rel="noopener">{{ newsletter.repository_url }}</a></td></tr>{% endif %}
+          {% if newsletter.github_reviewed_at %}<tr><th>Reviewed</th><td>{{ newsletter.github_reviewed_at }}</td></tr>{% endif %}
+          {% if newsletter.nvd_published_at %}<tr><th>NVD published</th><td>{{ newsletter.nvd_published_at }}</td></tr>{% endif %}
+        </table>
+      </section>
+      {% endif %}
+
+      {% if newsletter.references or newsletter.related_links %}
+      <section class="section">
+        <h2 class="section-title">References</h2>
+        <ul class="links">
+          {% for link in newsletter.references %}<li><a href="{{ link }}" rel="noopener">{{ link }}</a></li>{% endfor %}
+          {% for link in newsletter.related_links %}<li><a href="{{ link }}" rel="noopener">{{ link }}</a></li>{% endfor %}
+        </ul>
+      </section>
+      {% endif %}
+    </main>
+    <footer class="footer">{{ newsletter.footer }}</footer>
+  </div>
+</div>
+</body>
+</html>

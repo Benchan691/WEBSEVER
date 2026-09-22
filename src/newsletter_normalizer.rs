@@ -366,6 +366,105 @@ fn paragraphs(s: &str) -> Vec<String> {
         .collect()
 }
 
+fn markdown_text(value: &str) -> String {
+    value.replace("**", "").replace("__", "").replace('`', "")
+}
+
+fn markdown_blocks(value: &str) -> Vec<Value> {
+    let mut blocks = Vec::new();
+    let mut paragraph = Vec::new();
+    let mut list = Vec::new();
+    let mut code = Vec::new();
+    let mut in_code = false;
+
+    let flush_paragraph = |blocks: &mut Vec<Value>, paragraph: &mut Vec<String>| {
+        if !paragraph.is_empty() {
+            blocks.push(json!({
+                "kind": "paragraph",
+                "text": markdown_text(&paragraph.join(" "))
+            }));
+            paragraph.clear();
+        }
+    };
+    let flush_list = |blocks: &mut Vec<Value>, list: &mut Vec<String>| {
+        if !list.is_empty() {
+            blocks.push(json!({"kind":"list","items":list.iter().map(|item| markdown_text(item)).collect::<Vec<_>>() }));
+            list.clear();
+        }
+    };
+
+    for line in value.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            if in_code {
+                blocks.push(json!({"kind":"code","text":code.join("\n")}));
+                code.clear();
+            } else {
+                flush_paragraph(&mut blocks, &mut paragraph);
+                flush_list(&mut blocks, &mut list);
+            }
+            in_code = !in_code;
+            continue;
+        }
+        if in_code {
+            code.push(line.trim_end().to_owned());
+            continue;
+        }
+        if trimmed.is_empty() {
+            flush_paragraph(&mut blocks, &mut paragraph);
+            flush_list(&mut blocks, &mut list);
+            continue;
+        }
+        if let Some(heading) = trimmed.strip_prefix("### ") {
+            flush_paragraph(&mut blocks, &mut paragraph);
+            flush_list(&mut blocks, &mut list);
+            blocks.push(json!({"kind":"heading","text":markdown_text(heading)}));
+            continue;
+        }
+        if let Some(heading) = trimmed.strip_prefix("## ") {
+            flush_paragraph(&mut blocks, &mut paragraph);
+            flush_list(&mut blocks, &mut list);
+            blocks.push(json!({"kind":"heading","text":markdown_text(heading)}));
+            continue;
+        }
+        if let Some(heading) = trimmed.strip_prefix("# ") {
+            flush_paragraph(&mut blocks, &mut paragraph);
+            flush_list(&mut blocks, &mut list);
+            blocks.push(json!({"kind":"heading","text":markdown_text(heading)}));
+            continue;
+        }
+        let item = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+            .or_else(|| trimmed.strip_prefix("+ "))
+            .or_else(|| {
+                let dot = trimmed.find(". ")?;
+                trimmed[..dot]
+                    .chars()
+                    .all(|c| c.is_ascii_digit())
+                    .then(|| &trimmed[dot + 2..])
+            });
+        if let Some(item) = item {
+            flush_paragraph(&mut blocks, &mut paragraph);
+            list.push(item.to_owned());
+            continue;
+        }
+        if trimmed == "---" || trimmed == "***" {
+            flush_paragraph(&mut blocks, &mut paragraph);
+            flush_list(&mut blocks, &mut list);
+            blocks.push(json!({"kind":"rule"}));
+            continue;
+        }
+        paragraph.push(trimmed.to_owned());
+    }
+    if in_code {
+        blocks.push(json!({"kind":"code","text":code.join("\n")}));
+    }
+    flush_paragraph(&mut blocks, &mut paragraph);
+    flush_list(&mut blocks, &mut list);
+    blocks
+}
+
 fn hpe_summary_paragraphs(s: &str) -> Vec<String> {
     let mut out = vec![];
     let mut current = Vec::new();
@@ -395,6 +494,7 @@ fn date(value: &Value) -> String {
 
 pub fn template_name(source: &str) -> &'static str {
     match source {
+        "github_advisory" => "newsletters/github_advisory.html",
         "hpe" => "newsletters/hpe.html",
         "zimbra" => "newsletters/zimbra.html",
         _ => "newsletters/generated.html",
@@ -676,6 +776,64 @@ pub fn normalize(document: &Value, source: &str, config: &Value) -> Value {
             }
             recommendations = list_field(&details["vulnerabilities"], "first_patched_version");
             reference_values = values(&details["references"]);
+            let mut vulnerability_details = Vec::new();
+            if let Some(items) = details["vulnerabilities"].as_array() {
+                for item in items {
+                    let package = &item["package"];
+                    let ecosystem = text(&package["ecosystem"]);
+                    let name = text(&package["name"]);
+                    let range = text(&item["vulnerable_version_range"]);
+                    let patched = text(&item["first_patched_version"]);
+                    if !name.is_empty() || !range.is_empty() || !patched.is_empty() {
+                        vulnerability_details.push(json!({
+                            "ecosystem": ecosystem,
+                            "package": name,
+                            "range": range,
+                            "patched": patched,
+                        }));
+                    }
+                }
+            }
+            let cwes = details["cwes"]
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|item| {
+                            let id = text(&item["cwe_id"]);
+                            let name = text(&item["name"]);
+                            [id, name]
+                                .into_iter()
+                                .filter(|value| !value.is_empty())
+                                .collect::<Vec<_>>()
+                                .join(" — ")
+                        })
+                        .filter(|value| !value.is_empty())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            for (key, value) in [
+                ("ghsa_id", json!(text(&details["ghsa_id"]))),
+                ("advisory_type", json!(text(&details["advisory_type"]))),
+                ("advisory_url", json!(text(&details["html_url"]))),
+                (
+                    "repository_url",
+                    json!(text(&details["source_code_location"])),
+                ),
+                (
+                    "github_reviewed_at",
+                    json!(date(&details["github_reviewed_at"])),
+                ),
+                (
+                    "nvd_published_at",
+                    json!(date(&details["nvd_published_at"])),
+                ),
+                ("cwes", json!(cwes)),
+                ("vulnerability_details", json!(vulnerability_details)),
+                ("description_blocks", json!(markdown_blocks(&overview))),
+            ] {
+                extras.insert(key.into(), value);
+            }
         }
         "hkcert" => {
             table = table_from_objects(&details["table"]);
@@ -1089,5 +1247,38 @@ mod tests {
         assert_eq!(normalized["affected"], json!(["Acme Widget < 2.0"]));
         assert_eq!(normalized["references"], json!(["https://example.com/cve"]));
         assert_eq!(normalized["cvss"], "CVSS:3.1/AV:N (9.8 CRITICAL)");
+    }
+
+    #[test]
+    fn github_advisories_get_structured_email_fields() {
+        let normalized = normalize(
+            &json!({
+                "title": "Advisory",
+                "details": {
+                    "ghsa_id": "GHSA-1234",
+                    "description": "## Summary\n\nA description.\n\n- One item\n\n```sh\necho test\n```",
+                    "vulnerabilities": [{
+                        "package": {"ecosystem": "npm", "name": "demo"},
+                        "vulnerable_version_range": "< 1.0.0",
+                        "first_patched_version": "1.0.0"
+                    }],
+                    "html_url": "https://github.com/advisories/GHSA-1234"
+                }
+            }),
+            "github_advisory",
+            &json!({}),
+        );
+        assert_eq!(
+            template_name("github_advisory"),
+            "newsletters/github_advisory.html"
+        );
+        assert_eq!(normalized["ghsa_id"], "GHSA-1234");
+        assert_eq!(normalized["vulnerability_details"][0]["package"], "demo");
+        assert_eq!(normalized["vulnerability_details"][0]["patched"], "1.0.0");
+        assert!(
+            normalized["description_blocks"]
+                .as_array()
+                .is_some_and(|blocks| blocks.iter().any(|block| block["kind"] == "code"))
+        );
     }
 }

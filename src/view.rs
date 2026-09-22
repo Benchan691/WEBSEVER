@@ -436,6 +436,11 @@ mod tests {
                 json!({"title":"HKCERT Advisory","details":{"risk_level":"High","impact":["Remote execution"]}}),
                 "Impacts:",
             ),
+            (
+                "github_advisory",
+                json!({"title":"GitHub Advisory","source":{"url":"https://github.com/advisories","provider":"github_advisory"},"details":{"ghsa_id":"GHSA-1234","description":"## Summary\n\nA useful summary.\n\n- First item\n- Second item\n\n```shell\ncurl https://example.com\n```","vulnerabilities":[{"package":{"ecosystem":"npm","name":"demo"},"vulnerable_version_range":"< 1.2.3","first_patched_version":"1.2.3"}],"html_url":"https://github.com/advisories/GHSA-1234"}}),
+                "GitHub Security Advisory",
+            ),
         ] {
             let newsletter = crate::newsletters::normalize(&record, source, &json!({}));
             let html = env
