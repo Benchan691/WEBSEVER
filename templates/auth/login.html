@@ -15,8 +15,15 @@
                 <div class="login-icon">
                     <i class="bi bi-newspaper text-white fs-4"></i>
                 </div>
-                <h4 class="text-center fw-semibold mb-1">{{ t('Newsletter Management') }}</h4>
-                <p class="text-center text-muted small mb-4">{{ t('Sign in to your account') }}</p>
+                <h4 class="text-center fw-semibold mb-1">{{ t('Two-factor authentication') if two_factor_required else t('Newsletter Management') }}</h4>
+                <p class="text-center text-muted small mb-4">
+                    {% if two_factor_required %}
+                    {{ t('Enter the six-digit code from your authenticator app') }}<br>
+                    <span class="fw-medium">{{ masked_email }}</span>
+                    {% else %}
+                    {{ t('Sign in to your account') }}
+                    {% endif %}
+                </p>
 
                 {% if error %}
                 <div class="alert alert-danger d-flex align-items-center gap-2" role="alert">
@@ -25,6 +32,28 @@
                 </div>
                 {% endif %}
 
+                {% if two_factor_required %}
+                <form method="POST" action="/login/2fa">
+                    <div class="mb-4">
+                        <label for="two-factor-code" class="form-label fw-medium">{{ t('Authenticator code') }}</label>
+                        <div class="input-group">
+                            <span class="input-group-text"><i class="bi bi-shield-lock"></i></span>
+                            <input type="text" class="form-control text-center font-monospace fs-5"
+                                   id="two-factor-code" name="two_factor_code" inputmode="numeric"
+                                   autocomplete="one-time-code" pattern="[0-9]{6}" minlength="6"
+                                   maxlength="6" placeholder="000000" autofocus required>
+                        </div>
+                        <div class="form-text">{{ t('A fresh code is required for every portal sign-in.') }}</div>
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100 py-2 fw-medium">
+                        <i class="bi bi-check2-circle me-2"></i>{{ t('Verify and sign in') }}
+                    </button>
+                    <button type="submit" class="btn btn-link text-secondary w-100 mt-2"
+                            formaction="/login/2fa/cancel" formmethod="post" formnovalidate>
+                        {{ t('Cancel and start again') }}
+                    </button>
+                </form>
+                {% else %}
                 <form method="POST">
                     {% if not local_login %}
                     <input type="hidden" name="next" value="{{ request.next }}">
@@ -34,6 +63,7 @@
                         <div class="input-group">
                             <span class="input-group-text"><i class="bi bi-person"></i></span>
                             <input type="text" class="form-control" name="username" id="username"
+                                   value="{{ login_email }}"
                                    placeholder="{{ t('name@example.com') if not local_login else t('Enter username') }}" autocomplete="username" required>
                         </div>
                     </div>
@@ -49,6 +79,8 @@
                         <i class="bi bi-box-arrow-in-right me-2"></i>{{ t('Sign In') }}
                     </button>
                 </form>
+                {% endif %}
+                {% if not two_factor_required %}
                 {% if local_login %}
                 <p class="text-center small mt-3 mb-0 text-muted">
                     <a href="{{ url_for('auth.login') }}">{{ t('Sign in with Zimbra') }}</a>
@@ -59,6 +91,7 @@
                     {{ t('Local administrator?') }}
                     <a href="{{ url_for('auth.local_login') }}">{{ t('Use local admin sign-in') }}</a>
                 </p>
+                {% endif %}
                 {% endif %}
             </div>
         </div>

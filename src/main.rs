@@ -173,7 +173,14 @@ pub fn render(state: &AppState, ctx: &ReqCtx, name: &str, extras: Value) -> Resp
 fn guard(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
     let public = matches!(
         ctx.path.as_str(),
-        "/login" | "/login/local" | "/logout" | "/en" | "/zh" | "/cn"
+        "/login"
+            | "/login/2fa"
+            | "/login/2fa/cancel"
+            | "/login/local"
+            | "/logout"
+            | "/en"
+            | "/zh"
+            | "/cn"
     ) || ctx.path.starts_with("/locale/")
         || ctx.path.starts_with("/image/");
     if public {
@@ -401,5 +408,30 @@ mod tests {
             .unwrap();
         assert!(html.contains("name=\"next\""));
         assert!(html.contains("subscriptions"));
+    }
+
+    #[test]
+    fn zimbra_two_factor_page_contains_only_the_code_form() {
+        let env = view::environment(Path::new(env!("CARGO_MANIFEST_DIR")));
+        let html = env
+            .get_template("auth/login.html")
+            .unwrap()
+            .render(json!({
+                "locale": "en",
+                "html_lang": "en",
+                "i18n_catalog": {},
+                "config": {"ZIMBRA_ENABLED": true},
+                "request": {"args": {}},
+                "local_login": false,
+                "two_factor_required": true,
+                "masked_email": "s***@example.com",
+            }))
+            .unwrap();
+        assert!(html.contains("action=\"/login/2fa\""));
+        assert!(html.contains("name=\"two_factor_code\""));
+        assert!(html.contains("formaction=\"/login/2fa/cancel\""));
+        assert!(!html.contains("name=\"password\""));
+        assert!(!html.contains("sunshine.wong@example.com"));
+        assert!(!html.contains("temporary-token"));
     }
 }

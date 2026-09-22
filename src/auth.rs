@@ -8,13 +8,19 @@ use hmac::{Hmac, Mac};
 use mongodb::{
     IndexModel,
     bson::{self, Document, doc, oid::ObjectId},
-    options::IndexOptions,
+    options::{IndexOptions, ReturnDocument},
 };
+use rand::RngCore;
 use serde_json::{Value, json};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
+use std::time::Duration;
 
 type HmacSha256 = Hmac<Sha256>;
 const COOKIE: &str = "rust_session";
+const TWO_FACTOR_COOKIE: &str = "zimbra_2fa_challenge";
+const TWO_FACTOR_COLLECTION: &str = "zimbra_login_challenges";
+const TWO_FACTOR_MAX_ATTEMPTS: i32 = 5;
+const TWO_FACTOR_MAX_LIFETIME_SECONDS: u64 = 300;
 
 pub fn key(value: &str) -> String {
     value.trim().to_lowercase()
@@ -38,6 +44,51 @@ fn valid_password(password: &str) -> Result<(), String> {
 }
 fn accounts(state: &AppState) -> mongodb::Collection<Document> {
     db::collection(&state.web, &state.cfg.account_collection)
+}
+fn two_factor_challenges(state: &AppState) -> mongodb::Collection<Document> {
+    db::collection(&state.web, TWO_FACTOR_COLLECTION)
+}
+
+fn challenge_digest(value: &str) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(value.as_bytes()))
+}
+fn new_challenge_id() -> String {
+    let mut value = [0_u8; 32];
+    rand::rng().fill_bytes(&mut value);
+    URL_SAFE_NO_PAD.encode(value)
+}
+fn challenge_cookie(value: &str, lifetime_seconds: u64) -> String {
+    format!(
+        "{TWO_FACTOR_COOKIE}={value}; Path=/login; Max-Age={lifetime_seconds}; HttpOnly; SameSite=Lax"
+    )
+}
+fn clear_challenge_cookie() -> String {
+    format!("{TWO_FACTOR_COOKIE}=; Path=/login; Max-Age=0; HttpOnly; SameSite=Lax")
+}
+fn challenge_lifetime_seconds(lifetime_ms: u64) -> u64 {
+    if lifetime_ms == 0 {
+        TWO_FACTOR_MAX_LIFETIME_SECONDS
+    } else {
+        lifetime_ms
+            .div_ceil(1000)
+            .clamp(1, TWO_FACTOR_MAX_LIFETIME_SECONDS)
+    }
+}
+fn valid_two_factor_code(value: &str) -> bool {
+    value.len() == 6 && value.bytes().all(|value| value.is_ascii_digit())
+}
+fn masked_email(value: &str) -> String {
+    let Some((name, domain)) = value.split_once('@') else {
+        return value.to_owned();
+    };
+    let first = name.chars().next().unwrap_or('*');
+    format!("{first}***@{domain}")
+}
+fn challenge_attempts(challenge: &Document) -> i32 {
+    challenge
+        .get_i32("attempts")
+        .or_else(|_| challenge.get_i64("attempts").map(|value| value as i32))
+        .unwrap_or(0)
 }
 
 fn session_cookie(state: &AppState, user: &Document) -> String {
@@ -156,6 +207,19 @@ pub async fn ensure_bootstrap(state: &AppState) -> Result<(), Box<dyn std::error
             .build(),
     )
     .await?;
+    two_factor_challenges(state)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"expires_at":1})
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .name(Some("zimbra_2fa_challenge_expiry".to_owned()))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     let username = state.cfg.bootstrap_username.trim();
     if username.is_empty() || state.cfg.bootstrap_password.is_empty() {
         return Err("WEB_AUTH_BOOTSTRAP_USERNAME and WEB_AUTH_BOOTSTRAP_PASSWORD are required for the local administrator.".into());
@@ -240,6 +304,225 @@ fn safe_next(next: &str) -> &str {
     }
 }
 
+fn login_error(
+    state: &AppState,
+    ctx: &ReqCtx,
+    email: &str,
+    message: &str,
+    status: StatusCode,
+) -> Response {
+    let mut response = render(
+        state,
+        ctx,
+        "auth/login.html",
+        json!({"local_login":false,"login_email":email,"error":message}),
+    );
+    *response.status_mut() = status;
+    response
+}
+
+fn two_factor_page(
+    state: &AppState,
+    ctx: &ReqCtx,
+    email: &str,
+    error: Option<&str>,
+    status: StatusCode,
+) -> Response {
+    let mut response = render(
+        state,
+        ctx,
+        "auth/login.html",
+        json!({
+            "local_login": false,
+            "two_factor_required": true,
+            "masked_email": masked_email(email),
+            "error": error,
+        }),
+    );
+    *response.status_mut() = status;
+    response
+}
+
+async fn create_two_factor_challenge(
+    state: &AppState,
+    email: &str,
+    encrypted_password: &str,
+    temporary_token: &str,
+    next: &str,
+    lifetime_ms: u64,
+) -> Result<(String, u64), String> {
+    let challenge_id = new_challenge_id();
+    let lifetime_seconds = challenge_lifetime_seconds(lifetime_ms);
+    let expires_at = bson::DateTime::from_millis(
+        bson::DateTime::now().timestamp_millis() + (lifetime_seconds as i64 * 1000),
+    );
+    let encrypted_token = zimbra::encrypt_secret(&state.cfg, temporary_token)?;
+    two_factor_challenges(state)
+        .insert_one(doc! {
+            "_id": challenge_digest(&challenge_id),
+            "email": email,
+            "encrypted_password": encrypted_password,
+            "encrypted_auth_token": encrypted_token,
+            "next": safe_next(next),
+            "attempts": 0,
+            "created_at": bson::DateTime::now(),
+            "expires_at": expires_at,
+        })
+        .await
+        .map_err(|_| "Unable to start two-factor authentication.".to_owned())?;
+    Ok((challenge_id, lifetime_seconds))
+}
+
+async fn active_two_factor_challenge(state: &AppState, ctx: &ReqCtx) -> Option<Document> {
+    let challenge_id = view::cookie(&ctx.headers, TWO_FACTOR_COOKIE)?;
+    two_factor_challenges(state)
+        .find_one(doc! {
+            "_id": challenge_digest(&challenge_id),
+            "expires_at": {"$gt": bson::DateTime::now()},
+        })
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn delete_two_factor_challenge(state: &AppState, ctx: &ReqCtx) {
+    if let Some(challenge_id) = view::cookie(&ctx.headers, TWO_FACTOR_COOKIE) {
+        let _ = two_factor_challenges(state)
+            .delete_one(doc! {"_id":challenge_digest(&challenge_id)})
+            .await;
+    }
+}
+
+fn clear_two_factor_cookie(response: &mut Response) {
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        clear_challenge_cookie().parse().unwrap(),
+    );
+}
+
+async fn record_failed_two_factor_attempt(state: &AppState, challenge: &Document) -> bool {
+    let id = db::string(challenge, "_id");
+    let attempts = two_factor_challenges(state)
+        .find_one_and_update(
+            doc! {"_id":&id,"attempts":{"$lt":TWO_FACTOR_MAX_ATTEMPTS}},
+            doc! {"$inc":{"attempts":1},"$set":{"updated_at":bson::DateTime::now()}},
+        )
+        .return_document(ReturnDocument::After)
+        .await
+        .ok()
+        .flatten()
+        .as_ref()
+        .map(challenge_attempts)
+        .unwrap_or(TWO_FACTOR_MAX_ATTEMPTS);
+    if attempts >= TWO_FACTOR_MAX_ATTEMPTS {
+        let _ = two_factor_challenges(state)
+            .delete_one(doc! {"_id":id})
+            .await;
+        true
+    } else {
+        false
+    }
+}
+
+async fn finish_zimbra_login(
+    state: &AppState,
+    ctx: &ReqCtx,
+    email: &str,
+    encrypted_password: String,
+    session: zimbra::ZimbraSession,
+    next: &str,
+) -> Response {
+    let (folder_id, folder_path) = match session.ensure_folder(&state.cfg, email).await {
+        Ok(folder) => folder,
+        Err(error) => {
+            tracing::warn!(email = %email, outcome = "folder_setup_failed", reason = %error, "Zimbra login");
+            return login_error(
+                state,
+                ctx,
+                email,
+                "Zimbra authenticated, but mailbox setup failed. Please try again.",
+                StatusCode::SERVICE_UNAVAILABLE,
+            );
+        }
+    };
+    let now = bson::DateTime::now();
+    let coll = accounts(state);
+    let existing = coll
+        .find_one(doc! {"email_key":email,"auth_source":"zimbra"})
+        .await
+        .ok()
+        .flatten();
+    let set = doc! {"username":email,"username_key":email,"email":email,"email_key":email,"auth_source":"zimbra","role":"user","disabled":false,"must_change_password":false,"zimbra_password":encrypted_password,"zimbra_folder_id":folder_id,"zimbra_folder_path":folder_path,"last_login_at":now,"updated_at":now};
+    let user = if let Some(old) = existing {
+        let Ok(id) = old.get_object_id("_id") else {
+            return login_error(
+                state,
+                ctx,
+                email,
+                "Unable to save the Zimbra account.",
+                StatusCode::SERVICE_UNAVAILABLE,
+            );
+        };
+        if coll
+            .update_one(doc! {"_id":id}, doc! {"$set":set})
+            .await
+            .is_err()
+        {
+            return login_error(
+                state,
+                ctx,
+                email,
+                "Unable to save the Zimbra account.",
+                StatusCode::SERVICE_UNAVAILABLE,
+            );
+        }
+        let Some(user) = coll.find_one(doc! {"_id":id}).await.ok().flatten() else {
+            return login_error(
+                state,
+                ctx,
+                email,
+                "Unable to save the Zimbra account.",
+                StatusCode::SERVICE_UNAVAILABLE,
+            );
+        };
+        user
+    } else {
+        let mut account = set;
+        account.insert("created_at", now);
+        let result = match coll.insert_one(account.clone()).await {
+            Ok(result) => result,
+            Err(_) => {
+                return login_error(
+                    state,
+                    ctx,
+                    email,
+                    "This email is already registered.",
+                    StatusCode::CONFLICT,
+                );
+            }
+        };
+        account.insert("_id", result.inserted_id);
+        account
+    };
+    if let Err(error) = subscriptions::ensure_zimbra_subscription(state, &user).await {
+        tracing::warn!(email = %email, outcome = "account_setup_failed", reason = %error, "Zimbra login");
+        return login_error(
+            state,
+            ctx,
+            email,
+            "Zimbra authenticated, but portal account setup failed. Please try again.",
+            StatusCode::SERVICE_UNAVAILABLE,
+        );
+    }
+    tracing::info!(email = %email, outcome = "authenticated", "Zimbra login");
+    let mut response = view::redirect(safe_next(next));
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        session_cookie(state, &user).parse().unwrap(),
+    );
+    response
+}
+
 async fn zimbra_login(state: &AppState, ctx: &ReqCtx) -> Response {
     let email = ctx.field("username").trim().to_lowercase();
     let password = ctx.field("password");
@@ -253,60 +536,214 @@ async fn zimbra_login(state: &AppState, ctx: &ReqCtx) -> Response {
         *r.status_mut() = StatusCode::UNAUTHORIZED;
         return r;
     }
-    let (_session, folder_id, folder_path) =
-        match zimbra::login_and_prepare(state, &email, &password).await {
-            Ok(v) => v,
-            Err(error) => {
-                let mut r = render(state, ctx, "auth/login.html", json!({"error":error}));
-                *r.status_mut() = StatusCode::UNAUTHORIZED;
-                return r;
-            }
-        };
-    let encrypted = match zimbra::encrypt_password(&state.cfg, &password) {
-        Ok(v) => v,
-        Err(e) => return view::error(StatusCode::SERVICE_UNAVAILABLE, &e),
-    };
-    let now = bson::DateTime::now();
-    let coll = accounts(state);
-    let existing = coll
-        .find_one(doc! {"email_key":&email,"auth_source":"zimbra"})
-        .await
-        .ok()
-        .flatten();
-    let set = doc! {"username":&email,"username_key":&email,"email":&email,"email_key":&email,"auth_source":"zimbra","role":"user","disabled":false,"must_change_password":false,"zimbra_password":encrypted,"zimbra_folder_id":folder_id,"zimbra_folder_path":folder_path,"last_login_at":now,"updated_at":now};
-    let user = if let Some(old) = existing {
-        let id = old.get_object_id("_id").unwrap();
-        if coll
-            .update_one(doc! {"_id":id}, doc! {"$set":set})
-            .await
-            .is_err()
-        {
-            return view::error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Unable to save the Zimbra account.",
-            );
+    let outcome = match zimbra::ZimbraSession::login(&state.cfg, &email, &password).await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let outcome = if error == zimbra::AuthFailure::InvalidCredentials {
+                "password_rejected"
+            } else {
+                "authentication_failed"
+            };
+            tracing::warn!(email = %email, outcome, failure = ?error, "Zimbra login");
+            let status = if error == zimbra::AuthFailure::Unavailable {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::UNAUTHORIZED
+            };
+            return login_error(state, ctx, &email, error.message(), status);
         }
-        coll.find_one(doc! {"_id":id}).await.ok().flatten().unwrap()
-    } else {
-        let mut d = set;
-        d.insert("created_at", now);
-        let result = match coll.insert_one(d.clone()).await {
-            Ok(v) => v,
+    };
+    let encrypted_password = match zimbra::encrypt_password(&state.cfg, &password) {
+        Ok(value) => value,
+        Err(error) => {
+            return login_error(state, ctx, &email, &error, StatusCode::SERVICE_UNAVAILABLE);
+        }
+    };
+    match outcome {
+        zimbra::LoginResult::Authenticated(session) => {
+            delete_two_factor_challenge(state, ctx).await;
+            let mut response = finish_zimbra_login(
+                state,
+                ctx,
+                &email,
+                encrypted_password,
+                session,
+                &ctx.field("next"),
+            )
+            .await;
+            clear_two_factor_cookie(&mut response);
+            response
+        }
+        zimbra::LoginResult::TwoFactorRequired {
+            temporary_token,
+            lifetime_ms,
+        } => {
+            delete_two_factor_challenge(state, ctx).await;
+            let (challenge_id, lifetime_seconds) = match create_two_factor_challenge(
+                state,
+                &email,
+                &encrypted_password,
+                &temporary_token,
+                &ctx.field("next"),
+                lifetime_ms,
+            )
+            .await
+            {
+                Ok(challenge) => challenge,
+                Err(error) => {
+                    return login_error(
+                        state,
+                        ctx,
+                        &email,
+                        &error,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                    );
+                }
+            };
+            tracing::info!(email = %email, outcome = "two_factor_required", "Zimbra login");
+            let mut response = two_factor_page(state, ctx, &email, None, StatusCode::OK);
+            response.headers_mut().insert(
+                header::SET_COOKIE,
+                challenge_cookie(&challenge_id, lifetime_seconds)
+                    .parse()
+                    .unwrap(),
+            );
+            response
+        }
+    }
+}
+
+async fn show_two_factor_login(state: &AppState, ctx: &ReqCtx) -> Response {
+    let Some(challenge) = active_two_factor_challenge(state, ctx).await else {
+        let mut response = view::redirect("/login");
+        clear_two_factor_cookie(&mut response);
+        return response;
+    };
+    two_factor_page(
+        state,
+        ctx,
+        &db::string(&challenge, "email"),
+        None,
+        StatusCode::OK,
+    )
+}
+
+async fn complete_two_factor_login(state: &AppState, ctx: &ReqCtx) -> Response {
+    let Some(challenge) = active_two_factor_challenge(state, ctx).await else {
+        let mut response = view::redirect("/login");
+        clear_two_factor_cookie(&mut response);
+        return response;
+    };
+    let email = db::string(&challenge, "email");
+    let code = ctx.field("two_factor_code").trim().to_owned();
+    if !valid_two_factor_code(&code) {
+        tracing::warn!(email = %email, outcome = "two_factor_failed", reason = "invalid_format", "Zimbra login");
+        let exhausted = record_failed_two_factor_attempt(state, &challenge).await;
+        let mut response = if exhausted {
+            login_error(
+                state,
+                ctx,
+                &email,
+                "Too many incorrect authenticator codes. Sign in again.",
+                StatusCode::UNAUTHORIZED,
+            )
+        } else {
+            two_factor_page(
+                state,
+                ctx,
+                &email,
+                Some("Enter the six-digit code from your authenticator app."),
+                StatusCode::UNAUTHORIZED,
+            )
+        };
+        if exhausted {
+            clear_two_factor_cookie(&mut response);
+        }
+        return response;
+    }
+    let temporary_token =
+        match zimbra::decrypt_secret(&state.cfg, &db::string(&challenge, "encrypted_auth_token")) {
+            Ok(token) => token,
             Err(_) => {
-                return view::error(StatusCode::CONFLICT, "This email is already registered.");
+                delete_two_factor_challenge(state, ctx).await;
+                let mut response = login_error(
+                    state,
+                    ctx,
+                    &email,
+                    "The two-factor session is invalid. Sign in again.",
+                    StatusCode::UNAUTHORIZED,
+                );
+                clear_two_factor_cookie(&mut response);
+                return response;
             }
         };
-        d.insert("_id", result.inserted_id);
-        d
+    let session = match zimbra::ZimbraSession::complete_two_factor(
+        &state.cfg,
+        &temporary_token,
+        &code,
+    )
+    .await
+    {
+        Ok(session) => session,
+        Err(zimbra::AuthFailure::InvalidTwoFactorCode) => {
+            tracing::warn!(email = %email, outcome = "two_factor_failed", reason = "rejected", "Zimbra login");
+            let exhausted = record_failed_two_factor_attempt(state, &challenge).await;
+            let mut response = if exhausted {
+                login_error(
+                    state,
+                    ctx,
+                    &email,
+                    "Too many incorrect authenticator codes. Sign in again.",
+                    StatusCode::UNAUTHORIZED,
+                )
+            } else {
+                two_factor_page(
+                    state,
+                    ctx,
+                    &email,
+                    Some("The authenticator code is invalid."),
+                    StatusCode::UNAUTHORIZED,
+                )
+            };
+            if exhausted {
+                clear_two_factor_cookie(&mut response);
+            }
+            return response;
+        }
+        Err(error) => {
+            tracing::warn!(email = %email, outcome = "two_factor_failed", failure = ?error, "Zimbra login");
+            let status = if error == zimbra::AuthFailure::Unavailable {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::UNAUTHORIZED
+            };
+            if error != zimbra::AuthFailure::Unavailable {
+                delete_two_factor_challenge(state, ctx).await;
+            }
+            let mut response = if error == zimbra::AuthFailure::Unavailable {
+                two_factor_page(state, ctx, &email, Some(error.message()), status)
+            } else {
+                login_error(state, ctx, &email, error.message(), status)
+            };
+            if error != zimbra::AuthFailure::Unavailable {
+                clear_two_factor_cookie(&mut response);
+            }
+            return response;
+        }
     };
-    if let Err(error) = subscriptions::ensure_zimbra_subscription(state, &user).await {
-        return view::error(StatusCode::SERVICE_UNAVAILABLE, &error);
-    }
-    let mut response = view::redirect(safe_next(&ctx.field("next")));
-    response.headers_mut().insert(
-        header::SET_COOKIE,
-        session_cookie(state, &user).parse().unwrap(),
-    );
+    delete_two_factor_challenge(state, ctx).await;
+    let encrypted_password = db::string(&challenge, "encrypted_password");
+    let next = db::string(&challenge, "next");
+    let mut response =
+        finish_zimbra_login(state, ctx, &email, encrypted_password, session, &next).await;
+    clear_two_factor_cookie(&mut response);
+    response
+}
+
+async fn cancel_two_factor_login(state: &AppState, ctx: &ReqCtx) -> Response {
+    delete_two_factor_challenge(state, ctx).await;
+    let mut response = view::redirect("/login");
+    clear_two_factor_cookie(&mut response);
     response
 }
 
@@ -321,6 +758,13 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             ));
         }
         (Method::POST, "/login") => return Some(zimbra_login(state, ctx).await),
+        (Method::GET, "/login/2fa") => return Some(show_two_factor_login(state, ctx).await),
+        (Method::POST, "/login/2fa") => {
+            return Some(complete_two_factor_login(state, ctx).await);
+        }
+        (Method::POST, "/login/2fa/cancel") => {
+            return Some(cancel_two_factor_login(state, ctx).await);
+        }
         (Method::GET, "/login/local") => {
             return Some(render(
                 state,
@@ -438,6 +882,32 @@ mod tests {
     fn zimbra_users_cannot_be_local_admins() {
         let u = doc! {"auth_source":"zimbra","role":"user","username":"x@example.com"};
         assert!(!is_top_admin(&u, &dummy()));
+    }
+    #[test]
+    fn two_factor_challenges_are_short_lived_and_codes_are_strict() {
+        assert_eq!(challenge_lifetime_seconds(600_000), 300);
+        assert_eq!(challenge_lifetime_seconds(90_001), 91);
+        assert_eq!(challenge_lifetime_seconds(0), 300);
+        assert!(valid_two_factor_code("012345"));
+        assert!(!valid_two_factor_code("12345"));
+        assert!(!valid_two_factor_code("12345a"));
+    }
+    #[test]
+    fn two_factor_cookie_is_opaque_and_http_only() {
+        let challenge_id = new_challenge_id();
+        let cookie = challenge_cookie(&challenge_id, 300);
+        assert!(cookie.contains(&format!("{TWO_FACTOR_COOKIE}={challenge_id}")));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Lax"));
+        assert!(!cookie.contains('@'));
+        assert_ne!(challenge_digest(&challenge_id), challenge_id);
+    }
+    #[test]
+    fn two_factor_page_masks_the_account_address() {
+        assert_eq!(
+            masked_email("sunshine.wong@example.com"),
+            "s***@example.com"
+        );
     }
     fn dummy() -> crate::config::Config {
         crate::config::Config {
