@@ -87,9 +87,7 @@
             ' · ' + t('Retention last run:') + ' ' + formatTime(retention.last_run_at) +
             ' · ' + t('Retention result:') + ' ' + escapeHtml(retentionResult) +
             '</div><div class="small mt-1">' +
-            t('Zimbra direct delivery:') + ' ' + escapeHtml(zimbra.direct_delivery ? t('Enabled') : t('Disabled')) +
-            ' · ' + t('Folder:') + ' ' + escapeHtml(zimbra.folder || 'news') +
-            ' · ' + t('SMTP fallback:') + ' ' + escapeHtml(zimbra.smtp_fallback ? t('Enabled') : t('Disabled')) +
+            t('Email delivery:') + ' ' + escapeHtml(zimbra.smtp_delivery ? 'SMTP' : t('Disabled')) +
             '</div>';
     }
 

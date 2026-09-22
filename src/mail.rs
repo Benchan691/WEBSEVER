@@ -1,9 +1,9 @@
-use crate::{AppState, db, zimbra};
+use crate::AppState;
 use lettre::{
-    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor, message::header::ContentType,
+    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
+    message::header::ContentTransferEncoding, message::header::ContentType,
     transport::smtp::authentication::Credentials,
 };
-use mongodb::bson::doc;
 use std::env;
 
 fn smtp_transport(
@@ -20,7 +20,7 @@ fn smtp_transport(
                 .and_then(|v| v.as_str())
                 .map(str::to_owned)
         })
-        .ok_or("SMTP_HOST is required for external recipients.")?;
+        .ok_or("SMTP_HOST is required for email delivery.")?;
     let username = env::var("SMTP_USERNAME").unwrap_or_default();
     let password = env::var("SMTP_PASSWORD").unwrap_or_default();
     let from = env::var("SMTP_FROM")
@@ -73,32 +73,12 @@ fn message(
             .map_err(|e: lettre::address::AddressError| e.to_string())?)
         .subject(subject)
         .header(ContentType::TEXT_HTML)
+        // Base64 keeps styled HTML portable across SMTP relays and mailbox
+        // implementations without relying on quoted-printable edge cases.
+        .header(ContentTransferEncoding::Base64)
         .body(html.to_owned())
         .map_err(|e| e.to_string())
 }
-fn direct_sender(state: &AppState, recipient: &str) -> Result<lettre::message::Mailbox, String> {
-    if let Ok(value) = env::var("SMTP_FROM") {
-        if !value.trim().is_empty() {
-            return value
-                .parse()
-                .map_err(|e: lettre::address::AddressError| e.to_string());
-        }
-    }
-    let domain = state
-        .cfg
-        .zimbra_base_url
-        .split("//")
-        .nth(1)
-        .unwrap_or(&state.cfg.zimbra_base_url)
-        .split('/')
-        .next()
-        .unwrap_or("localhost");
-    format!("news@{}", domain)
-        .parse()
-        .or_else(|_| recipient.parse())
-        .map_err(|e: lettre::address::AddressError| e.to_string())
-}
-
 pub async fn send(
     state: &AppState,
     recipients: &[String],
@@ -109,50 +89,35 @@ pub async fn send(
     if recipients.is_empty() {
         return Ok(());
     }
-    let mut smtp: Option<(AsyncSmtpTransport<Tokio1Executor>, lettre::message::Mailbox)> = None;
+    let (transport, from) = smtp_transport(state)?;
     for recipient in recipients {
         let normalized = recipient.trim().to_lowercase();
-        let account = db::find_one(
-            &state.web,
-            &state.cfg.account_collection,
-            doc! {"email_key":&normalized,"auth_source":"zimbra"},
-        )
-        .await
-        .ok()
-        .flatten();
-        if let Some(account) = account {
-            if db::bool_field(&account, "disabled") {
-                return Err(format!("Zimbra account {normalized} is disabled."));
-            }
-            let encrypted = db::string(&account, "zimbra_password");
-            if encrypted.is_empty() {
-                return Err(format!(
-                    "No saved Zimbra credential is available for {normalized}."
-                ));
-            }
-            let password = zimbra::decrypt_password(&state.cfg, &encrypted)?;
-            let session = zimbra::ZimbraSession::login(&state.cfg, &normalized, &password).await?;
-            let folder = db::string(&account, "zimbra_folder_path");
-            let folder = if folder.is_empty() {
-                session.ensure_folder(&state.cfg, &normalized).await?.1
-            } else {
-                folder
-            };
-            let from = direct_sender(state, &normalized)?;
-            let msg = message(&from, &normalized, subject, html)?.formatted();
-            session
-                .import_mime(&state.cfg, &normalized, &folder, &msg)
-                .await?;
-        } else {
-            if smtp.is_none() {
-                smtp = Some(smtp_transport(state)?)
-            }
-            let (transport, from) = smtp.as_ref().unwrap();
-            transport
-                .send(message(from, &normalized, subject, html)?)
-                .await
-                .map_err(|e| e.to_string())?;
-        }
+        transport
+            .send(message(&from, &normalized, subject, html)?)
+            .await
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn html_messages_use_zimbra_compatible_base64_encoding() {
+        let from = "newsletter@example.com".parse().unwrap();
+        let rendered = String::from_utf8(
+            message(
+                &from,
+                "recipient@example.com",
+                "Security update",
+                "<p>Styled security notification</p>",
+            )
+            .unwrap()
+            .formatted(),
+        )
+        .unwrap();
+        assert!(rendered.contains("Content-Transfer-Encoding: base64\r\n"));
+    }
 }

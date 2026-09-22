@@ -41,13 +41,13 @@ been verified.
 
 ## Authentication and mail delivery
 
-After a successful Zimbra `AuthRequest`, the service ensures the configured `news` folder with `GetFolderRequest`/`CreateFolderRequest`, then stores the mailbox credential encrypted with AES-256-GCM. Passwords are never returned to a browser or written to logs. Zimbra recipients receive MIME messages directly in `news`; addresses without a Zimbra account use the configured SMTP transport and arrive in the normal Inbox.
+After a successful Zimbra `AuthRequest`, the service ensures the configured `news` folder with `GetFolderRequest`/`CreateFolderRequest`, then stores the mailbox credential encrypted with AES-256-GCM. Passwords are never returned to a browser or written to logs. All notification and scheduled email is sent through the configured SMTP transport.
 
 ## Subscriptions
 
 Each Zimbra account receives one protected, owner-scoped `sub_account` record when it first signs in (and existing accounts are backfilled at startup). Its newsletter and report profiles start disabled, so the user can enable and configure delivery without waiting for a separate subscription record. Zimbra users can add more subscriptions and view or manage only their own records; the automatic record cannot be deleted by the Zimbra user, while user-created records can be deleted. Recipients on Zimbra-owned records remain fixed to the Zimbra email. The local administrator can manage every subscription and may enter multiple external recipients. New delivery history includes `subscription_id`, so records from older deployments cannot suppress delivery for a new subscription.
 
-The scheduler is disabled by default. Enable it only after direct Zimbra delivery and SMTP fallback have been tested:
+The scheduler is disabled by default. Enable it only after SMTP delivery has been tested:
 
 ```sh
 RUST_SCHEDULER_ENABLED=true cargo run --release
@@ -64,4 +64,4 @@ node --check static/js/subscriptions/index.js
 
 ## Docker deployment
 
-`Dockerfile` builds the Rust binary in a pinned Rust builder image and copies only the runtime assets into a Debian image. Use `docker-compose.example.yml` as the candidate service. Deploy beside the existing service on an alternate port with `RUST_SCHEDULER_ENABLED=false`, verify local login, a test Zimbra login, `web.accounts`, folder setup, subscription ownership, direct delivery, and SMTP fallback, then switch the port mapping. Keep the previous image, compose file, source tree, `.env`, and MongoDB backups for rollback.
+`Dockerfile` builds the Rust binary in a pinned Rust builder image and copies only the runtime assets into a Debian image. Use `docker-compose.example.yml` as the candidate service. Deploy beside the existing service on an alternate port with `RUST_SCHEDULER_ENABLED=false`, verify local login, a test Zimbra login, `web.accounts`, folder setup, subscription ownership, and SMTP delivery, then switch the port mapping. Keep the previous image, compose file, source tree, `.env`, and MongoDB backups for rollback.

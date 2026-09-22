@@ -274,6 +274,8 @@
     "Remove recipient": "移除收件人",
     "All recipients share the same subscription settings and password.": "所有收件人共享相同的订阅设置和密码。",
     "Email delivery mode": "邮件发送方式",
+    "Email delivery:": "邮件投递：",
+    "All notification emails are delivered through SMTP.": "所有通知邮件均通过 SMTP 投递。",
     "Send separate private emails": "分别发送私密邮件",
     "Send one email to all recipients": "向所有收件人发送一封邮件",
     "Grouped delivery shows recipient addresses to each other.": "群组发送会让收件人看到彼此的邮箱地址。",

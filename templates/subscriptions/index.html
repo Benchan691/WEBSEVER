@@ -37,7 +37,7 @@
                         <label class="form-label" for="recipient-list">{{ t('Email recipients') }}</label>
                         <div id="recipient-list" class="vstack gap-2"></div>
                         {% if is_admin or is_organization_admin or (current_user and current_user.auth_source == 'zimbra') %}<button id="add-recipient-btn" class="btn btn-outline-secondary btn-sm mt-2" type="button"><i class="bi bi-plus-lg me-1"></i>{{ t('Add email recipient') }}</button>{% endif %}
-                        <div class="form-text">{{ t('Zimbra recipients receive directly in the news folder; external recipients use SMTP.') }}</div>
+                        <div class="form-text">{{ t('All notification emails are delivered through SMTP.') }}</div>
                     </div>
                 </div>
                 <div class="row g-4">

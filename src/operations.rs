@@ -169,8 +169,8 @@ async fn health(state: &AppState, ctx: &ReqCtx) -> Value {
     let zimbra_status = json!({
         "base_url": state.cfg.zimbra_base_url,
         "folder": state.cfg.zimbra_folder_name,
-        "direct_delivery": true,
-        "smtp_fallback": true
+        "direct_delivery": false,
+        "smtp_delivery": true
     });
     let mut reports = Vec::new();
     let mut newsletters = Vec::new();

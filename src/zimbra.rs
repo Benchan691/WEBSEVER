@@ -10,7 +10,7 @@ use aes_gcm::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use rand::RngCore;
 use regex::Regex;
-use reqwest::{Client, StatusCode, header};
+use reqwest::{Client, header};
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
@@ -51,6 +51,7 @@ pub fn encrypt_password(config: &Config, password: &str) -> Result<String, Strin
     Ok(STANDARD.encode(payload))
 }
 
+#[cfg(test)]
 pub fn decrypt_password(config: &Config, value: &str) -> Result<String, String> {
     let key = credential_key(config)?;
     let payload = STANDARD
@@ -81,16 +82,6 @@ fn endpoint(config: &Config, suffix: &str) -> String {
         suffix.trim_start_matches('/')
     )
 }
-fn import_path(email: &str, folder: &str) -> String {
-    // Zimbra accepts mailbox imports through the REST service endpoint.  The
-    // browser-facing `/home/...` route is intended for GETs and can return a
-    // server error when a MIME message is posted to it.
-    format!(
-        "service/home/{}/{}",
-        urlencoding::encode(email),
-        urlencoding::encode(folder)
-    )
-}
 fn soap(body: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -102,15 +93,6 @@ fn soap_context(body: &str, token: &str) -> String {
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"><soap:Header><context xmlns="urn:zimbra"><authToken>{}</authToken></context></soap:Header><soap:Body>{body}</soap:Body></soap:Envelope>"#,
         xml_escape(token)
-    )
-}
-fn mark_unread_request(item_id: &str, token: &str) -> String {
-    soap_context(
-        &format!(
-            r#"<MsgActionRequest xmlns="urn:zimbraMail"><action id="{}" op="!read"/></MsgActionRequest>"#,
-            xml_escape(item_id)
-        ),
-        token,
     )
 }
 fn token_from_xml(xml: &str) -> Option<String> {
@@ -217,65 +199,6 @@ impl ZimbraSession {
         folder_from_xml(&xml, &config.zimbra_folder_name)
             .ok_or_else(|| "Zimbra did not return the news folder.".to_owned())
     }
-
-    pub async fn import_mime(
-        &self,
-        config: &Config,
-        email: &str,
-        folder: &str,
-        mime: &[u8],
-    ) -> Result<(), String> {
-        let http = client(config)?;
-        let path = import_path(email, folder);
-        let response = http
-            .post(endpoint(config, &path))
-            .header(header::CONTENT_TYPE, "message/rfc822")
-            .header("Cookie", format!("ZM_AUTH_TOKEN={}", self.token))
-            .header("X-Zimbra-Auth-Token", &self.token)
-            .body(mime.to_vec())
-            .send()
-            .await
-            .map_err(|_| "Zimbra message delivery failed.".to_owned())?;
-        if response.status() == StatusCode::UNAUTHORIZED
-            || response.status() == StatusCode::FORBIDDEN
-        {
-            return Err("Zimbra mailbox authentication failed.".into());
-        }
-        // The REST import endpoint on this Zimbra installation returns an
-        // empty 200 response and does not include X-Zimbra-ItemId.  A
-        // successful import is still a delivered message; imported messages
-        // are unread by default.  If an item ID is provided, keep the
-        // explicit unread safeguard, but never report a successful delivery
-        // as failed merely because Zimbra omitted that optional header.
-        let item_id = response
-            .headers()
-            .get("X-Zimbra-ItemId")
-            .and_then(|value| value.to_str().ok())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned);
-        response_text(response).await?;
-        if let Some(item_id) = item_id
-            && let Err(error) = self.mark_unread(config, &item_id).await
-        {
-            tracing::warn!(%error, %email, "Unable to explicitly keep imported Zimbra message unread");
-        }
-        Ok(())
-    }
-
-    async fn mark_unread(&self, config: &Config, item_id: &str) -> Result<(), String> {
-        let http = client(config)?;
-        let response = http
-            .post(endpoint(config, "service/soap"))
-            .header(header::CONTENT_TYPE, "application/soap+xml; charset=utf-8")
-            .header("Cookie", format!("ZM_AUTH_TOKEN={}", self.token))
-            .header("X-Zimbra-Auth-Token", &self.token)
-            .body(mark_unread_request(item_id, &self.token))
-            .send()
-            .await
-            .map_err(|_| "Zimbra unread status update failed.".to_owned())?;
-        response_text(response).await.map(|_| ())
-    }
 }
 
 pub async fn login_and_prepare(
@@ -340,15 +263,5 @@ mod tests {
             )
         );
         assert!(request.contains("<soap:Body><GetFolderRequest"));
-        let unread = mark_unread_request("42", "token");
-        assert!(
-            unread.contains(
-                r#"<MsgActionRequest xmlns="urn:zimbraMail"><action id="42" op="!read"/>"#
-            )
-        );
-        assert_eq!(
-            import_path("user@example.com", "news alerts"),
-            "service/home/user%40example.com/news%20alerts"
-        );
     }
 }
