@@ -1040,15 +1040,34 @@ async fn vendor_import(ctx: &ReqCtx) -> Response {
     )
 }
 async fn collection_rows(state: &AppState) -> Vec<Value> {
-    let mut data = Vec::new();
-    if let Ok(names) = reviews::views(state).await {
-        for name in names {
-            let count = db::collection(&state.vuln, &name)
-                .count_documents(doc! {})
-                .await
-                .unwrap_or(0);
-            data.push(json!({"name":name,"source":"news","count":count}));
-        }
+    let collection = db::collection(&state.vuln, &state.cfg.vulnerabilities_collection);
+    let Ok(values) = collection
+        .distinct(
+            "source.provider",
+            doc! {"source.provider":{"$type":"string","$ne":""}},
+        )
+        .await
+    else {
+        return Vec::new();
+    };
+    let mut providers = values
+        .into_iter()
+        .filter_map(|value| value.as_str().map(str::to_owned))
+        .filter(|provider| reviews::known_source(provider))
+        .collect::<Vec<_>>();
+    providers.sort();
+    providers.dedup();
+    let mut data = Vec::with_capacity(providers.len());
+    for provider in providers {
+        let count = collection
+            .count_documents(doc! {"source.provider":&provider})
+            .await
+            .unwrap_or(0);
+        data.push(json!({
+            "name":format!("{provider}_review"),
+            "source":provider,
+            "count":count,
+        }));
     }
     data
 }
@@ -1429,7 +1448,11 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         ));
     }
     if ctx.path == "/api/subscriptions/schema" && ctx.method == Method::GET {
-        let names = reviews::views(state).await.unwrap_or_default();
+        let names = collection_rows(state)
+            .await
+            .into_iter()
+            .filter_map(|row| row["name"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
         return Some(view::json_response(
             StatusCode::OK,
             json!({"schema_version":1,"subscription":{"fields":["username","emails","organization"],"delivery_mode":"individual"},"profile_types":["newsletter","report"],"review_collections":names,"filters":{"defaults":default_filters()},"profiles":{"newsletter":{"defaults":default_profile("newsletter")},"report":{"defaults":default_profile("report")}},"vendor_product_filter":{"schema_version":1,"defaults":{"enabled":false,"schema_version":1,"include_possible_matches":false,"rows":[]}},"allowed_values":{"severity":["Critical","High","Medium","Low"],"time_window":["all","daily","week","custom"],"generation_mode":["template","enriched_weekly"],"report_language":["en","zh","ch"]},"limits":{"report_scope_max_count":500}}),
