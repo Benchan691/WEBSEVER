@@ -81,6 +81,16 @@ fn endpoint(config: &Config, suffix: &str) -> String {
         suffix.trim_start_matches('/')
     )
 }
+fn import_path(email: &str, folder: &str) -> String {
+    // Zimbra accepts mailbox imports through the REST service endpoint.  The
+    // browser-facing `/home/...` route is intended for GETs and can return a
+    // server error when a MIME message is posted to it.
+    format!(
+        "service/home/{}/{}",
+        urlencoding::encode(email),
+        urlencoding::encode(folder)
+    )
+}
 fn soap(body: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -216,11 +226,7 @@ impl ZimbraSession {
         mime: &[u8],
     ) -> Result<(), String> {
         let http = client(config)?;
-        let path = format!(
-            "home/{}/{}",
-            urlencoding::encode(email),
-            urlencoding::encode(folder)
-        );
+        let path = import_path(email, folder);
         let response = http
             .post(endpoint(config, &path))
             .header(header::CONTENT_TYPE, "message/rfc822")
@@ -339,6 +345,10 @@ mod tests {
             unread.contains(
                 r#"<MsgActionRequest xmlns="urn:zimbraMail"><action id="42" op="!read"/>"#
             )
+        );
+        assert_eq!(
+            import_path("user@example.com", "news alerts"),
+            "service/home/user%40example.com/news%20alerts"
         );
     }
 }
