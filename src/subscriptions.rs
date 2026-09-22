@@ -19,6 +19,36 @@ fn default_profile(kind: &str) -> Value {
         json!({"enabled":false,"filters":default_filters(),"generation_mode":"template","report_language":"en","search_prompt":"","schedule_enabled":false,"schedule_weekday":"mon","schedule_time":"09:00"})
     }
 }
+fn logical_collection_name(source: &str) -> String {
+    let source = source.trim();
+    if source.ends_with("_review") || !reviews::known_source(source) {
+        source.to_owned()
+    } else {
+        format!("{source}_review")
+    }
+}
+fn logical_collection_names(filters: &Value) -> Vec<String> {
+    let sources = filters["sources"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(logical_collection_name)
+        .filter(|source| !source.is_empty())
+        .collect::<Vec<_>>();
+    if !sources.is_empty() {
+        return sources;
+    }
+    filters["collections"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
 fn merge(into: &mut Value, from: &Value) {
     if let (Some(dst), Some(src)) = (into.as_object_mut(), from.as_object()) {
         for (k, v) in src {
@@ -197,6 +227,20 @@ fn public(document: &Document) -> Value {
             "statistic_schedule_claim_owner",
         ] {
             obj.remove(key);
+        }
+        for profile_name in ["newsletter_profile", "report_profile"] {
+            let collections = obj
+                .get(profile_name)
+                .and_then(|profile| profile.get("filters"))
+                .map(logical_collection_names)
+                .unwrap_or_default();
+            if let Some(filters) = obj
+                .get_mut(profile_name)
+                .and_then(|profile| profile.get_mut("filters"))
+                .and_then(Value::as_object_mut)
+            {
+                filters.insert("collections".to_owned(), json!(collections));
+            }
         }
     }
     if let Some(obj) = value
@@ -904,17 +948,13 @@ fn notification_profile_card(name: &str, profile: &Value, newsletter: bool) -> V
     let enabled = profile["enabled"].as_bool().unwrap_or(false);
     let mut summary_lines = Vec::new();
     let filters = &profile["filters"];
-    let collections = filters["collections"]
-        .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(escape_html)
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .filter(|value| !value.is_empty())
+    let collections = logical_collection_names(filters)
+        .iter()
+        .map(|value| escape_html(value))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let collections = (!collections.is_empty())
+        .then_some(collections)
         .unwrap_or_else(|| "No collections selected".to_owned());
     summary_lines.push(format!("Collections: {collections}"));
 
@@ -2566,5 +2606,24 @@ mod tests {
         assert!(rendered.contains("source.provider"));
         assert!(rendered.contains("cve"));
         assert!(!rendered.contains("zimbra"));
+    }
+
+    #[test]
+    fn public_subscription_keeps_each_selected_provider_collection() {
+        let subscription = doc! {
+            "_id": ObjectId::new(),
+            "newsletter_profile": {
+                "enabled": true,
+                "filters": {
+                    "collections": ["news"],
+                    "sources": ["cve", "hkcert", "zimbra"],
+                },
+            },
+        };
+        let value = public(&subscription);
+        assert_eq!(
+            value["newsletter_profile"]["filters"]["collections"],
+            json!(["cve_review", "hkcert_review", "zimbra_review"])
+        );
     }
 }
