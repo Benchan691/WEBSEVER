@@ -537,7 +537,7 @@
                 vendor_product_filter: vendorProductFilterPayload(prefix)
             };
         } else if (isReportEnriched()) {
-            filters.collections = ['cve_review'];
+            filters.collections = collections.slice(0, 1);
         }
         filters.status = readStatusFilters(prefix);
         if (prefix === 'report') {

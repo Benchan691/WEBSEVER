@@ -17,6 +17,28 @@ Rust implementation of the security newsletter portal. The new authentication st
 
 The first startup creates unique username and email indexes and bootstraps one local administrator in `web.accounts`. It does not copy records from the legacy collections. Local administrator login is `/login/local`; normal users submit their full Zimbra email address and password at `/login`.
 
+## Vulnerability news data
+
+The crawler and portal share one physical MongoDB collection, configured with
+`VULNERABILITIES_COLLECTION=news`. Every document records its provider in
+`source.provider`; the portal uses that field for source labels, filters,
+templates, reports, and delivery history. The portal does not require MongoDB
+`*_review` views.
+
+Before switching an existing deployment, run the crawler migration as a dry
+run and then perform the validated cutover:
+
+```sh
+vuln-scrape unify-mongo --dry-run
+vuln-scrape unify-mongo
+```
+
+The migration builds and validates a shadow collection before renaming it to
+`news`, preserves the original physical collections as timestamped backups,
+and removes the obsolete review views only after validation succeeds. Keep the
+backups until the Rust portal, filters, previews, and scheduled delivery have
+been verified.
+
 ## Authentication and mail delivery
 
 After a successful Zimbra `AuthRequest`, the service ensures the configured `news` folder with `GetFolderRequest`/`CreateFolderRequest`, then stores the mailbox credential encrypted with AES-256-GCM. Passwords are never returned to a browser or written to logs. Zimbra recipients receive MIME messages directly in `news`; addresses without a Zimbra account use the configured SMTP transport and arrive in the normal Inbox.

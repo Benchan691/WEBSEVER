@@ -446,6 +446,7 @@ mod tests {
             mongo_uri: String::new(),
             web_database: "web".into(),
             vulnerabilities_database: "vulnerabilities".into(),
+            vulnerabilities_collection: "news".into(),
             secret: "x".into(),
             bootstrap_username: "admin".into(),
             bootstrap_password: "pw".into(),
@@ -456,7 +457,6 @@ mod tests {
             zimbra_credential_key: String::new(),
             account_collection: "accounts".into(),
             newsletter_root: Default::default(),
-            review_view_suffix: "_review".into(),
             port: 9100,
         }
     }

@@ -1,4 +1,4 @@
-use crate::{AppState, ReqCtx, db, render, vendor_matcher, view};
+use crate::{AppState, ReqCtx, db, newsletter_normalizer, render, vendor_matcher, view};
 use axum::{
     http::{Method, StatusCode},
     response::Response,
@@ -10,49 +10,79 @@ use regex::Regex;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 
+const LEGACY_SOURCES: &[&str] = &[
+    "avd",
+    "cisco",
+    "cnnvd",
+    "cnvd",
+    "cve",
+    "fortiguard",
+    "github_advisory",
+    "govcert",
+    "hikvision",
+    "hkcert",
+    "hpe",
+    "huawei_sa",
+    "infosec",
+    "juniper",
+    "msrc",
+    "paloalto",
+    "qianxin",
+    "ransomwarelive",
+    "splunk",
+    "zeroday",
+    "zimbra",
+];
+
+pub(crate) fn known_source(source: &str) -> bool {
+    LEGACY_SOURCES.contains(&source)
+}
+
 pub async fn views(state: &AppState) -> Result<Vec<String>, mongodb::error::Error> {
-    let mut cursor = state
-        .vuln
-        .list_collections()
-        .filter(doc! {"type":"view"})
-        .await?;
-    let mut names = Vec::new();
-    while let Some(spec) = cursor.try_next().await? {
-        if spec.name.ends_with(&state.cfg.review_view_suffix) {
-            names.push(spec.name)
-        }
+    let name = state.cfg.vulnerabilities_collection.trim();
+    let names = state.vuln.list_collection_names().await?;
+    Ok(if names.iter().any(|value| value == name) {
+        vec![name.to_owned()]
+    } else {
+        Vec::new()
+    })
+}
+
+fn canonical_name(state: &AppState, name: &str) -> Option<String> {
+    let name = name.trim();
+    if name == state.cfg.vulnerabilities_collection {
+        return Some(name.to_owned());
     }
-    names.sort();
-    Ok(names)
+    // Accept old links during the cutover, but always query the unified
+    // collection and return the new collection name in API responses.
+    if name.strip_suffix("_review").is_some_and(known_source) {
+        return Some(state.cfg.vulnerabilities_collection.clone());
+    }
+    None
 }
-fn source<'a>(state: &AppState, name: &'a str) -> &'a str {
-    name.strip_suffix(&state.cfg.review_view_suffix)
-        .unwrap_or(name)
+
+pub(crate) fn valid_collection_name(state: &AppState, name: &str) -> bool {
+    canonical_name(state, name).is_some()
 }
-async fn view_spec(
-    state: &AppState,
-    name: &str,
-) -> Result<Option<(String, Vec<Document>)>, mongodb::error::Error> {
-    let mut cursor = state
-        .vuln
-        .list_collections()
-        .filter(doc! {"type":"view","name":name})
-        .await?;
-    Ok(cursor.try_next().await?.and_then(|spec| {
-        spec.options
-            .view_on
-            .map(|source| (source, spec.options.pipeline.unwrap_or_default()))
-    }))
+
+pub(crate) fn document_source(document: &Document) -> String {
+    db::bson_json(document)
+        .pointer("/source/provider")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("unknown")
+        .to_owned()
 }
-pub async fn resolve(state: &AppState, source_name: &str, id: &str) -> Option<Document> {
+pub async fn resolve(state: &AppState, _source_name: &str, id: &str) -> Option<Document> {
     if id.trim().is_empty() {
         return None;
     }
-    if let Ok(Some(document)) = db::find_one(&state.vuln, source_name, doc! {"_id": id}).await {
+    let collection = state.cfg.vulnerabilities_collection.as_str();
+    if let Ok(Some(document)) = db::find_one(&state.vuln, collection, doc! {"_id": id}).await {
         return Some(document);
     }
     let object_id = db::object_id(id)?;
-    db::find_one(&state.vuln, source_name, doc! {"_id": object_id})
+    db::find_one(&state.vuln, collection, doc! {"_id": object_id})
         .await
         .ok()
         .flatten()
@@ -154,9 +184,31 @@ fn reject_keyword_search(ctx: &ReqCtx) -> Result<(), String> {
 fn filter(ctx: &ReqCtx) -> Result<Document, String> {
     let mut clauses = Vec::<Bson>::new();
     for (arg, fields) in [
-        ("code", &["code", "cve", "cve_ids"][..]),
+        (
+            "code",
+            &[
+                "code",
+                "cve",
+                "cve_ids",
+                "details.cve_id",
+                "details.cve_ids",
+                "details.cveCode",
+                "details.cveId",
+            ][..],
+        ),
         ("title", &["title"][..]),
-        ("affected", &["affected", "affected_products"][..]),
+        (
+            "affected",
+            &[
+                "affected",
+                "affected_products",
+                "details.affected",
+                "details.affected_products",
+                "details.affected_software",
+                "details.vulnerable_products",
+                "details.products",
+            ][..],
+        ),
     ] {
         let value = filter_arg(ctx, arg);
         if !value.trim().is_empty() {
@@ -170,10 +222,37 @@ fn filter(ctx: &ReqCtx) -> Result<Document, String> {
     {
         return Err("Severity must be Critical, High, Medium, or Low.".into());
     }
-    if !statuses.is_empty() {
-        clauses.push(Bson::Document(
-            doc! {"$or": statuses.iter().map(|s| regex_clause("severity",s)).collect::<Vec<_>>() },
-        ));
+    let include_unknown = matches!(
+        filter_arg(ctx, "include_unknown")
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    );
+    let accepted = if statuses.is_empty() && !include_unknown {
+        ["Critical", "High", "Medium", "Low"]
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+    } else {
+        statuses
+    };
+    if !accepted.is_empty() {
+        let mut severity = accepted
+            .iter()
+            .map(|value| regex_clause("severity", value))
+            .collect::<Vec<_>>();
+        if include_unknown {
+            severity.extend([
+                Bson::Document(doc! {"severity":{"$exists":false}}),
+                Bson::Document(doc! {"severity":Bson::Null}),
+                Bson::Document(doc! {"severity":""}),
+            ]);
+        }
+        clauses.push(Bson::Document(doc! {"$or": severity}));
+    }
+    let source = filter_arg(ctx, "source");
+    if !source.trim().is_empty() {
+        clauses.push(regex_clause("source.provider", source.trim()));
     }
     let window = filter_arg(ctx, "time_window");
     let now = Utc::now();
@@ -347,6 +426,12 @@ fn unique_join(values: impl IntoIterator<Item = String>) -> Option<String> {
 
 fn normalized_document(document: &Document) -> Value {
     let mut data = db::bson_json(document);
+    let provider = data
+        .pointer("/source/provider")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_owned();
+    let rendered = newsletter_normalizer::normalize(&data, &provider, &json!({}));
     let Some(object) = data.as_object_mut() else {
         return data;
     };
@@ -405,8 +490,32 @@ fn normalized_document(document: &Document) -> Value {
         } else {
             description
         };
+        let description = if description.is_empty() {
+            text_value(rendered.get("overview"))
+                .into_iter()
+                .collect::<Vec<_>>()
+        } else {
+            description
+        };
         if !description.is_empty() {
             object.insert("description".into(), Value::String(description.join("\n")));
+        }
+    }
+    if is_blank(object.get("title"))
+        && let Some(title) = text_value(rendered.get("title"))
+    {
+        object.insert("title".into(), Value::String(title));
+    }
+    if is_blank(object.get("severity")) {
+        let values = rendered
+            .get("severity")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|value| text_value(Some(value)))
+            .collect::<Vec<_>>();
+        if !values.is_empty() {
+            object.insert("severity".into(), Value::String(values.join(", ")));
         }
     }
     if is_blank(object.get("vendor")) {
@@ -420,6 +529,15 @@ fn normalized_document(document: &Document) -> Value {
         }
     }
     if is_blank(object.get("affected")) {
+        if affected.is_empty() {
+            affected = rendered
+                .get("affected")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|value| text_value(Some(value)))
+                .collect();
+        }
         let mut seen = HashSet::new();
         affected.retain(|value| seen.insert(value.clone()));
         if !affected.is_empty() {
@@ -427,7 +545,14 @@ fn normalized_document(document: &Document) -> Value {
         }
     }
     if is_blank(object.get("cve")) {
-        if let Some(code) = text_value(object.get("code")) {
+        let code = text_value(object.get("code")).or_else(|| {
+            rendered
+                .get("cves")
+                .and_then(Value::as_array)
+                .and_then(|values| values.first())
+                .and_then(|value| text_value(Some(value)))
+        });
+        if let Some(code) = code {
             let cve = if code.to_ascii_uppercase().starts_with("CVE-") {
                 code.to_ascii_uppercase()
             } else {
@@ -447,11 +572,12 @@ pub(crate) fn preview_url(source_name: &str, id: &str) -> String {
     )
 }
 
-fn response_row(name: &str, source_name: &str, document: &Document) -> Value {
+fn response_row(name: &str, _source_name: &str, document: &Document) -> Value {
     let data = normalized_document(document);
     let selection_id = db::id_string(document);
     let (selection_score, patch_priority, _, _) = score(document);
-    json!({"collection":name,"source":source_name,"preview_url":preview_url(source_name, &selection_id),"selection_id":selection_id,"document":data,"selection_score":selection_score,"patch_priority":patch_priority})
+    let provider = document_source(document);
+    json!({"collection":name,"source":provider,"preview_url":preview_url(&provider, &selection_id),"selection_id":selection_id,"document":data,"selection_score":selection_score,"patch_priority":patch_priority})
 }
 pub(crate) async fn query_rows(
     state: &AppState,
@@ -460,67 +586,16 @@ pub(crate) async fn query_rows(
     skip: u64,
     limit: i64,
 ) -> Result<(u64, Vec<Document>), mongodb::error::Error> {
-    let Some((source_name, mut pipeline)) = view_spec(state, name).await? else {
+    let Some(collection) = canonical_name(state, name) else {
         return Ok((0, Vec::new()));
     };
-    if let Some(project) = pipeline
-        .first_mut()
-        .and_then(|stage| stage.get_document_mut("$project").ok())
-    {
-        for field in [
-            "_id",
-            "details",
-            "observed_at",
-            "published_at",
-            "updated_at",
-            "cve_ids",
-            "code",
-            "cve",
-            "severity",
-            "title",
-            "summary",
-            "description",
-            "vendor",
-            "product",
-            "affected",
-            "affected_products",
-            "containers",
-            "systems_affected",
-            "products",
-            "impacts",
-            "source",
-        ] {
-            if source_name == "cve"
-                && matches!(field, "description" | "affected" | "impacts" | "cve")
-            {
-                continue;
-            }
-            project.insert(field, 1);
-        }
-    }
-    pipeline.push(doc! {"$match":filter});
-    let mut count_pipeline = pipeline.clone();
-    count_pipeline.push(doc! {"$count":"total"});
-    let mut count_cursor = db::collection(&state.vuln, &source_name)
-        .aggregate(count_pipeline)
-        .await?;
-    let count = count_cursor
-        .try_next()
-        .await?
-        .and_then(|document| document.get("total").cloned())
-        .and_then(|value| match value {
-            Bson::Int32(value) => Some(value as u64),
-            Bson::Int64(value) if value >= 0 => Some(value as u64),
-            Bson::Double(value) if value >= 0.0 => Some(value as u64),
-            _ => None,
-        })
-        .unwrap_or(0);
-
-    pipeline.push(doc! {"$sort":{"observed_at":-1,"_id":-1}});
-    pipeline.push(doc! {"$skip":skip.min(i64::MAX as u64) as i64});
-    pipeline.push(doc! {"$limit":limit.max(0)});
-    let mut cursor = db::collection(&state.vuln, &source_name)
-        .aggregate(pipeline)
+    let collection = db::collection(&state.vuln, &collection);
+    let count = collection.count_documents(filter.clone()).await?;
+    let mut cursor = collection
+        .find(filter)
+        .sort(doc! {"observed_at": -1, "_id": -1})
+        .skip(skip)
+        .limit(limit.max(0))
         .await?;
     let mut rows = Vec::new();
     while let Some(document) = cursor.try_next().await? {
@@ -543,9 +618,20 @@ async fn filtered_rows(
         }
         let limit = total.min(i64::MAX as u64) as i64;
         let (_, documents) = query_rows(state, name, filter.clone(), 0, limit).await?;
-        for document in documents {
-            if vendor_matcher::classify(&db::bson_json(&document), vendor_product_filter).is_some()
+        for mut document in documents {
+            if let Some(matched) =
+                vendor_matcher::classify(&db::bson_json(&document), vendor_product_filter)
             {
+                if db::string(&document, "vendor").trim().is_empty()
+                    && let Some(vendor) = matched["matched_vendor"].as_str()
+                {
+                    document.insert("vendor", vendor);
+                }
+                if db::string(&document, "product").trim().is_empty()
+                    && let Some(product) = matched["matched_product"].as_str()
+                {
+                    document.insert("product", product);
+                }
                 rows.push((name.clone(), document));
             }
         }
@@ -559,15 +645,13 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
     }
     if let Some(name) = ctx.path.strip_prefix("/reviews/") {
         if ctx.method == Method::GET {
-            let exists = views(state)
-                .await
-                .ok()
-                .is_some_and(|names| names.iter().any(|n| n == name));
+            let exists = canonical_name(state, name)
+                .is_some_and(|canonical| state.cfg.vulnerabilities_collection == canonical);
             return Some(render(
                 state,
                 ctx,
                 "reviews/collection.html",
-                json!({"collection_name":name,"initial_error":if exists {Value::Null}else{json!("Review collection not found.")}}),
+                json!({"collection_name":canonical_name(state, name).unwrap_or_else(|| name.to_owned()),"initial_error":if exists {Value::Null}else{json!("News collection not found.")}}),
             ));
         }
     }
@@ -587,7 +671,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 .count_documents(doc! {})
                 .await
                 .unwrap_or(0);
-            data.push(json!({"name":name,"source":source(state,&name),"count":count}));
+            data.push(json!({"name":name,"source":"news","count":count}));
         }
         return Some(view::json_response(StatusCode::OK, json!({"data":data})));
     }
@@ -627,10 +711,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             .into_iter()
             .skip(offset as usize)
             .take(size as usize)
-            .map(|(name, document)| {
-                let source_name = source(state, &name);
-                response_row(&name, source_name, &document)
-            })
+            .map(|(name, document)| response_row(&name, "news", &document))
             .collect();
         return Some(view::json_response(
             StatusCode::OK,
@@ -719,7 +800,6 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 "Export is limited to 500 documents.",
             ));
         }
-        let names = views(state).await.unwrap_or_default();
         let mut documents = Vec::new();
         for selection in selections {
             let name = selection
@@ -730,13 +810,13 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 .get("selection_id")
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            if !names.iter().any(|n| n == name) {
+            if canonical_name(state, name).is_none() {
                 return Some(view::error(
                     StatusCode::BAD_REQUEST,
                     "Invalid review collection.",
                 ));
             }
-            let Some(document) = resolve(state, source(state, name), id).await else {
+            let Some(document) = resolve(state, name, id).await else {
                 return Some(view::error(
                     StatusCode::NOT_FOUND,
                     "Selected document was not found.",
@@ -756,8 +836,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
     }
     if let Some(name) = ctx.path.strip_prefix("/api/reviews/") {
         if ctx.method == Method::GET {
-            let names = views(state).await.unwrap_or_default();
-            if !names.iter().any(|n| n == name) {
+            if canonical_name(state, name).is_none() {
                 return Some(view::error(
                     StatusCode::NOT_FOUND,
                     "Review collection not found.",
@@ -779,8 +858,8 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                         StatusCode::OK,
                         json!({"data":documents.iter().map(|d| {
                             let selection_id = db::id_string(d);
-                            let source_name = source(state, name);
-                            json!({"collection":name,"source":source_name,"preview_url":preview_url(source_name, &selection_id),"selection_id":selection_id,"document":normalized_document(d)})
+                            let provider = document_source(d);
+                            json!({"collection":state.cfg.vulnerabilities_collection,"source":provider,"preview_url":preview_url(&provider, &selection_id),"selection_id":selection_id,"document":normalized_document(d)})
                         }).collect::<Vec<_>>(),"page":page,"page_size":size,"total":total,"pages":((total+size-1)/size).max(1)}),
                     ),
                     Err(_) => view::error(
@@ -825,8 +904,24 @@ mod tests {
             ("end", "2026-06-02T09:45"),
         ]))
         .expect("valid custom scrape time");
-        assert!(custom.get("observed_at").is_some());
+        assert!(format!("{custom:?}").contains("observed_at"));
         assert!(filter(&filter_context(vec![("time_window", "invalid")])).is_err());
+    }
+
+    #[test]
+    fn review_filter_excludes_unknown_severity_unless_requested() {
+        let known = filter(&filter_context(vec![("time_window", "all")])).unwrap();
+        let known_text = format!("{known:?}");
+        assert!(known_text.contains("Critical"));
+        assert!(!known_text.contains("$exists"));
+
+        let unknown = filter(&filter_context(vec![
+            ("time_window", "all"),
+            ("include_unknown", "true"),
+            ("status", "High"),
+        ]))
+        .unwrap();
+        assert!(format!("{unknown:?}").contains("$exists"));
     }
 
     #[test]
@@ -891,6 +986,34 @@ mod tests {
         assert_eq!(normalized["affected"], json!(["View vendor View product"]));
         assert_eq!(normalized["vendor"], "View vendor");
         assert_eq!(normalized["product"], "View product");
+    }
+
+    #[test]
+    fn unified_provider_document_uses_provider_normalization() {
+        let document = doc! {
+            "_id": "govcert:alert-1",
+            "source": {"provider":"govcert"},
+            "details": {
+                "description": "A provider-specific description.",
+                "affected_systems": ["Example Gateway"],
+                "impact": ["High"],
+            },
+        };
+        let normalized = normalized_document(&document);
+        assert_eq!(document_source(&document), "govcert");
+        assert_eq!(
+            normalized["description"],
+            "A provider-specific description."
+        );
+        assert_eq!(normalized["affected"], json!(["Example Gateway"]));
+        assert_eq!(normalized["severity"], "High");
+    }
+
+    #[test]
+    fn only_known_legacy_review_names_are_accepted() {
+        assert!(known_source("cve"));
+        assert!(known_source("zimbra"));
+        assert!(!known_source("fake"));
     }
 
     #[test]

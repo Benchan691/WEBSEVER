@@ -168,7 +168,13 @@
                 '<div class="small text-muted">' + escapeHtml(row.organization || '') + '</div>' +
                 '<div class="small">' + escapeHtml(row.delivery_mode || 'individual') + '</div></td>' +
                 '<td>' + (row.enabled ? t('Yes') : t('No')) + '</td>' +
-                '<td class="small">' + escapeHtml(row.delivery_cursor || '—') + '</td>' +
+                '<td class="small">' + escapeHtml(row.delivery_cursor || '—') +
+                (row.last_error
+                    ? '<div class="text-danger mt-1">' + escapeHtml(row.last_error) + '</div>' +
+                      '<div class="text-muted">' + formatTime(row.last_error_at) + '</div>'
+                    : (row.last_success_at
+                        ? '<div class="text-success mt-1">' + t('Last successful delivery:') + ' ' + formatTime(row.last_success_at) + '</div>'
+                        : '')) + '</td>' +
                 '<td class="small">' + escapeHtml(row.cve_delivery_cutoff || '—') + '</td>' +
                 '<td>' + escapeHtml(row.total_delivered != null ? row.total_delivered : 0) + '</td>';
             const latestCell = document.createElement('td');

@@ -314,7 +314,7 @@
     function renderHeaders() {
         resultsHead.replaceChildren();
         addHeader(t('Select'));
-        addHeader(t('Collection'));
+        addHeader(t('Source'));
         addHeader(t('Code / CVE'));
         addHeader(t('Severity'));
         addHeader(t('Description'));
@@ -461,7 +461,7 @@
             const projectedDocument = item.document;
             const row = document.createElement('tr');
             renderSelectCell(row, item, keys);
-            addCell(row, item.collection, 'small', true);
+            addCell(row, item.source || item.collection, 'small', true);
             addCell(
                 row,
                 firstValue(projectedDocument, ['code', 'cve', 'title']),
@@ -490,7 +490,7 @@
             viewButton.className = 'btn btn-outline-primary btn-sm';
             viewButton.innerHTML = '<i class="bi bi-eye me-1"></i>' + t('View');
             viewButton.addEventListener('click', function () {
-                showDocument(item.collection + ' ' + t('Document'), item);
+                showDocument((item.source || item.collection) + ' ' + t('Document'), item);
             });
             actionCell.append(viewButton);
             row.append(actionCell);

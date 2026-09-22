@@ -394,11 +394,11 @@
         const selected = selections();
         if (mode === 'enriched_weekly') {
             if (file) {
-                showMessage(t('Enriched Weekly reports require cve_review selections, not uploaded JSON.'), 'danger');
+                showMessage(t('Enriched Weekly reports require CVE source selections, not uploaded JSON.'), 'danger');
                 return;
             }
-            if (!selected.length || selected.some(function (item) { return item.collection !== 'cve_review'; })) {
-                showMessage(t('Enriched Weekly reports only support cve_review selections.'), 'danger');
+            if (!selected.length) {
+                showMessage(t('Enriched Weekly reports require at least one CVE source selection.'), 'danger');
                 return;
             }
         }

@@ -11,6 +11,7 @@ pub struct Config {
     pub mongo_uri: String,
     pub web_database: String,
     pub vulnerabilities_database: String,
+    pub vulnerabilities_collection: String,
     pub secret: String,
     pub bootstrap_username: String,
     pub bootstrap_password: String,
@@ -21,7 +22,6 @@ pub struct Config {
     pub zimbra_credential_key: String,
     pub account_collection: String,
     pub newsletter_root: PathBuf,
-    pub review_view_suffix: String,
     pub port: u16,
 }
 
@@ -97,6 +97,11 @@ impl Config {
                 "/mongodb/vulnerabilities_database",
                 "vulnerabilities",
             ),
+            vulnerabilities_collection: get(
+                "VULNERABILITIES_COLLECTION",
+                "/mongodb/vulnerabilities_collection",
+                "news",
+            ),
             secret,
             bootstrap_username: get(
                 "WEB_AUTH_BOOTSTRAP_USERNAME",
@@ -119,11 +124,6 @@ impl Config {
             zimbra_credential_key: env::var("ZIMBRA_CREDENTIAL_KEY").unwrap_or_default(),
             account_collection: get("ACCOUNT_COLLECTION", "/account_collection", "accounts"),
             newsletter_root,
-            review_view_suffix: get(
-                "REVIEW_VIEW_SUFFIX",
-                "/mongodb/review_view_suffix",
-                "_review",
-            ),
             port: env::var("PORT")
                 .ok()
                 .and_then(|v| v.parse().ok())

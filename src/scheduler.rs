@@ -27,28 +27,6 @@ fn html_escape(text: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
 }
-fn json_time(value: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
-    if let Some(text) = value.as_str() {
-        return chrono::DateTime::parse_from_rfc3339(text)
-            .ok()
-            .map(|v| v.with_timezone(&chrono::Utc));
-    }
-    if let Some(date) = value.get("$date") {
-        if let Some(text) = date.as_str() {
-            return chrono::DateTime::parse_from_rfc3339(text)
-                .ok()
-                .map(|v| v.with_timezone(&chrono::Utc));
-        }
-        if let Some(ms) = date
-            .get("$numberLong")
-            .and_then(Value::as_str)
-            .and_then(|v| v.parse::<i64>().ok())
-        {
-            return chrono::Utc.timestamp_millis_opt(ms).single();
-        }
-    }
-    None
-}
 fn bson_time(value: &mongodb::bson::Bson) -> Option<chrono::DateTime<chrono::Utc>> {
     match value {
         mongodb::bson::Bson::DateTime(dt) => chrono::Utc
@@ -93,6 +71,67 @@ fn next_weekly(profile: &Value, now: chrono::DateTime<chrono::Utc>) -> bson::Dat
 }
 async fn heartbeat(state: &AppState) {
     let _=db::collection(&state.web,"scheduler_health").update_one(doc!{"_id":"email_scheduler"},doc!{"$set":{"last_tick_at":bson::DateTime::now(),"hostname":std::env::var("HOSTNAME").unwrap_or_default(),"pid":std::process::id() as i64,"updated_at":bson::DateTime::now()}}).upsert(true).await;
+}
+
+async fn newsletter_failure(state: &AppState, id: ObjectId, error: &str) {
+    tracing::error!(subscription_id = %id, error, "Newsletter delivery failed");
+    let now = bson::DateTime::now();
+    let _ = db::collection(&state.web, "sub_account")
+        .update_one(
+            doc! {"_id":id},
+            doc! {"$set":{
+                "newsletter_profile.last_error":error,
+                "newsletter_profile.last_error_at":now,
+            }},
+        )
+        .await;
+    let _ = db::collection(&state.web, "scheduler_health")
+        .update_one(
+            doc! {"_id":"email_scheduler"},
+            doc! {"$set":{
+                "newsletter.last_error":error,
+                "newsletter.last_error_at":now,
+                "newsletter.subscription_id":id,
+            }},
+        )
+        .upsert(true)
+        .await;
+}
+
+async fn newsletter_success(state: &AppState, id: ObjectId, cursor: &str, delivered: bool) {
+    let now = bson::DateTime::now();
+    let mut set = doc! {"newsletter_profile.delivery_cursor":cursor};
+    if delivered {
+        set.insert("newsletter_profile.last_success_at", now);
+    }
+    let _ = db::collection(&state.web, "sub_account")
+        .update_one(
+            doc! {"_id":id},
+            doc! {
+                "$set":set,
+                "$unset":{
+                    "newsletter_profile.last_error":"",
+                    "newsletter_profile.last_error_at":"",
+                }
+            },
+        )
+        .await;
+    if delivered {
+        let _ = db::collection(&state.web, "scheduler_health")
+            .update_one(
+                doc! {"_id":"email_scheduler"},
+                doc! {
+                    "$set":{"newsletter.last_success_at":now},
+                    "$unset":{
+                        "newsletter.last_error":"",
+                        "newsletter.last_error_at":"",
+                        "newsletter.subscription_id":"",
+                    }
+                },
+            )
+            .upsert(true)
+            .await;
+    }
 }
 async fn manager_paused(state: &AppState, sub: &Document) -> bool {
     let Ok(id) = sub.get_object_id("managed_by_user_id") else {
@@ -255,20 +294,31 @@ async fn newsletters_tick(state: &AppState, sub: &Document) {
             .await;
         return;
     }
-    let matches = subscriptions::match_profile(state, profile, 100).await;
     let emails = recipients(&value);
+    if emails.is_empty() {
+        newsletter_failure(state, id, "Newsletter subscription has no recipients.").await;
+        return;
+    }
     let config = newsletters::template_config(state).await;
-    let cursor_time = chrono::DateTime::parse_from_rfc3339(cursor)
+    let Some(cursor_time) = chrono::DateTime::parse_from_rfc3339(cursor)
         .ok()
-        .map(|v| v.with_timezone(&chrono::Utc));
-    for item in matches {
+        .map(|value| value.with_timezone(&chrono::Utc))
+    else {
+        newsletter_failure(state, id, "Newsletter delivery cursor is invalid.").await;
+        return;
+    };
+    let batch = match subscriptions::match_profile_after(state, profile, cursor_time, 100).await {
+        Ok(batch) => batch,
+        Err(error) => {
+            newsletter_failure(state, id, &error).await;
+            return;
+        }
+    };
+    let mut delivered = false;
+    for item in batch.items {
         let source = item["source_collection"].as_str().unwrap_or("");
         let selection_id = item["selection_id"].as_str().unwrap_or("");
         let record = &item["document"];
-        let observed = json_time(&record["observed_at"]);
-        if observed.is_none() || cursor_time.is_some_and(|c| observed.unwrap() <= c) {
-            continue;
-        }
         let mut pending = Vec::new();
         for email in &emails {
             let exists = db::find_one(
@@ -288,38 +338,64 @@ async fn newsletters_tick(state: &AppState, sub: &Document) {
             continue;
         }
         let newsletter = newsletters::normalize(record, source, &config);
-        let html = state
+        let html = match state
             .templates
             .get_template(newsletters::template_name(source))
-            .and_then(|t| t.render(json!({"newsletter":newsletter})))
-            .unwrap_or_default();
+            .and_then(|template| template.render(json!({"newsletter":newsletter})))
+        {
+            Ok(html) if !html.trim().is_empty() => html,
+            Ok(_) => {
+                newsletter_failure(state, id, "Newsletter template rendered an empty email.").await;
+                return;
+            }
+            Err(error) => {
+                newsletter_failure(
+                    state,
+                    id,
+                    &format!("Unable to render newsletter email: {error}"),
+                )
+                .await;
+                return;
+            }
+        };
         let subject = newsletter["subject"]
             .as_str()
             .unwrap_or("Security newsletter");
-        if mail::send(state, &pending, "individual", subject, &html)
+        for email in pending {
+            if let Err(error) = mail::send(
+                state,
+                std::slice::from_ref(&email),
+                "individual",
+                subject,
+                &html,
+            )
             .await
-            .is_ok()
-        {
-            for email in pending {
-                let mut delivery = doc! {"subscription_id":id,"email":email,"source_collection":source,"selection_id":selection_id,"title":newsletter["title"].as_str().unwrap_or(""),"database":&state.cfg.vulnerabilities_database,"sent_at":bson::DateTime::now()};
-                if let Ok(owner) = sub.get_object_id("managed_by_user_id") {
-                    delivery.insert("managed_by_user_id", owner);
-                }
-                let _ = db::collection(&state.web, "newsletter_deliveries")
-                    .insert_one(delivery)
-                    .await;
+            {
+                newsletter_failure(state, id, &error).await;
+                return;
             }
-        } else {
-            return;
+            let mut delivery = doc! {"subscription_id":id,"email":&email,"source_collection":source,"selection_id":selection_id,"title":newsletter["title"].as_str().unwrap_or(""),"database":&state.cfg.vulnerabilities_database,"sent_at":bson::DateTime::now()};
+            if let Ok(owner) = sub.get_object_id("managed_by_user_id") {
+                delivery.insert("managed_by_user_id", owner);
+            }
+            if let Err(error) = db::collection(&state.web, "newsletter_deliveries")
+                .insert_one(delivery)
+                .await
+            {
+                newsletter_failure(
+                    state,
+                    id,
+                    &format!("Email was sent to {email}, but delivery history could not be saved: {error}"),
+                )
+                .await;
+                return;
+            }
+            delivered = true;
         }
     }
-    let now = chrono::Utc::now().to_rfc3339();
-    let _ = db::collection(&state.web, "sub_account")
-        .update_one(
-            doc! {"_id":id},
-            doc! {"$set":{"newsletter_profile.delivery_cursor":now}},
-        )
-        .await;
+    if let Some(cursor) = batch.last_scanned_at {
+        newsletter_success(state, id, &cursor, delivered).await;
+    }
 }
 async fn tick(state: &AppState) {
     heartbeat(state).await;

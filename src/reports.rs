@@ -639,30 +639,27 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                     "Select between 1 and 500 vulnerability records.",
                 ));
             }
-            let names = reviews::views(state).await.unwrap_or_default();
             let mut items = Vec::new();
             for s in selections {
                 let collection = s["collection"].as_str().unwrap_or("");
                 let id = s["selection_id"].as_str().unwrap_or("");
-                if !names.iter().any(|n| n == collection) {
+                if !reviews::valid_collection_name(state, collection) {
                     return Some(view::error(
                         StatusCode::BAD_REQUEST,
                         "Invalid Vulnerability Reviews selection.",
                     ));
                 }
-                let src = collection
-                    .strip_suffix(&state.cfg.review_view_suffix)
-                    .unwrap_or(collection);
-                if mode == "enriched_weekly" && (collection != "cve_review" || src != "cve") {
-                    return Some(view::error(
-                        StatusCode::BAD_REQUEST,
-                        "enriched_weekly reports only support cve_review selections.",
-                    ));
-                }
-                if reviews::resolve(state, src, id).await.is_none() {
+                let Some(document) = reviews::resolve(state, collection, id).await else {
                     return Some(view::error(
                         StatusCode::BAD_REQUEST,
                         "Selected vulnerability not found.",
+                    ));
+                };
+                let src = reviews::document_source(&document);
+                if mode == "enriched_weekly" && src != "cve" {
+                    return Some(view::error(
+                        StatusCode::BAD_REQUEST,
+                        "enriched_weekly reports only support CVE source records.",
                     ));
                 }
                 items.push(json!({"source_collection":src,"selection_id":id,"identifier":id}));
@@ -672,7 +669,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         if mode == "enriched_weekly" && source == "upload" {
             return Some(view::error(
                 StatusCode::BAD_REQUEST,
-                "enriched_weekly reports require cve_review selections, not uploaded JSON.",
+                "enriched_weekly reports require CVE source selections, not uploaded JSON.",
             ));
         }
         if inputs.is_empty() || inputs.len() > 500 {

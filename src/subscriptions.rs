@@ -4,13 +4,13 @@ use axum::{
     http::{Method, StatusCode, header},
     response::Response,
 };
-use futures::stream;
+use futures::{TryStreamExt, stream};
 use mongodb::bson::{self, Bson, Document, doc};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 
 fn default_filters() -> Value {
-    json!({"collections":[],"collections_mode":"selected","search":"","code":"","title":"","impact":"","affected":"","status":[],"severity_threshold":"","include_unknown":false,"source":"","keywords":[],"vendor_product_filter":{"enabled":false,"schema_version":1,"include_possible_matches":false,"rows":[]},"time_window":"all","start":"","end":"","source_timestamp":{},"report_scope":{}})
+    json!({"collections":[],"collections_mode":"selected","sources":[],"search":"","code":"","title":"","impact":"","affected":"","status":[],"severity_threshold":"","include_unknown":false,"source":"","keywords":[],"vendor_product_filter":{"enabled":false,"schema_version":1,"include_possible_matches":false,"rows":[]},"time_window":"all","start":"","end":"","source_timestamp":{},"report_scope":{}})
 }
 fn default_profile(kind: &str) -> Value {
     if kind == "newsletter" {
@@ -56,11 +56,39 @@ async fn profile(state: &AppState, kind: &str, input: &Value) -> Result<Value, S
     let names = reviews::views(state)
         .await
         .map_err(|_| "Unable to load review collections.")?;
+    let unified_collection = state.cfg.vulnerabilities_collection.as_str();
     if collections.iter().any(|v| {
-        v.as_str()
-            .is_none_or(|name| !names.iter().any(|n| n == name))
+        v.as_str().is_none_or(|name| {
+            !names.iter().any(|n| n == name)
+                && !name
+                    .strip_suffix("_review")
+                    .is_some_and(reviews::known_source)
+        })
     }) {
         return Err("Filters contain an invalid review collection.".into());
+    }
+    let legacy_sources = collections
+        .iter()
+        .filter_map(Value::as_str)
+        .filter_map(|name| name.strip_suffix("_review"))
+        .filter(|source| !source.trim().is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if !legacy_sources.is_empty() {
+        let existing_sources = profile["filters"]["sources"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if existing_sources.is_empty() {
+            profile["filters"]["sources"] = json!(legacy_sources);
+        }
+        profile["filters"]["collections"] = json!([unified_collection]);
+    }
+    if profile["filters"]["sources"]
+        .as_array()
+        .is_none_or(|values| values.iter().any(|value| value.as_str().is_none()))
+    {
+        return Err("Filter sources must be a list of source names.".into());
     }
     for field in ["search", "code", "title", "impact", "affected", "source"] {
         if !filters[field].is_string() {
@@ -109,10 +137,8 @@ async fn profile(state: &AppState, kind: &str, input: &Value) -> Result<Value, S
             profile["report_language"] = json!("en");
             profile["search_prompt"] = json!("")
         } else {
-            if collections.iter().any(|v| v != "cve_review") {
-                return Err("enriched_weekly report profiles only support cve_review.".into());
-            }
-            profile["filters"]["collections"] = json!(["cve_review"])
+            profile["filters"]["collections"] = json!([unified_collection]);
+            profile["filters"]["sources"] = json!(["cve"])
         }
         if !matches!(
             profile["schedule_weekday"].as_str(),
@@ -850,7 +876,28 @@ async fn notify(
             "cards": cards,
         }))
         .map_err(|error| error.to_string())?;
-    mail::send(state, emails, "individual", subject, &body).await
+    for email in emails {
+        mail::send(
+            state,
+            std::slice::from_ref(email),
+            "individual",
+            subject,
+            &body,
+        )
+        .await
+        .map_err(|error| format!("{email}: {error}"))?;
+    }
+    Ok(())
+}
+
+fn notification_delivery_error(action: &str, error: &str) -> Response {
+    tracing::error!(action, error, "Subscription notification delivery failed");
+    view::error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        &format!(
+            "Subscription was {action}, but the notification email could not be sent: {error}"
+        ),
+    )
 }
 
 fn notification_profile_card(name: &str, profile: &Value, newsletter: bool) -> Value {
@@ -996,14 +1043,11 @@ async fn collection_rows(state: &AppState) -> Vec<Value> {
     let mut data = Vec::new();
     if let Ok(names) = reviews::views(state).await {
         for name in names {
-            let source = name
-                .strip_suffix(&state.cfg.review_view_suffix)
-                .unwrap_or(&name);
-            let count = db::collection(&state.vuln, source)
+            let count = db::collection(&state.vuln, &name)
                 .count_documents(doc! {})
                 .await
                 .unwrap_or(0);
-            data.push(json!({"name":name,"source":source,"count":count}));
+            data.push(json!({"name":name,"source":"news","count":count}));
         }
     }
     data
@@ -1019,17 +1063,56 @@ fn profile_filter(filters: &Value, source: &str) -> Document {
                 "cve_ids",
                 "title",
                 "description",
+                "details.description",
+                "details.descriptions.value",
+                "details.summary",
                 "impacts",
+                "details.impact",
+                "details.impacts",
                 "affected",
+                "details.affected",
+                "details.affected_products",
+                "details.affected_software",
+                "details.systems_affected",
                 "recommendation",
+                "details.recommendation",
+                "details.recommendations",
+                "details.solutions",
                 "related_link",
             ],
         ),
-        ("code", &["code", "cve", "cve_ids"]),
-        ("title", &["title"]),
-        ("impact", &["impacts"]),
-        ("affected", &["affected"]),
-        ("source", &["source.url", "source.detail_url"]),
+        (
+            "code",
+            &[
+                "code",
+                "cve",
+                "cve_ids",
+                "details.cve_id",
+                "details.cve_ids",
+                "details.cveCode",
+                "details.cveId",
+            ],
+        ),
+        (
+            "title",
+            &["title", "details.title", "details.advisory_title"],
+        ),
+        ("impact", &["impacts", "details.impact", "details.impacts"]),
+        (
+            "affected",
+            &[
+                "affected",
+                "details.affected",
+                "details.affected_products",
+                "details.affected_software",
+                "details.systems_affected",
+                "details.affected_systems",
+            ],
+        ),
+        (
+            "source",
+            &["source.provider", "source.url", "source.detail_url"],
+        ),
     ];
     for (name, fields) in mapping {
         let Some(value) = filters[name].as_str().filter(|v| !v.trim().is_empty()) else {
@@ -1047,6 +1130,32 @@ fn profile_filter(filters: &Value, source: &str) -> Document {
             clauses.push(Bson::Document(doc! {"$or":options}));
         }
     }
+    let mut sources = filters["sources"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if sources.is_empty() {
+        sources = filters["collections"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(Value::as_str)
+            .filter_map(|name| name.strip_suffix("_review"))
+            .filter(|name| reviews::known_source(name))
+            .map(str::to_owned)
+            .collect();
+    }
+    if !sources.is_empty() {
+        clauses.push(Bson::Document(doc! {
+            "source.provider": {"$in": sources.clone()}
+        }));
+    }
+
     let status = filters["status"].as_array().cloned().unwrap_or_default();
     let threshold = filters["severity_threshold"].as_str().unwrap_or("");
     let include_unknown = filters["include_unknown"] == true;
@@ -1065,7 +1174,8 @@ fn profile_filter(filters: &Value, source: &str) -> Document {
             }
         }
     }
-    if accepted.is_empty() && !include_unknown && source != "zimbra" {
+    let zimbra_only = sources.len() == 1 && sources[0] == "zimbra";
+    if accepted.is_empty() && !include_unknown && source != "zimbra" && !zimbra_only {
         accepted = ["Critical", "High", "Medium", "Low"]
             .iter()
             .map(|v| v.to_string())
@@ -1077,6 +1187,11 @@ fn profile_filter(filters: &Value, source: &str) -> Document {
             ors.push(Bson::Document(doc! {"severity":{"$exists":false}}));
             ors.push(Bson::Document(doc! {"severity":Bson::Null}));
             ors.push(Bson::Document(doc! {"severity":""}));
+        } else if sources.is_empty() || sources.iter().any(|value| value == "zimbra") {
+            // The legacy Zimbra feed has no severity. It was always included
+            // when all providers were selected, so preserve that behavior in
+            // the unified collection.
+            ors.push(Bson::Document(doc! {"source.provider":"zimbra"}));
         }
         clauses.push(Bson::Document(doc! {"$or":ors}));
     }
@@ -1114,10 +1229,149 @@ fn inventory_match(document: &Document, filters: &Value) -> bool {
     }
     vendor_matcher::classify(&db::bson_json(document), inventory).is_some()
 }
+
+async fn profile_has_collection_scope(state: &AppState, filters: &Value) -> bool {
+    let selected = filters["collections"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if !selected.is_empty() {
+        return true;
+    }
+    if filters["collections_mode"].as_str() == Some("selected") {
+        return false;
+    }
+    !reviews::views(state).await.unwrap_or_default().is_empty()
+}
+
+pub(crate) struct ProfileMatchBatch {
+    pub items: Vec<Value>,
+    pub last_scanned_at: Option<String>,
+}
+
+fn observed_at(document: &Document) -> Option<chrono::DateTime<chrono::Utc>> {
+    match document.get("observed_at") {
+        Some(Bson::DateTime(value)) => {
+            chrono::DateTime::<chrono::Utc>::from_timestamp_millis(value.timestamp_millis())
+        }
+        Some(Bson::String(value)) => chrono::DateTime::parse_from_rfc3339(value)
+            .ok()
+            .map(|value| value.with_timezone(&chrono::Utc)),
+        _ => None,
+    }
+}
+
+/// Return the next matching newsletter records after a delivery cursor.
+///
+/// Records are scanned oldest first. Once `limit` matching records have been
+/// found, every remaining record with the same timestamp is included before
+/// stopping. This makes a timestamp-only cursor safe even when several
+/// documents were inserted at exactly the same instant.
+pub(crate) async fn match_profile_after(
+    state: &AppState,
+    profile: &Value,
+    after: chrono::DateTime<chrono::Utc>,
+    limit: usize,
+) -> Result<ProfileMatchBatch, String> {
+    let filters = &profile["filters"];
+    if limit == 0 || !profile_has_collection_scope(state, filters).await {
+        return Ok(ProfileMatchBatch {
+            items: Vec::new(),
+            last_scanned_at: None,
+        });
+    }
+
+    let collection = db::collection(&state.vuln, &state.cfg.vulnerabilities_collection);
+    let high_watermark = collection
+        .find_one(doc! {
+            "observed_at": {
+                "$gt": bson::DateTime::from_millis(after.timestamp_millis())
+            }
+        })
+        .sort(doc! {"observed_at": -1, "_id": -1})
+        .await
+        .map_err(|error| format!("Unable to query the newsletter watermark: {error}"))?
+        .as_ref()
+        .and_then(observed_at);
+    let Some(high_watermark) = high_watermark else {
+        return Ok(ProfileMatchBatch {
+            items: Vec::new(),
+            last_scanned_at: None,
+        });
+    };
+
+    let base_filter = profile_filter(filters, "news");
+    let after_filter = doc! {
+        "observed_at": {
+            "$gt": bson::DateTime::from_millis(after.timestamp_millis()),
+            "$lte": bson::DateTime::from_millis(high_watermark.timestamp_millis()),
+        }
+    };
+    let filter = if base_filter.is_empty() {
+        after_filter
+    } else {
+        doc! {"$and": [base_filter, after_filter]}
+    };
+    let mut cursor = collection
+        .find(filter)
+        .sort(doc! {"observed_at": 1, "_id": 1})
+        .await
+        .map_err(|error| format!("Unable to query newsletter records: {error}"))?;
+
+    let mut items = Vec::new();
+    let mut last_scanned_at = None;
+    let mut cutoff_millis = None;
+    while let Some(document) = cursor
+        .try_next()
+        .await
+        .map_err(|error| format!("Unable to read newsletter records: {error}"))?
+    {
+        let Some(observed) = observed_at(&document) else {
+            continue;
+        };
+        let observed_millis = observed.timestamp_millis();
+        if cutoff_millis.is_some_and(|cutoff| observed_millis > cutoff) {
+            break;
+        }
+        last_scanned_at = Some(observed.to_rfc3339());
+
+        if !inventory_match(&document, filters) {
+            continue;
+        }
+        let value = db::bson_json(&document);
+        let source = value
+            .pointer("/source/provider")
+            .and_then(Value::as_str)
+            .filter(|source| !source.trim().is_empty())
+            .unwrap_or("unknown")
+            .to_owned();
+        items.push(json!({
+            "collection": state.cfg.vulnerabilities_collection,
+            "source_collection": source,
+            "selection_id": db::id_string(&document),
+            "document": value,
+        }));
+        if items.len() >= limit && cutoff_millis.is_none() {
+            cutoff_millis = Some(observed_millis);
+        }
+    }
+
+    if cutoff_millis.is_none() {
+        // The filtered cursor was exhausted. Advancing to the snapshot's high
+        // watermark prevents permanently rescanning unrelated providers while
+        // preserving records inserted after the snapshot for the next tick.
+        last_scanned_at = Some(high_watermark.to_rfc3339());
+    }
+    Ok(ProfileMatchBatch {
+        items,
+        last_scanned_at,
+    })
+}
+
 pub(crate) async fn match_profile(state: &AppState, profile: &Value, limit: i64) -> Vec<Value> {
     let mut output = Vec::new();
     let filters = &profile["filters"];
-    let mut names = filters["collections"]
+    let selected = filters["collections"]
         .as_array()
         .cloned()
         .unwrap_or_default()
@@ -1128,17 +1382,15 @@ pub(crate) async fn match_profile(state: &AppState, profile: &Value, limit: i64)
     // New profiles use an explicit "selected" mode, so an empty list means
     // none selected. Older records without the mode retain their historical
     // empty-means-all behavior until they are saved again.
-    if names.is_empty() {
-        if filters["collections_mode"].as_str() == Some("selected") {
-            return output;
-        }
-        names = reviews::views(state).await.unwrap_or_default();
+    if selected.is_empty() && !profile_has_collection_scope(state, filters).await {
+        return output;
     }
+    // All provider selections now resolve to one physical collection.  Keep
+    // old `_review` values readable during migration and use the document's
+    // source.provider field for rendering and delivery history.
+    let names = vec![state.cfg.vulnerabilities_collection.clone()];
     for name in names {
-        let source = name
-            .strip_suffix(&state.cfg.review_view_suffix)
-            .unwrap_or(&name);
-        let filter = profile_filter(filters, source);
+        let filter = profile_filter(filters, "news");
         let Ok((_, documents)) = reviews::query_rows(state, &name, filter, 0, 10_000).await else {
             continue;
         };
@@ -1146,7 +1398,13 @@ pub(crate) async fn match_profile(state: &AppState, profile: &Value, limit: i64)
             if !inventory_match(&doc, filters) {
                 continue;
             }
-            output.push(json!({"collection":name,"source_collection":source,"selection_id":db::id_string(&doc),"document":db::bson_json(&doc)}));
+            let document = db::bson_json(&doc);
+            let source = document
+                .pointer("/source/provider")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_owned();
+            output.push(json!({"collection":name,"source_collection":source,"selection_id":db::id_string(&doc),"document":document}));
             if output.len() >= limit as usize {
                 return output;
             }
@@ -1484,7 +1742,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                     .await
                 {
                     Ok(v) => {
-                        if notify(
+                        if let Err(error) = notify(
                             state,
                             &emails,
                             "created",
@@ -1494,12 +1752,8 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                             &report,
                         )
                         .await
-                        .is_err()
                         {
-                            view::error(
-                                StatusCode::SERVICE_UNAVAILABLE,
-                                "Subscription was saved, but the confirmation email could not be sent.",
-                            )
+                            notification_delivery_error("saved", &error)
                         } else {
                             view::json_response(
                                 StatusCode::CREATED,
@@ -1601,7 +1855,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 .await
             {
                 Ok(v) => {
-                    if notify(
+                    if let Err(error) = notify(
                         state,
                         &emails,
                         "created",
@@ -1611,12 +1865,8 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                         &report,
                     )
                     .await
-                    .is_err()
                     {
-                        view::error(
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "Subscription was saved, but the confirmation email could not be sent.",
-                        )
+                        notification_delivery_error("saved", &error)
                     } else {
                         view::json_response(
                             StatusCode::CREATED,
@@ -1715,7 +1965,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             let organization = subscription_organization(&old);
             return Some(match coll.delete_one(doc! {"_id":id}).await {
                 Ok(_) => {
-                    if notify(
+                    if let Err(error) = notify(
                         state,
                         &emails,
                         "cancelled",
@@ -1725,12 +1975,8 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                         &old["report_profile"],
                     )
                     .await
-                    .is_err()
                     {
-                        view::error(
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "Subscription was cancelled, but the notification email could not be sent.",
-                        )
+                        notification_delivery_error("cancelled", &error)
                     } else {
                         view::json_response(StatusCode::OK, json!({"success":true}))
                     }
@@ -1991,8 +2237,8 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                             || ctx.json.get("emails").is_some()
                             || ctx.json.get("organization").is_some()
                             || ctx.json.get("team").is_some();
-                        if changed
-                            && notify(
+                        let notification_error = if changed {
+                            notify(
                                 state,
                                 &emails,
                                 "updated",
@@ -2002,12 +2248,12 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                                 &report,
                             )
                             .await
-                            .is_err()
-                        {
-                            view::error(
-                                StatusCode::SERVICE_UNAVAILABLE,
-                                "Subscription was updated, but the notification email could not be sent.",
-                            )
+                            .err()
+                        } else {
+                            None
+                        };
+                        if let Some(error) = notification_error {
+                            notification_delivery_error("updated", &error)
                         } else {
                             view::json_response(StatusCode::OK, json!({"success":true}))
                         }
@@ -2274,5 +2520,28 @@ mod tests {
             .insert("enabled", true);
         assert!(is_legacy_subscription(&manual));
         assert!(!is_default_zimbra_subscription(&manual));
+    }
+
+    #[test]
+    fn unified_profile_filter_preserves_legacy_provider_scope() {
+        let mut filters = default_filters();
+        filters["collections"] = json!(["cve_review", "cisco_review"]);
+        let query = profile_filter(&filters, "news");
+        let rendered = format!("{query:?}");
+        assert!(rendered.contains("source.provider"));
+        assert!(rendered.contains("cve"));
+        assert!(rendered.contains("cisco"));
+    }
+
+    #[test]
+    fn enriched_source_filter_can_be_restricted_to_cve() {
+        let mut filters = default_filters();
+        filters["collections"] = json!(["news"]);
+        filters["sources"] = json!(["cve"]);
+        let query = profile_filter(&filters, "news");
+        let rendered = format!("{query:?}");
+        assert!(rendered.contains("source.provider"));
+        assert!(rendered.contains("cve"));
+        assert!(!rendered.contains("zimbra"));
     }
 }

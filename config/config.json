@@ -3,7 +3,7 @@
     "local_database": "web",
     "web_database": "web",
     "vulnerabilities_database": "vulnerabilities",
-    "review_view_suffix": "_review"
+    "vulnerabilities_collection": "news"
   },
   "newsletter_root": "newsletters",
   "web_auth": {

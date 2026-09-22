@@ -3,9 +3,10 @@ use axum::{
     http::{Method, StatusCode},
     response::Response,
 };
+use futures::TryStreamExt;
 use mongodb::bson::{self, Bson, doc};
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 const SOURCE_URL_FIELDS: &[&str] = &[
     "source",
@@ -116,37 +117,30 @@ fn field_catalog() -> Vec<Value> {
         .collect()
 }
 async fn latest(state: &AppState) -> Vec<Value> {
-    let names = reviews::views(state).await.unwrap_or_default();
-    let mut by_source: HashMap<String, Vec<String>> = HashMap::new();
-    for name in names {
-        let source = name
-            .strip_suffix(&state.cfg.review_view_suffix)
-            .unwrap_or(&name);
-        if source != "zimbra" {
-            by_source.entry(source.into()).or_default().push(name)
-        }
-    }
     let mut rows = Vec::new();
-    let mut sources: Vec<_> = by_source.into_iter().collect();
-    sources.sort_by(|a, b| a.0.cmp(&b.0));
-    for (source, names) in sources {
-        let document = db::find_sorted(
-            &state.vuln,
-            &source,
-            doc! {},
-            doc! {"observed_at":-1,"_id":-1},
-            1,
-        )
+    let collection = db::collection(&state.vuln, &state.cfg.vulnerabilities_collection);
+    let Ok(mut cursor) = collection
+        .aggregate([
+            doc! {"$match":{"source.provider":{"$type":"string","$ne":""}}},
+            doc! {"$sort":{"observed_at":-1,"_id":-1}},
+            doc! {"$group":{"_id":"$source.provider","document":{"$first":"$$ROOT"}}},
+            doc! {"$sort":{"_id":1}},
+        ])
         .await
-        .ok()
-        .and_then(|mut rows| rows.pop());
-        let id = document.as_ref().map(db::id_string).unwrap_or_default();
+    else {
+        return rows;
+    };
+    while let Ok(Some(group)) = cursor.try_next().await {
+        let source = db::string(&group, "_id");
+        let Ok(document) = group.get_document("document") else {
+            continue;
+        };
+        let id = db::id_string(&document);
         let timestamp = document
-            .as_ref()
-            .and_then(|d| d.get("observed_at"))
+            .get("observed_at")
             .map(|v| format!("{v:?}"))
             .unwrap_or_default();
-        rows.push(json!({"source_collection":source,"review_collections":names,"selection_id":id,"source_timestamp":timestamp}));
+        rows.push(json!({"source_collection":source,"review_collections":[state.cfg.vulnerabilities_collection],"selection_id":id,"source_timestamp":timestamp}));
     }
     rows
 }
@@ -245,7 +239,7 @@ async fn health(state: &AppState, ctx: &ReqCtx) -> Value {
             row
         });
         reports.push(json!({"username":value["username"],"emails":emails,"email":email,"organization":organization,"enabled":report["enabled"],"schedule_enabled":report["schedule_enabled"],"schedule_weekday":report["schedule_weekday"],"schedule_time":report["schedule_time"],"generation_mode":report["generation_mode"],"report_language":report["report_language"],"next_run_at":report["next_run_at"],"due":false,"last_run_at":report["last_run_at"],"last_error":report["last_error"],"last_job_id":report["last_job_id"],"last_match_count":report["last_match_count"],"delivery":{}}));
-        newsletters.push(json!({"username":value["username"],"emails":emails,"email":email,"organization":organization,"enabled":newsletter["enabled"],"delivery_cursor":newsletter["delivery_cursor"],"cve_delivery_cutoff":newsletter["cve_delivery_cutoff"],"total_delivered":total_delivered,"by_collection":[],"latest_delivery":latest_delivery.unwrap_or(Value::Null)}));
+        newsletters.push(json!({"username":value["username"],"emails":emails,"email":email,"organization":organization,"enabled":newsletter["enabled"],"delivery_cursor":newsletter["delivery_cursor"],"cve_delivery_cutoff":newsletter["cve_delivery_cutoff"],"last_error":newsletter["last_error"],"last_error_at":newsletter["last_error_at"],"last_success_at":newsletter["last_success_at"],"total_delivered":total_delivered,"by_collection":[],"latest_delivery":latest_delivery.unwrap_or(Value::Null)}));
     }
     json!({"generated_at":chrono::Utc::now().to_rfc3339(),"scheduler":{"alive":alive,"last_tick_at":last.map(|v|v.to_string()).unwrap_or_default(),"hostname":heartbeat.as_ref().map(|v|db::string(v,"hostname")).unwrap_or_default(),"pid":heartbeat.as_ref().and_then(|v|v.get_i64("pid").ok()),"retention":heartbeat.as_ref().and_then(|v|v.get_document("retention").ok()).map(db::bson_json).unwrap_or(json!({})),"zimbra":zimbra_status},"reports":reports,"newsletters":newsletters})
 }
@@ -269,10 +263,11 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         let mut data = Vec::new();
         for row in latest(state).await {
             let source = row["source_collection"].as_str().unwrap_or("");
-            let coll = db::collection(&state.vuln, source);
+            let coll = db::collection(&state.vuln, &state.cfg.vulnerabilities_collection);
+            let source_filter = doc! {"source.provider": source};
             let mut urls = HashSet::new();
             for field in SOURCE_URL_FIELDS {
-                if let Ok(values) = coll.distinct(*field, doc! {}).await {
+                if let Ok(values) = coll.distinct(*field, source_filter.clone()).await {
                     for value in values {
                         collect_source_urls(&value, &mut urls);
                     }
@@ -364,6 +359,12 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             ));
         };
         let record = db::bson_json(&document);
+        let source = record
+            .pointer("/source/provider")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("unknown")
+            .to_owned();
         let config = ctx.json.get("config").cloned().unwrap_or(json!({}));
         let newsletter = newsletters::normalize(&record, &source, &config);
         let html = state

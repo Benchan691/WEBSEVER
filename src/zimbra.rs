@@ -296,6 +296,7 @@ mod tests {
             mongo_uri: String::new(),
             web_database: "web".into(),
             vulnerabilities_database: "vulnerabilities".into(),
+            vulnerabilities_collection: "news".into(),
             secret: "test".into(),
             bootstrap_username: "admin".into(),
             bootstrap_password: "pw".into(),
@@ -306,7 +307,6 @@ mod tests {
             zimbra_credential_key: STANDARD.encode([7_u8; 32]),
             account_collection: "accounts".into(),
             newsletter_root: PathBuf::new(),
-            review_view_suffix: "_review".into(),
             port: 9100,
         }
     }

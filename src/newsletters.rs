@@ -46,6 +46,11 @@ pub async fn preview(
         );
     };
     let record = db::bson_json(&document);
+    let source = record
+        .pointer("/source/provider")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("unknown");
     let config = match config {
         Some(v) => v,
         None => template_config(state).await,
