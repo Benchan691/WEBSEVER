@@ -76,11 +76,11 @@
     function newsletterFilterMarkup() {
         return '<div class="row g-2">' +
         '<div class="col-md-6">' +
-        '<label for="newsletter-collections-toggle" class="form-label small">' + t('Collections') + '</label>' +
+        '<label for="newsletter-collections-toggle" class="form-label small">' + t('Sources') + '</label>' +
         '<div class="dropdown w-100">' +
-        '<button id="newsletter-collections-toggle" type="button" class="form-select form-select-sm dropdown-toggle subscription-collections-toggle text-start w-100" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">' + t('No collections') + '</button>' +
+        '<button id="newsletter-collections-toggle" type="button" class="form-select form-select-sm dropdown-toggle subscription-collections-toggle text-start w-100" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">' + t('No sources') + '</button>' +
         '<div id="newsletter-collections-menu" class="dropdown-menu w-100 shadow-sm p-2">' +
-        '<input id="newsletter-collections-search" type="search" class="form-control form-control-sm mb-2" placeholder="' + t('Search collections...') + '" autocomplete="off">' +
+        '<input id="newsletter-collections-search" type="search" class="form-control form-control-sm mb-2" placeholder="' + t('Search sources...') + '" autocomplete="off">' +
         '<div id="newsletter-collections-options" class="subscription-collections-options"></div>' +
         '<div class="dropdown-divider my-2"></div>' +
         '<div class="d-flex justify-content-between px-1">' +
@@ -710,19 +710,20 @@
             tr.children[0].querySelector('.recipients').textContent = emails.filter(Boolean).join(', ');
             tr.children[0].querySelector('.organization').textContent = item.organization || '';
             if (item.newsletter_profile.enabled) {
-                const collectionCount = item.newsletter_profile.filters.collections.length;
+                const newsletterFilters = item.newsletter_profile.filters || {};
+                const selectedSources = Array.isArray(newsletterFilters.collections) ? newsletterFilters.collections : [];
+                const sourceCount = selectedSources.length;
                 const newsletterSummary = [
-                    collectionCount
-                        ? t('Enabled · {count} collection(s)', {count: collectionCount})
-                        : item.newsletter_profile.filters.collections_mode !== 'selected'
-                            ? t('Enabled · all collection(s)')
-                            : t('Enabled · no collections')
+                    sourceCount
+                        ? t('Enabled · {count} source(s)', {count: sourceCount})
+                        : newsletterFilters.collections_mode !== 'selected'
+                            ? t('Enabled · all source(s)')
+                            : t('Enabled · no sources')
                 ];
                 const inventorySuffix = inventorySummarySuffix(item.newsletter_profile.filters);
                 if (inventorySuffix) {
                     newsletterSummary.push(inventorySuffix);
                 }
-                const newsletterFilters = item.newsletter_profile.filters || {};
                 if (Array.isArray(newsletterFilters.status) && newsletterFilters.status.length) {
                     newsletterSummary.push(t('Severity: {values}', {
                         values: newsletterFilters.status.map(function (value) { return t(value); }).join(', '),
@@ -732,6 +733,12 @@
                     newsletterSummary.push(t('Unknown severity included'));
                 }
                 tr.children[1].textContent = newsletterSummary.join(' · ');
+                if (sourceCount) {
+                    const sourceNames = document.createElement('div');
+                    sourceNames.className = 'small text-muted';
+                    sourceNames.textContent = selectedSources.join(', ');
+                    tr.children[1].append(sourceNames);
+                }
             } else {
                 tr.children[1].textContent = t('Disabled');
             }
@@ -781,10 +788,10 @@
             const filters = profile.filters || {};
             const collections = Array.isArray(filters.collections) ? filters.collections : [];
             return collections.length
-                ? t('Enabled · {count} collection(s)', {count: collections.length})
+                ? t('Enabled · {count} source(s): {sources}', {count: collections.length, sources: collections.join(', ')})
                 : filters.collections_mode !== 'selected'
-                    ? t('Enabled · all collection(s)')
-                    : t('Enabled · no collections');
+                    ? t('Enabled · all source(s)')
+                    : t('Enabled · no sources');
         }
         return profile.schedule_enabled
             ? t('Enabled · weekly {weekday} {time} HKT', {weekday: profile.schedule_weekday || '', time: profile.schedule_time || ''})

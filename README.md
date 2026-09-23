@@ -25,6 +25,14 @@ The crawler and portal share one physical MongoDB collection, configured with
 templates, reports, and delivery history. The portal does not require MongoDB
 `*_review` views.
 
+Cyberclawer publishes its effective scraper provider list to the
+`vulnerabilities.source_catalog` collection. Run `vuln-scrape
+sync-source-catalog` to publish the list without scraping; catch-up also
+refreshes it before a cycle. The subscription picker reads this catalog and
+filters the unified `news` collection by `source.provider`, including sources
+that do not currently have news records. The UI displays provider IDs without
+the legacy `_review` suffix.
+
 Before switching an existing deployment, run the crawler migration as a dry
 run and then perform the validated cutover:
 

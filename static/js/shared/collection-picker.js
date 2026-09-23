@@ -39,9 +39,9 @@
             const checked = this.checkboxes().filter(function (input) { return input.checked; });
             const toggle = this.element('toggle');
             toggle.textContent = this.allMode
-                ? t('All collections')
-                : checked.length === 0 ? t('No collections')
-                    : checked.length === 1 ? checked[0].value : t('{count} collections', {count: checked.length});
+                ? t('All sources')
+                : checked.length === 0 ? t('No sources')
+                    : checked.length === 1 ? checked[0].value : t('{count} sources', {count: checked.length});
         }
 
         render(collections, selected) {
@@ -96,15 +96,12 @@
                     this.updateLabel();
                     return;
                 }
-                const checkboxes = action.dataset.action === 'all'
-                    ? this.checkboxes().filter(function (input) {
-                        return !input.closest('.form-check').classList.contains('d-none');
-                    })
-                    : this.checkboxes();
+                const checkboxes = this.checkboxes();
                 this.allMode = false;
                 checkboxes.forEach(function (input) {
                     input.checked = action.dataset.action === 'all';
                 });
+                if (action.dataset.action === 'all') this.clearSearch();
                 this.updateLabel();
             });
             this.element('toggle').addEventListener('shown.bs.dropdown', () => {

@@ -19,13 +19,12 @@ fn default_profile(kind: &str) -> Value {
         json!({"enabled":false,"filters":default_filters(),"generation_mode":"template","report_language":"en","search_prompt":"","schedule_enabled":false,"schedule_weekday":"mon","schedule_time":"09:00"})
     }
 }
-fn logical_collection_name(source: &str) -> String {
-    let source = source.trim();
-    if source.ends_with("_review") || !reviews::known_source(source) {
-        source.to_owned()
-    } else {
-        format!("{source}_review")
-    }
+fn canonical_provider_name(value: &str) -> String {
+    value
+        .trim()
+        .strip_suffix("_review")
+        .unwrap_or(value.trim())
+        .to_owned()
 }
 fn logical_collection_names(filters: &Value) -> Vec<String> {
     let sources = filters["sources"]
@@ -33,7 +32,7 @@ fn logical_collection_names(filters: &Value) -> Vec<String> {
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
-        .map(logical_collection_name)
+        .map(canonical_provider_name)
         .filter(|source| !source.is_empty())
         .collect::<Vec<_>>();
     if !sources.is_empty() {
@@ -44,9 +43,69 @@ fn logical_collection_names(filters: &Value) -> Vec<String> {
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
+        .map(canonical_provider_name)
+        .filter(|name| !name.is_empty() && name != "news")
+        .collect()
+}
+
+async fn source_providers(state: &AppState) -> Result<Vec<String>, String> {
+    let catalog = db::find_one(&state.vuln, "source_catalog", doc! {"_id":"active"})
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "Unable to read Cyberclawer source catalog");
+            "Unable to load the Cyberclawer source catalog.".to_owned()
+        })?
+        .ok_or_else(|| {
+            "Cyberclawer source catalog is not initialized. Run `vuln-scrape sync-source-catalog`."
+                .to_owned()
+        })?;
+    parse_source_catalog(&catalog)
+}
+
+fn parse_source_catalog(catalog: &Document) -> Result<Vec<String>, String> {
+    let values = catalog
+        .get_array("providers")
+        .map_err(|_| "Cyberclawer source catalog has an invalid provider list.".to_owned())?;
+    let mut providers = Vec::with_capacity(values.len());
+    let mut seen = HashSet::new();
+    for value in values {
+        let Bson::String(provider) = value else {
+            return Err("Cyberclawer source catalog has an invalid provider list.".to_owned());
+        };
+        let provider = provider.trim();
+        if provider.is_empty() || !seen.insert(provider.to_owned()) {
+            return Err("Cyberclawer source catalog has an invalid provider list.".to_owned());
+        }
+        providers.push(provider.to_owned());
+    }
+    Ok(providers)
+}
+
+fn selected_provider_names(filters: &Value, physical_collection: &str) -> Vec<String> {
+    let collection_sources = filters["collections"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
         .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_owned)
+        .filter(|name| !name.is_empty() && *name != physical_collection && *name != "news")
+        .map(canonical_provider_name)
+        .collect::<Vec<_>>();
+    let values = if collection_sources.is_empty() {
+        filters["sources"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(canonical_provider_name)
+            .collect::<Vec<_>>()
+    } else {
+        collection_sources
+    };
+    let mut seen = HashSet::new();
+    values
+        .into_iter()
+        .filter(|value| !value.is_empty() && seen.insert(value.clone()))
         .collect()
 }
 fn merge(into: &mut Value, from: &Value) {
@@ -83,36 +142,10 @@ async fn profile(state: &AppState, kind: &str, input: &Value) -> Result<Value, S
     let collections = filters["collections"]
         .as_array()
         .ok_or("Filter collections must be a list.")?;
-    let names = reviews::views(state)
-        .await
-        .map_err(|_| "Unable to load review collections.")?;
+    let providers = source_providers(state).await?;
     let unified_collection = state.cfg.vulnerabilities_collection.as_str();
-    if collections.iter().any(|v| {
-        v.as_str().is_none_or(|name| {
-            !names.iter().any(|n| n == name)
-                && !name
-                    .strip_suffix("_review")
-                    .is_some_and(reviews::known_source)
-        })
-    }) {
-        return Err("Filters contain an invalid review collection.".into());
-    }
-    let legacy_sources = collections
-        .iter()
-        .filter_map(Value::as_str)
-        .filter_map(|name| name.strip_suffix("_review"))
-        .filter(|source| !source.trim().is_empty())
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    if !legacy_sources.is_empty() {
-        let existing_sources = profile["filters"]["sources"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        if existing_sources.is_empty() {
-            profile["filters"]["sources"] = json!(legacy_sources);
-        }
-        profile["filters"]["collections"] = json!([unified_collection]);
+    if collections.iter().any(|value| value.as_str().is_none()) {
+        return Err("Filter collections must contain provider names.".into());
     }
     if profile["filters"]["sources"]
         .as_array()
@@ -120,6 +153,22 @@ async fn profile(state: &AppState, kind: &str, input: &Value) -> Result<Value, S
     {
         return Err("Filter sources must be a list of source names.".into());
     }
+    let selected_sources = selected_provider_names(&filters, unified_collection);
+    if selected_sources
+        .iter()
+        .any(|source| !providers.iter().any(|provider| provider == source))
+    {
+        return Err("Filters contain a source that is not in the Cyberclawer catalog.".into());
+    }
+    profile["filters"]["sources"] = json!(selected_sources);
+    profile["filters"]["collections"] = if profile["filters"]["sources"]
+        .as_array()
+        .is_some_and(|sources| !sources.is_empty())
+    {
+        json!([unified_collection])
+    } else {
+        json!([])
+    };
     for field in ["search", "code", "title", "impact", "affected", "source"] {
         if !filters[field].is_string() {
             return Err(format!("Filter {field} must be text."));
@@ -194,6 +243,13 @@ async fn profile(state: &AppState, kind: &str, input: &Value) -> Result<Value, S
         {
             return Err("Report keyword filters are no longer supported. Import a vendor/product CSV instead.".into());
         }
+    }
+    let normalized_sources = selected_provider_names(&profile["filters"], unified_collection);
+    if normalized_sources
+        .iter()
+        .any(|source| !providers.iter().any(|provider| provider == source))
+    {
+        return Err("Filters contain a source that is not in the Cyberclawer catalog.".into());
     }
     Ok(profile)
 }
@@ -955,8 +1011,8 @@ fn notification_profile_card(name: &str, profile: &Value, newsletter: bool) -> V
         .join(", ");
     let collections = (!collections.is_empty())
         .then_some(collections)
-        .unwrap_or_else(|| "No collections selected".to_owned());
-    summary_lines.push(format!("Collections: {collections}"));
+        .unwrap_or_else(|| "No sources selected".to_owned());
+    summary_lines.push(format!("Sources: {collections}"));
 
     if newsletter {
         if profile["statistic_schedule_enabled"] == true {
@@ -1079,37 +1135,25 @@ async fn vendor_import(ctx: &ReqCtx) -> Response {
         json!({"vendor_product_filter":{"enabled":true,"schema_version":1,"include_possible_matches":false,"rows":rows},"warnings":[]}),
     )
 }
-async fn collection_rows(state: &AppState) -> Vec<Value> {
+async fn collection_rows(state: &AppState) -> Result<Vec<Value>, String> {
     let collection = db::collection(&state.vuln, &state.cfg.vulnerabilities_collection);
-    let Ok(values) = collection
-        .distinct(
-            "source.provider",
-            doc! {"source.provider":{"$type":"string","$ne":""}},
-        )
-        .await
-    else {
-        return Vec::new();
-    };
-    let mut providers = values
-        .into_iter()
-        .filter_map(|value| value.as_str().map(str::to_owned))
-        .filter(|provider| reviews::known_source(provider))
-        .collect::<Vec<_>>();
-    providers.sort();
-    providers.dedup();
+    let providers = source_providers(state).await?;
     let mut data = Vec::with_capacity(providers.len());
     for provider in providers {
         let count = collection
             .count_documents(doc! {"source.provider":&provider})
             .await
-            .unwrap_or(0);
+            .map_err(|error| {
+                tracing::error!(%error, provider, "Unable to count provider documents");
+                "Unable to load provider document counts.".to_owned()
+            })?;
         data.push(json!({
-            "name":format!("{provider}_review"),
+            "name":provider,
             "source":provider,
             "count":count,
         }));
     }
-    data
+    Ok(data)
 }
 fn profile_filter(filters: &Value, source: &str) -> Document {
     let mut clauses: Vec<Bson> = Vec::new();
@@ -1189,27 +1233,8 @@ fn profile_filter(filters: &Value, source: &str) -> Document {
             clauses.push(Bson::Document(doc! {"$or":options}));
         }
     }
-    let mut sources = filters["sources"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .filter_map(Value::as_str)
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    if sources.is_empty() {
-        sources = filters["collections"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default()
-            .iter()
-            .filter_map(Value::as_str)
-            .filter_map(|name| name.strip_suffix("_review"))
-            .filter(|name| reviews::known_source(name))
-            .map(str::to_owned)
-            .collect();
-    }
-    if !sources.is_empty() {
+    let sources = selected_provider_names(filters, "news");
+    if !sources.is_empty() || filters["collections_mode"].as_str() == Some("selected") {
         clauses.push(Bson::Document(doc! {
             "source.provider": {"$in": sources.clone()}
         }));
@@ -1290,17 +1315,15 @@ fn inventory_match(document: &Document, filters: &Value) -> bool {
 }
 
 async fn profile_has_collection_scope(state: &AppState, filters: &Value) -> bool {
-    let selected = filters["collections"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    if !selected.is_empty() {
+    if !selected_provider_names(filters, &state.cfg.vulnerabilities_collection).is_empty() {
         return true;
     }
     if filters["collections_mode"].as_str() == Some("selected") {
         return false;
     }
-    !reviews::views(state).await.unwrap_or_default().is_empty()
+    source_providers(state)
+        .await
+        .is_ok_and(|providers| !providers.is_empty())
 }
 
 pub(crate) struct ProfileMatchBatch {
@@ -1482,20 +1505,23 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         return Some(vendor_import(ctx).await);
     }
     if ctx.path == "/api/subscriptions/collections" && ctx.method == Method::GET {
-        return Some(view::json_response(
-            StatusCode::OK,
-            json!({"data":collection_rows(state).await}),
-        ));
+        return Some(match collection_rows(state).await {
+            Ok(rows) => view::json_response(StatusCode::OK, json!({"data":rows})),
+            Err(error) => view::error(StatusCode::SERVICE_UNAVAILABLE, &error),
+        });
     }
     if ctx.path == "/api/subscriptions/schema" && ctx.method == Method::GET {
-        let names = collection_rows(state)
-            .await
+        let rows = match collection_rows(state).await {
+            Ok(rows) => rows,
+            Err(error) => return Some(view::error(StatusCode::SERVICE_UNAVAILABLE, &error)),
+        };
+        let names = rows
             .into_iter()
             .filter_map(|row| row["name"].as_str().map(str::to_owned))
             .collect::<Vec<_>>();
         return Some(view::json_response(
             StatusCode::OK,
-            json!({"schema_version":1,"subscription":{"fields":["username","emails","organization"],"delivery_mode":"individual"},"profile_types":["newsletter","report"],"review_collections":names,"filters":{"defaults":default_filters()},"profiles":{"newsletter":{"defaults":default_profile("newsletter")},"report":{"defaults":default_profile("report")}},"vendor_product_filter":{"schema_version":1,"defaults":{"enabled":false,"schema_version":1,"include_possible_matches":false,"rows":[]}},"allowed_values":{"severity":["Critical","High","Medium","Low"],"time_window":["all","daily","week","custom"],"generation_mode":["template","enriched_weekly"],"report_language":["en","zh","ch"]},"limits":{"report_scope_max_count":500}}),
+            json!({"schema_version":1,"subscription":{"fields":["username","emails","organization"],"delivery_mode":"individual"},"profile_types":["newsletter","report"],"source_providers":names.clone(),"review_collections":names,"filters":{"defaults":default_filters()},"profiles":{"newsletter":{"defaults":default_profile("newsletter")},"report":{"defaults":default_profile("report")}},"vendor_product_filter":{"schema_version":1,"defaults":{"enabled":false,"schema_version":1,"include_possible_matches":false,"rows":[]}},"allowed_values":{"severity":["Critical","High","Medium","Low"],"time_window":["all","daily","week","custom"],"generation_mode":["template","enriched_weekly"],"report_language":["en","zh","ch"]},"limits":{"report_scope_max_count":500}}),
         ));
     }
     if ctx.path == "/api/organization/subscriptions" && ctx.method == Method::GET {
@@ -1526,7 +1552,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             {
                 Ok(rows) => view::json_response(
                     StatusCode::OK,
-                    json!({"data":rows.iter().map(public).collect::<Vec<_>>()}),
+                    json!({"data":rows.iter().map(|row| public(row)).collect::<Vec<_>>()}),
                 ),
                 Err(_) => view::error(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -2597,6 +2623,36 @@ mod tests {
     }
 
     #[test]
+    fn unified_profile_filter_accepts_plain_provider_names() {
+        let mut filters = default_filters();
+        filters["collections"] = json!(["fortiguard", "cve"]);
+        let query = profile_filter(&filters, "news");
+        let rendered = format!("{query:?}");
+        assert!(rendered.contains("source.provider"));
+        assert!(rendered.contains("fortiguard"));
+        assert!(rendered.contains("cve"));
+        assert!(!rendered.contains("_review"));
+    }
+
+    #[test]
+    fn clear_all_source_selection_matches_no_documents() {
+        let filters = default_filters();
+        let query = profile_filter(&filters, "news");
+        let rendered = format!("{query:?}");
+        assert!(rendered.contains("source.provider"));
+        assert!(rendered.contains("Array([])"));
+    }
+
+    #[test]
+    fn source_catalog_accepts_provider_without_news_documents() {
+        let catalog = doc! {"_id":"active","providers":["fortiguard","cve"]};
+        assert_eq!(
+            parse_source_catalog(&catalog).unwrap(),
+            vec!["fortiguard", "cve"]
+        );
+    }
+
+    #[test]
     fn enriched_source_filter_can_be_restricted_to_cve() {
         let mut filters = default_filters();
         filters["collections"] = json!(["news"]);
@@ -2609,7 +2665,7 @@ mod tests {
     }
 
     #[test]
-    fn public_subscription_keeps_each_selected_provider_collection() {
+    fn public_subscription_returns_plain_selected_provider_names() {
         let subscription = doc! {
             "_id": ObjectId::new(),
             "newsletter_profile": {
@@ -2623,7 +2679,8 @@ mod tests {
         let value = public(&subscription);
         assert_eq!(
             value["newsletter_profile"]["filters"]["collections"],
-            json!(["cve_review", "hkcert_review", "zimbra_review"])
+            json!(["cve", "hkcert", "zimbra"])
         );
+        assert!(!value.to_string().contains("_review"));
     }
 }

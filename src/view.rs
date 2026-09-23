@@ -398,7 +398,7 @@ mod tests {
                 "kind": "updated",
                 "changes": ["Newsletter feed: Enabled", "Report profile: Disabled"],
                 "cards": [
-                    {"name":"Newsletter feed","enabled":true,"status":"Enabled","summary_lines":["Collections: cve_review"]},
+                    {"name":"Newsletter feed","enabled":true,"status":"Enabled","summary_lines":["Sources: cve"]},
                     {"name":"Report profile","enabled":false,"status":"Disabled","summary_lines":[]}
                 ]
             }))
