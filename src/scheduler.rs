@@ -98,9 +98,9 @@ async fn newsletter_failure(state: &AppState, id: ObjectId, error: &str) {
         .await;
 }
 
-async fn newsletter_success(state: &AppState, id: ObjectId, cursor: &str, delivered: bool) {
+async fn newsletter_success(state: &AppState, id: ObjectId, delivered: bool) {
     let now = bson::DateTime::now();
-    let mut set = doc! {"newsletter_profile.delivery_cursor":cursor};
+    let mut set = doc! {"newsletter.last_success_at":now};
     if delivered {
         set.insert("newsletter_profile.last_success_at", now);
     }
@@ -133,6 +133,7 @@ async fn newsletter_success(state: &AppState, id: ObjectId, cursor: &str, delive
             .await;
     }
 }
+
 async fn manager_paused(state: &AppState, sub: &Document) -> bool {
     let Ok(id) = sub.get_object_id("managed_by_user_id") else {
         return false;
@@ -283,60 +284,24 @@ async fn newsletters_tick(state: &AppState, sub: &Document) {
     if profile["enabled"] != true {
         return;
     }
-    let cursor = profile["delivery_cursor"].as_str().unwrap_or("");
-    if cursor.is_empty() {
-        let now = chrono::Utc::now().to_rfc3339();
-        let _ = db::collection(&state.web, "sub_account")
-            .update_one(
-                doc! {"_id":id},
-                doc! {"$set":{"newsletter_profile.delivery_cursor":now}},
-            )
-            .await;
-        return;
-    }
     let emails = recipients(&value);
     if emails.is_empty() {
         newsletter_failure(state, id, "Newsletter subscription has no recipients.").await;
         return;
     }
     let config = newsletters::template_config(state).await;
-    let Some(cursor_time) = chrono::DateTime::parse_from_rfc3339(cursor)
-        .ok()
-        .map(|value| value.with_timezone(&chrono::Utc))
-    else {
-        newsletter_failure(state, id, "Newsletter delivery cursor is invalid.").await;
-        return;
-    };
-    let batch = match subscriptions::match_profile_after(state, profile, cursor_time, 100).await {
-        Ok(batch) => batch,
+    let items = match subscriptions::match_profile_pending(state, profile, id, 100).await {
+        Ok(items) => items,
         Err(error) => {
             newsletter_failure(state, id, &error).await;
             return;
         }
     };
     let mut delivered = false;
-    for item in batch.items {
+    for item in items {
         let source = item["source_collection"].as_str().unwrap_or("");
         let selection_id = item["selection_id"].as_str().unwrap_or("");
         let record = &item["document"];
-        let mut pending = Vec::new();
-        for email in &emails {
-            let exists = db::find_one(
-                &state.web,
-                "newsletter_deliveries",
-                doc! {"subscription_id":id,"email":email,"source_collection":source,"selection_id":selection_id},
-            )
-            .await
-            .ok()
-            .flatten()
-            .is_some();
-            if !exists {
-                pending.push(email.clone())
-            }
-        }
-        if pending.is_empty() {
-            continue;
-        }
         let newsletter = newsletters::normalize(record, source, &config);
         let html = match state
             .templates
@@ -361,10 +326,10 @@ async fn newsletters_tick(state: &AppState, sub: &Document) {
         let subject = newsletter["subject"]
             .as_str()
             .unwrap_or("Security newsletter");
-        for email in pending {
+        for email in &emails {
             if let Err(error) = mail::send(
                 state,
-                std::slice::from_ref(&email),
+                std::slice::from_ref(email),
                 "individual",
                 subject,
                 &html,
@@ -374,7 +339,7 @@ async fn newsletters_tick(state: &AppState, sub: &Document) {
                 newsletter_failure(state, id, &error).await;
                 return;
             }
-            let mut delivery = doc! {"subscription_id":id,"email":&email,"source_collection":source,"selection_id":selection_id,"title":newsletter["title"].as_str().unwrap_or(""),"database":&state.cfg.vulnerabilities_database,"sent_at":bson::DateTime::now()};
+            let mut delivery = doc! {"subscription_id":id,"email":email,"source_collection":source,"selection_id":selection_id,"title":newsletter["title"].as_str().unwrap_or(""),"database":&state.cfg.vulnerabilities_database,"sent_at":bson::DateTime::now()};
             if let Ok(owner) = sub.get_object_id("managed_by_user_id") {
                 delivery.insert("managed_by_user_id", owner);
             }
@@ -393,9 +358,7 @@ async fn newsletters_tick(state: &AppState, sub: &Document) {
             delivered = true;
         }
     }
-    if let Some(cursor) = batch.last_scanned_at {
-        newsletter_success(state, id, &cursor, delivered).await;
-    }
+    newsletter_success(state, id, delivered).await;
 }
 async fn tick(state: &AppState) {
     heartbeat(state).await;

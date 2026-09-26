@@ -1349,6 +1349,70 @@ fn observed_at(document: &Document) -> Option<chrono::DateTime<chrono::Utc>> {
 /// found, every remaining record with the same timestamp is included before
 /// stopping. This makes a timestamp-only cursor safe even when several
 /// documents were inserted at exactly the same instant.
+pub(crate) async fn match_profile_pending(
+    state: &AppState,
+    profile: &Value,
+    subscription_id: bson::oid::ObjectId,
+    limit: usize,
+) -> Result<Vec<Value>, String> {
+    let filters = &profile["filters"];
+    if limit == 0 || !profile_has_collection_scope(state, filters).await {
+        return Ok(Vec::new());
+    }
+
+    let delivered: Vec<Bson> = db::find_many(
+        &state.web,
+        "newsletter_deliveries",
+        doc! {"subscription_id": subscription_id},
+        100_000,
+    )
+    .await
+    .unwrap_or_default()
+    .iter()
+    .filter_map(|entry| entry.get_str("selection_id").ok().map(Bson::from))
+    .collect();
+
+    let collection = db::collection(&state.vuln, &state.cfg.vulnerabilities_collection);
+    let mut filter = profile_filter(filters, "news");
+    if !delivered.is_empty() {
+        filter.insert("_id", doc! {"$nin": delivered});
+    }
+
+    let mut cursor = collection
+        .find(filter)
+        .sort(doc! {"observed_at": 1, "_id": 1})
+        .await
+        .map_err(|error| format!("Unable to read newsletter records: {error}"))?;
+
+    let mut items = Vec::new();
+    while let Some(document) = cursor
+        .try_next()
+        .await
+        .map_err(|error| format!("Unable to read newsletter records: {error}"))?
+    {
+        if !inventory_match(&document, filters) {
+            continue;
+        }
+        let value = db::bson_json(&document);
+        let source = value
+            .pointer("/source/provider")
+            .and_then(Value::as_str)
+            .filter(|source| !source.trim().is_empty())
+            .unwrap_or("unknown")
+            .to_owned();
+        items.push(json!({
+            "collection": state.cfg.vulnerabilities_collection,
+            "source_collection": source,
+            "selection_id": db::id_string(&document),
+            "document": value,
+        }));
+        if items.len() >= limit {
+            break;
+        }
+    }
+    Ok(items)
+}
+
 pub(crate) async fn match_profile_after(
     state: &AppState,
     profile: &Value,
