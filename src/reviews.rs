@@ -12,25 +12,18 @@ use std::collections::{HashMap, HashSet};
 
 const LEGACY_SOURCES: &[&str] = &[
     "avd",
-    "cisco",
-    "cnnvd",
     "cnvd",
     "cve",
-    "fortiguard",
     "github_advisory",
-    "govcert",
-    "hikvision",
     "hkcert",
     "hpe",
     "huawei_sa",
-    "infosec",
     "juniper",
     "msrc",
+    "nvd",
     "paloalto",
     "qianxin",
-    "ransomwarelive",
     "splunk",
-    "zeroday",
     "zimbra",
 ];
 

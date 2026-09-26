@@ -496,6 +496,7 @@ pub fn template_name(source: &str) -> &'static str {
     match source {
         "github_advisory" => "newsletters/github_advisory.html",
         "hpe" => "newsletters/hpe.html",
+        "nvd" => "newsletters/nvd.html",
         "zimbra" => "newsletters/zimbra.html",
         _ => "newsletters/generated.html",
     }
@@ -639,9 +640,11 @@ pub fn normalize(document: &Value, source: &str, config: &Value) -> Value {
             | "hikvision"
             | "huawei_sa"
             | "juniper"
+            | "nvd"
             | "paloalto"
             | "qianxin"
             | "splunk"
+            | "nvd"
     ) {
         let document_severity = values(&document["severity"]);
         if !document_severity.is_empty() {
@@ -703,6 +706,20 @@ pub fn normalize(document: &Value, source: &str, config: &Value) -> Value {
             ]));
             recommendations = values(&details["patch"]);
             reference_values = values(&details["referUrl"]);
+        }
+        "nvd" => {
+            if !text(&details["description"]).is_empty() {
+                overview = text(&details["description"]);
+            }
+            affected = values(&details["affected_products"]);
+            reference_values = values(&details["reference_links"]);
+            for (key, value) in [
+                ("published", json!(date(&document["published_at"]))),
+                ("updated", json!(date(&document["updated_at"]))),
+                ("vuln_status", json!(text(&details["vuln_status"]))),
+            ] {
+                extras.insert(key.into(), value);
+            }
         }
         "cve" => {
             let generic = Regex::new(r"(?i)^\s*(?:CVE-)?\d{4}-\d{4,}(?:\s+Record)?\s*$").unwrap();
@@ -1175,6 +1192,7 @@ pub fn normalize(document: &Value, source: &str, config: &Value) -> Value {
             | "huawei_sa"
             | "infosec"
             | "juniper"
+            | "nvd"
             | "paloalto"
             | "qianxin"
             | "ransomwarelive"

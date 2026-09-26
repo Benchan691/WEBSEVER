@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="{{ newsletter.language }}">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ newsletter.title }}</title>
+    <style>
+        body { font-family: Tahoma, Arial, sans-serif; font-size: 12px; line-height: 1.5; color: #111; }
+        h1 { text-align: center; font-size: 22px; }
+        h2 { text-align: center; font-size: 16px; font-weight: normal; }
+        h3 { margin: 22px 0 8px; }
+        .metadata dt { font-weight: bold; float: left; clear: left; width: 190px; }
+        .metadata dd { margin-left: 200px; }
+        .source-text { white-space: pre-line; }
+        ul { margin: 8px 0; padding-left: 2em; }
+        a { color: #1a4d8f; word-break: break-all; }
+    </style>
+</head>
+<body>
+    <p>{{ newsletter.labels.greeting }}</p>
+
+    <h1>{{ newsletter.title }}</h1>
+    {% if newsletter.collection %}<h2>NVD Security Advisory</h2>{% endif %}
+
+    {% if newsletter.cves or newsletter.severity or newsletter.cvss or newsletter.published or newsletter.updated or newsletter.vuln_status %}
+    <h3>Vulnerability Information</h3>
+    <dl class="metadata">
+        {% for cve in newsletter.cves %}<dt>CVE ID</dt><dd>{{ cve }}</dd>{% endfor %}
+        {% if newsletter.severity %}<dt>Severity</dt><dd>{{ newsletter.severity|join(', ') }}</dd>{% endif %}
+        {% if newsletter.cvss %}<dt>CVSS</dt><dd>{{ newsletter.cvss }}</dd>{% endif %}
+        {% if newsletter.published %}<dt>Published</dt><dd>{{ newsletter.published }}</dd>{% endif %}
+        {% if newsletter.updated %}<dt>Last Modified</dt><dd>{{ newsletter.updated }}</dd>{% endif %}
+        {% if newsletter.vuln_status %}<dt>Status</dt><dd>{{ newsletter.vuln_status }}</dd>{% endif %}
+    </dl>
+    {% endif %}
+
+    {% if newsletter.overview %}
+    <h3>Description</h3>
+    <div class="source-text">{{ newsletter.overview }}</div>
+    {% endif %}
+
+    {% if newsletter.affected %}
+    <h3>Affected Products</h3>
+    <ul>{% for item in newsletter.affected %}<li>{{ item }}</li>{% endfor %}</ul>
+    {% endif %}
+
+    {% if newsletter.references %}
+    <h3>References</h3>
+    <ul>
+        {% for link in newsletter.references %}<li><a href="{{ link }}" rel="noopener">{{ link }}</a></li>{% endfor %}
+    </ul>
+    {% endif %}
+
+    {% if newsletter.related_links %}
+    <h3>Related Links</h3>
+    <ul>
+        {% for link in newsletter.related_links %}<li><a href="{{ link }}" rel="noopener">{{ link }}</a></li>{% endfor %}
+    </ul>
+    {% endif %}
+
+    <p>{{ newsletter.footer }}</p>
+</body>
+</html>
