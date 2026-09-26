@@ -644,7 +644,6 @@ pub fn normalize(document: &Value, source: &str, config: &Value) -> Value {
             | "paloalto"
             | "qianxin"
             | "splunk"
-            | "nvd"
     ) {
         let document_severity = values(&document["severity"]);
         if !document_severity.is_empty() {

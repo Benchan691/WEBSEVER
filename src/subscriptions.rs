@@ -1360,7 +1360,7 @@ pub(crate) async fn match_profile_pending(
         return Ok(Vec::new());
     }
 
-    let delivered: Vec<Bson> = db::find_many(
+    let mut delivered: Vec<Bson> = db::find_many(
         &state.web,
         "newsletter_deliveries",
         doc! {"subscription_id": subscription_id},
@@ -1371,6 +1371,20 @@ pub(crate) async fn match_profile_pending(
     .iter()
     .filter_map(|entry| entry.get_str("selection_id").ok().map(Bson::from))
     .collect();
+    delivered.extend(
+        db::find_many(
+            &state.web,
+            "newsletter_filtered",
+            doc! {"subscription_id": subscription_id},
+            100_000,
+        )
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|entry| entry.get_str("selection_id").ok())
+        .map(Bson::from)
+        .collect::<Vec<Bson>>(),
+    );
 
     let collection = db::collection(&state.vuln, &state.cfg.vulnerabilities_collection);
     let mut filter = profile_filter(filters, "news");
@@ -1410,7 +1424,7 @@ pub(crate) async fn match_profile_pending(
                 "sent_at": bson::DateTime::now(),
             });
             if filtered_out.len() >= 5_000 {
-                db::collection(&state.web, "newsletter_deliveries")
+                db::collection(&state.web, "newsletter_filtered")
                     .insert_many(filtered_out.drain(..))
                     .await
                     .map_err(|error| format!("Unable to record filtered-out documents: {error}"))?;
@@ -1428,7 +1442,7 @@ pub(crate) async fn match_profile_pending(
         }
     }
     if !filtered_out.is_empty() {
-        db::collection(&state.web, "newsletter_deliveries")
+        db::collection(&state.web, "newsletter_filtered")
             .insert_many(filtered_out)
             .await
             .map_err(|error| format!("Unable to record filtered-out documents: {error}"))?;
