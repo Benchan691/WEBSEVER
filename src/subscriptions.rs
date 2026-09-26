@@ -1385,14 +1385,12 @@ pub(crate) async fn match_profile_pending(
         .map_err(|error| format!("Unable to read newsletter records: {error}"))?;
 
     let mut items = Vec::new();
+    let mut filtered_out: Vec<Document> = Vec::new();
     while let Some(document) = cursor
         .try_next()
         .await
         .map_err(|error| format!("Unable to read newsletter records: {error}"))?
     {
-        if !inventory_match(&document, filters) {
-            continue;
-        }
         let value = db::bson_json(&document);
         let source = value
             .pointer("/source/provider")
@@ -1400,6 +1398,25 @@ pub(crate) async fn match_profile_pending(
             .filter(|source| !source.trim().is_empty())
             .unwrap_or("unknown")
             .to_owned();
+        if !inventory_match(&document, filters) {
+            // Remember inventory-filtered documents so the next tick does not
+            // rescan them; they stay out of the pending pool permanently.
+            filtered_out.push(doc! {
+                "subscription_id": subscription_id,
+                "email": "",
+                "source_collection": source,
+                "selection_id": db::id_string(&document),
+                "filtered_out": true,
+                "sent_at": bson::DateTime::now(),
+            });
+            if filtered_out.len() >= 5_000 {
+                db::collection(&state.web, "newsletter_deliveries")
+                    .insert_many(filtered_out.drain(..))
+                    .await
+                    .map_err(|error| format!("Unable to record filtered-out documents: {error}"))?;
+            }
+            continue;
+        }
         items.push(json!({
             "collection": state.cfg.vulnerabilities_collection,
             "source_collection": source,
@@ -1409,6 +1426,12 @@ pub(crate) async fn match_profile_pending(
         if items.len() >= limit {
             break;
         }
+    }
+    if !filtered_out.is_empty() {
+        db::collection(&state.web, "newsletter_deliveries")
+            .insert_many(filtered_out)
+            .await
+            .map_err(|error| format!("Unable to record filtered-out documents: {error}"))?;
     }
     Ok(items)
 }
