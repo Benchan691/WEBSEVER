@@ -536,9 +536,9 @@
                 include_unknown: document.getElementById(prefix + '-include-unknown').checked,
                 vendor_product_filter: vendorProductFilterPayload(prefix)
             };
-        } else if (isReportEnriched()) {
-            filters.collections = collections.slice(0, 1);
         }
+        filters.collections = ['cve'];
+        filters.sources = ['cve'];
         filters.status = readStatusFilters(prefix);
         if (prefix === 'report') {
             filters.vendor_product_filter = vendorProductFilterPayload(prefix);

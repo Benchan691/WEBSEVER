@@ -320,7 +320,7 @@ fn severity(document: &Document) -> String {
     }
     "Unknown".into()
 }
-fn cve_id(document: &Document) -> String {
+pub(crate) fn cve_id(document: &Document) -> String {
     let value = db::bson_json(document);
     let re = Regex::new(r"(?i)\b(?:CVE-)?(\d{4}-\d{4,})\b").unwrap();
     for key in ["code", "_id", "title", "cve", "cve_ids"] {
@@ -328,6 +328,13 @@ fn cve_id(document: &Document) -> String {
             if let Some(caps) = re.captures(&flatten(v)) {
                 return format!("CVE-{}", caps.get(1).unwrap().as_str().to_uppercase());
             }
+        }
+    }
+    for key in ["id", "cveId", "cve_id", "cve_ids", "cveCode"] {
+        if let Some(v) = value["details"].get(key)
+            && let Some(caps) = re.captures(&flatten(v))
+        {
+            return format!("CVE-{}", caps.get(1).unwrap().as_str().to_uppercase());
         }
     }
     String::new()

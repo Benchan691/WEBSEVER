@@ -16,7 +16,10 @@ fn default_profile(kind: &str) -> Value {
     if kind == "newsletter" {
         json!({"enabled":false,"filters":default_filters(),"delivery_cursor":"","cve_delivery_cutoff":"","statistic_schedule_enabled":false})
     } else {
-        json!({"enabled":false,"filters":default_filters(),"generation_mode":"template","report_language":"en","search_prompt":"","schedule_enabled":false,"schedule_weekday":"mon","schedule_time":"09:00"})
+        let mut filters = default_filters();
+        filters["collections"] = json!(["cve"]);
+        filters["sources"] = json!(["cve"]);
+        json!({"enabled":false,"filters":filters,"generation_mode":"template","report_language":"en","search_prompt":"","schedule_enabled":false,"schedule_weekday":"mon","schedule_time":"09:00"})
     }
 }
 fn canonical_provider_name(value: &str) -> String {
@@ -108,6 +111,22 @@ fn selected_provider_names(filters: &Value, physical_collection: &str) -> Vec<St
         .filter(|value| !value.is_empty() && seen.insert(value.clone()))
         .collect()
 }
+fn report_filters(profile: &Value, physical_collection: &str) -> Value {
+    let mut filters = profile["filters"].clone();
+    // Reports have no source picker. Repair empty selections saved by the old
+    // template form, and apply the same scope to preview and scheduled reports.
+    if matches!(
+        profile["generation_mode"].as_str(),
+        Some("enriched_weekly" | "ai" | "company_ai")
+    ) || (filters["collections_mode"] == "selected"
+        && selected_provider_names(&filters, physical_collection).is_empty())
+    {
+        filters["collections"] = json!([physical_collection]);
+        filters["sources"] = json!(["cve"]);
+    }
+    filters
+}
+
 fn merge(into: &mut Value, from: &Value) {
     if let (Some(dst), Some(src)) = (into.as_object_mut(), from.as_object()) {
         for (k, v) in src {
@@ -215,10 +234,8 @@ async fn profile(state: &AppState, kind: &str, input: &Value) -> Result<Value, S
         if profile["generation_mode"] == "template" {
             profile["report_language"] = json!("en");
             profile["search_prompt"] = json!("")
-        } else {
-            profile["filters"]["collections"] = json!([unified_collection]);
-            profile["filters"]["sources"] = json!(["cve"])
         }
+        profile["filters"] = report_filters(&profile, unified_collection);
         if !matches!(
             profile["schedule_weekday"].as_str(),
             Some("mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun")
@@ -1155,7 +1172,7 @@ async fn collection_rows(state: &AppState) -> Result<Vec<Value>, String> {
     }
     Ok(data)
 }
-fn profile_filter(filters: &Value, source: &str) -> Document {
+fn profile_filter(filters: &Value, physical_collection: &str) -> Document {
     let mut clauses: Vec<Bson> = Vec::new();
     let mapping: [(&str, &[&str]); 6] = [
         (
@@ -1233,7 +1250,7 @@ fn profile_filter(filters: &Value, source: &str) -> Document {
             clauses.push(Bson::Document(doc! {"$or":options}));
         }
     }
-    let sources = selected_provider_names(filters, "news");
+    let sources = selected_provider_names(filters, physical_collection);
     if !sources.is_empty() || filters["collections_mode"].as_str() == Some("selected") {
         clauses.push(Bson::Document(doc! {
             "source.provider": {"$in": sources.clone()}
@@ -1259,7 +1276,7 @@ fn profile_filter(filters: &Value, source: &str) -> Document {
         }
     }
     let zimbra_only = sources.len() == 1 && sources[0] == "zimbra";
-    if accepted.is_empty() && !include_unknown && source != "zimbra" && !zimbra_only {
+    if accepted.is_empty() && !include_unknown && !zimbra_only {
         accepted = ["Critical", "High", "Medium", "Low"]
             .iter()
             .map(|v| v.to_string())
@@ -1382,7 +1399,7 @@ pub(crate) async fn match_profile_after(
         });
     };
 
-    let base_filter = profile_filter(filters, "news");
+    let base_filter = profile_filter(filters, &state.cfg.vulnerabilities_collection);
     let after_filter = doc! {
         "observed_at": {
             "$gt": bson::DateTime::from_millis(after.timestamp_millis()),
@@ -1450,49 +1467,83 @@ pub(crate) async fn match_profile_after(
     })
 }
 
-pub(crate) async fn match_profile(state: &AppState, profile: &Value, limit: i64) -> Vec<Value> {
+pub(crate) async fn match_profile(
+    state: &AppState,
+    profile: &Value,
+    limit: i64,
+) -> Result<Vec<Value>, String> {
     let mut output = Vec::new();
-    let filters = &profile["filters"];
-    let selected = filters["collections"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .filter_map(Value::as_str)
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    // New profiles use an explicit "selected" mode, so an empty list means
-    // none selected. Older records without the mode retain their historical
-    // empty-means-all behavior until they are saved again.
-    if selected.is_empty() && !profile_has_collection_scope(state, filters).await {
-        return output;
+    if limit <= 0 {
+        return Ok(output);
     }
-    // All provider selections now resolve to one physical collection.  Keep
-    // old `_review` values readable during migration and use the document's
-    // source.provider field for rendering and delivery history.
-    let names = vec![state.cfg.vulnerabilities_collection.clone()];
-    for name in names {
-        let filter = profile_filter(filters, "news");
-        let Ok((_, documents)) = reviews::query_rows(state, &name, filter, 0, 10_000).await else {
+    let filters = report_filters(profile, &state.cfg.vulnerabilities_collection);
+    let name = &state.cfg.vulnerabilities_collection;
+    let mut cursor = db::collection(&state.vuln, name)
+        .find(profile_filter(&filters, name))
+        .sort(doc! {"observed_at": -1, "_id": -1})
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "Unable to query report records");
+            "Unable to query the vulnerabilities database.".to_owned()
+        })?;
+    // Apply the limit to matches, not candidates: an inventory match may be
+    // older than the newest 10,000 unrelated records.
+    while let Some(doc) = cursor.try_next().await.map_err(|error| {
+        tracing::error!(%error, "Unable to read report records");
+        "Unable to read the vulnerabilities database.".to_owned()
+    })? {
+        let document = db::bson_json(&doc);
+        let inventory = &filters["vendor_product_filter"];
+        let matched = vendor_matcher::classify(&document, inventory);
+        if inventory["enabled"] == true && matched.is_none() {
             continue;
-        };
-        for doc in documents {
-            if !inventory_match(&doc, filters) {
-                continue;
-            }
-            let document = db::bson_json(&doc);
-            let source = document
-                .pointer("/source/provider")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_owned();
-            output.push(json!({"collection":name,"source_collection":source,"selection_id":db::id_string(&doc),"document":document}));
-            if output.len() >= limit as usize {
-                return output;
-            }
+        }
+        let source = document
+            .pointer("/source/provider")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        output.push(json!({"collection":name,"source_collection":source,"selection_id":db::id_string(&doc),"vendor_product_match":matched,"document":document}));
+        if output.len() >= limit as usize {
+            break;
         }
     }
-    output
+    Ok(output)
+}
+
+fn report_preview(matches: &[Value], report: &Value) -> Value {
+    let mut confirmed = 0;
+    let mut probable = 0;
+    let mut possible = 0;
+    let mut top = Vec::new();
+    let mut examples = Vec::new();
+    for row in matches {
+        let matched = &row["vendor_product_match"];
+        match matched["confidence"].as_str() {
+            Some("confirmed") => confirmed += 1,
+            Some("probable") => probable += 1,
+            Some("possible") => possible += 1,
+            _ => (),
+        }
+        let document = db::json_doc(&row["document"]).unwrap_or_default();
+        let cve = reviews::cve_id(&document);
+        if !cve.is_empty() && top.len() < 3 && !top.contains(&cve) {
+            top.push(cve.clone());
+        }
+        if !cve.is_empty() && matched.is_object() && examples.len() < 3 {
+            let mut example = matched.clone();
+            example["cve"] = json!(cve);
+            examples.push(example);
+        }
+    }
+    json!({
+        "count": matches.len(),
+        "confirmed_count": confirmed,
+        "probable_count": probable,
+        "possible_count": possible,
+        "top_cves": top,
+        "match_examples": examples,
+        "vendor_product_filter_enabled": report["filters"]["vendor_product_filter"]["enabled"] == true,
+    })
 }
 pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
     if ctx.path == "/subscriptions" && ctx.method == Method::GET {
@@ -1618,15 +1669,13 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             Ok(v) => v,
             Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
         };
-        let matches = match_profile(state, &report, 100).await;
-        let top: Vec<String> = matches
-            .iter()
-            .take(3)
-            .map(|row| row["selection_id"].as_str().unwrap_or("").to_owned())
-            .collect();
+        let matches = match match_profile(state, &report, 100).await {
+            Ok(matches) => matches,
+            Err(error) => return json_error(StatusCode::SERVICE_UNAVAILABLE, &error),
+        };
         return Some(view::json_response(
             StatusCode::OK,
-            json!({"count":matches.len(),"top_cves":top,"match_examples":[],"vendor_product_filter_enabled":report["filters"]["vendor_product_filter"]["enabled"]==true}),
+            report_preview(&matches, &report),
         ));
     }
     if ctx.path == "/api/subscriptions" && ctx.method == Method::POST {
@@ -1985,7 +2034,10 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             if old["report_profile"]["enabled"] != true {
                 return json_error(StatusCode::BAD_REQUEST, "Report profile is disabled.");
             };
-            let matches = match_profile(state, &old["report_profile"], 500).await;
+            let matches = match match_profile(state, &old["report_profile"], 500).await {
+                Ok(matches) => matches,
+                Err(error) => return json_error(StatusCode::SERVICE_UNAVAILABLE, &error),
+            };
             let selections: Vec<Value> = matches
                 .iter()
                 .map(|v| json!({"collection":v["collection"],"selection_id":v["selection_id"]}))
@@ -2368,6 +2420,203 @@ mod tests {
         let filters = default_filters();
         assert_eq!(filters["collections"], json!([]));
         assert_eq!(filters["collections_mode"], "selected");
+    }
+
+    #[test]
+    fn reports_default_to_cve_without_changing_newsletter_selection() {
+        let report = default_profile("report");
+        assert_eq!(
+            selected_provider_names(&report["filters"], "news"),
+            vec!["cve"]
+        );
+        assert_eq!(
+            default_profile("newsletter")["filters"]["collections"],
+            json!([])
+        );
+    }
+
+    #[test]
+    fn report_scope_repairs_saved_empty_template_selection() {
+        let mut report = default_profile("report");
+        report["filters"] = default_filters();
+        let filters = report_filters(&report, "custom_news");
+        assert_eq!(filters["collections"], json!(["custom_news"]));
+        assert_eq!(filters["sources"], json!(["cve"]));
+        let query = profile_filter(&filters, "custom_news");
+        let clauses = query.get_array("$and").unwrap();
+        assert_eq!(
+            clauses[0],
+            Bson::Document(doc! {"source.provider":{"$in":["cve"]}})
+        );
+    }
+
+    #[test]
+    fn template_preserves_explicit_scope_and_enriched_reports_use_cve() {
+        let mut report = default_profile("report");
+        report["filters"]["collections"] = json!(["nvd_review"]);
+        assert_eq!(
+            selected_provider_names(&report_filters(&report, "news"), "news"),
+            vec!["nvd"]
+        );
+        report["generation_mode"] = json!("enriched_weekly");
+        assert_eq!(
+            selected_provider_names(&report_filters(&report, "news"), "news"),
+            vec!["cve"]
+        );
+    }
+
+    fn inventory_report() -> Value {
+        let mut report = default_profile("report");
+        report["enabled"] = json!(true);
+        report["filters"]["vendor_product_filter"] = json!({
+            "enabled": true,
+            "schema_version": 1,
+            "include_possible_matches": true,
+            "rows": [{"vendor":"Acme","product":"Widget","vendor_aliases":[],"product_aliases":[],"row_number":2}]
+        });
+        report
+    }
+
+    #[test]
+    fn preview_returns_real_cve_ids_counts_and_inventory_evidence() {
+        let report = inventory_report();
+        let documents = [
+            json!({"_id":{"$oid":"000000000000000000000001"},"code":"2026-10001","details":{"affected":[{"vendor":"Acme","product":"Widget"}]}}),
+            json!({"_id":"provider:2","cve_ids":["CVE-2026-10002"],"description":"Acme Widget has a vulnerability"}),
+            json!({"_id":"provider:3","details":{"cve_id":"CVE-2026-10003","affected":[{"product":"Widget"}]}}),
+        ];
+        let matches = documents.iter().map(|document| json!({
+            "selection_id": document["_id"],
+            "document": document,
+            "vendor_product_match": vendor_matcher::classify(document, &report["filters"]["vendor_product_filter"]),
+        })).collect::<Vec<_>>();
+        let preview = report_preview(&matches, &report);
+        assert_eq!(preview["count"], 3);
+        assert_eq!(preview["confirmed_count"], 1);
+        assert_eq!(preview["probable_count"], 1);
+        assert_eq!(preview["possible_count"], 1);
+        assert_eq!(
+            preview["top_cves"],
+            json!(["CVE-2026-10001", "CVE-2026-10002", "CVE-2026-10003"])
+        );
+        assert_eq!(preview["match_examples"].as_array().unwrap().len(), 3);
+        assert_eq!(preview["match_examples"][0]["matched_vendor"], "Acme");
+        assert_eq!(
+            preview["match_examples"][0]["evidence"]["source"],
+            "details.affected[0]"
+        );
+        assert_eq!(preview["match_examples"][0]["row_number"], 2);
+        assert_eq!(report_preview(&[], &report)["confirmed_count"], 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires REPORT_TEST_MONGO_URI pointing to a disposable local MongoDB"]
+    async fn preview_matches_inventory_beyond_ten_thousand_candidates() {
+        use std::{path::PathBuf, sync::Arc};
+        let uri = std::env::var("REPORT_TEST_MONGO_URI").expect("Set REPORT_TEST_MONGO_URI");
+        let client = mongodb::Client::with_uri_str(&uri).await.unwrap();
+        let database =
+            client.database(&format!("report_preview_test_{}", ObjectId::new().to_hex()));
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let cfg = crate::config::Config {
+            root: root.clone(),
+            file: json!({}),
+            mongo_uri: uri,
+            web_database: database.name().into(),
+            vulnerabilities_database: database.name().into(),
+            vulnerabilities_collection: "test_news".into(),
+            secret: "test".into(),
+            bootstrap_username: "test".into(),
+            bootstrap_password: String::new(),
+            zimbra_base_url: String::new(),
+            zimbra_folder_name: "news".into(),
+            zimbra_timeout_seconds: 1,
+            zimbra_verify_tls: true,
+            zimbra_credential_key: String::new(),
+            account_collection: "accounts".into(),
+            newsletter_root: root.join("newsletters"),
+            port: 0,
+        };
+        let state = AppState {
+            cfg,
+            web: database.clone(),
+            vuln: database.clone(),
+            templates: Arc::new(view::environment(&root)),
+            http: reqwest::Client::new(),
+        };
+        db::collection(&database, "source_catalog")
+            .insert_one(doc! {"_id":"active","providers":["nvd","cve"]})
+            .await
+            .unwrap();
+        let news = db::collection(&database, "test_news");
+        let unrelated = (0..10_001).map(|index| doc! {
+            "code":format!("CVE-2026-{}", 20000 + index), "severity":"High", "source":{"provider":"cve"},
+            "observed_at":bson::DateTime::from_millis(2000),
+            "details":{"affected":[{"vendor":"Other","product":"Unrelated"}]},
+        });
+        news.insert_many(unrelated).await.unwrap();
+        news.insert_many([
+            doc! {"code":"CVE-2026-10001","severity":"High","source":{"provider":"cve"},"observed_at":bson::DateTime::from_millis(1000),"details":{"affected":[{"vendor":"Acme","product":"Widget"}]}},
+            doc! {"code":"CVE-2026-10002","severity":"High","source":{"provider":"cve"},"observed_at":bson::DateTime::from_millis(999),"description":"Acme Widget has a vulnerability"},
+            doc! {"code":"CVE-2026-10003","severity":"High","source":{"provider":"cve"},"observed_at":bson::DateTime::from_millis(998),"details":{"affected":[{"product":"Widget"}]}},
+            doc! {"code":"CVE-2026-10004","severity":"High","source":{"provider":"nvd"},"observed_at":bson::DateTime::from_millis(3000),"details":{"affected":[{"vendor":"Acme","product":"Widget"}]}},
+        ]).await.unwrap();
+
+        // Reproduce both the old form payload (no source) and an already-saved
+        // profile with an explicit empty selection.
+        let mut report = inventory_report();
+        report["filters"]["collections"] = json!([]);
+        report["filters"]["sources"] = json!([]);
+        assert_eq!(match_profile(&state, &report, 100).await.unwrap().len(), 3);
+        assert_eq!(match_profile(&state, &report, 1).await.unwrap().len(), 1);
+        report["filters"]
+            .as_object_mut()
+            .unwrap()
+            .remove("collections");
+        report["filters"].as_object_mut().unwrap().remove("sources");
+        for mode in ["template", "enriched_weekly"] {
+            let mut ctx = ReqCtx {
+                method: Method::POST,
+                path: "/api/subscriptions/report-preview".into(),
+                query: vec![],
+                headers: Default::default(),
+                body: vec![],
+                json: json!({"report_profile":report}),
+                form: Default::default(),
+                user: None,
+            };
+            ctx.json["report_profile"]["generation_mode"] = json!(mode);
+            let response = handle(&state, &ctx).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let preview: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(preview["count"], 3, "mode={mode}");
+            assert_eq!(preview["confirmed_count"], 1);
+            assert_eq!(preview["probable_count"], 1);
+            assert_eq!(preview["possible_count"], 1);
+            assert_eq!(preview["top_cves"][0], "CVE-2026-10001");
+        }
+        report["filters"]["vendor_product_filter"]["include_possible_matches"] = json!(false);
+        assert_eq!(match_profile(&state, &report, 100).await.unwrap().len(), 2);
+
+        // A failed database read must be distinguishable from no CVE matches.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let unavailable = mongodb::Client::with_uri_str(format!(
+            "mongodb://{}/?serverSelectionTimeoutMS=100&connectTimeoutMS=100",
+            listener.local_addr().unwrap()
+        ))
+        .await
+        .unwrap();
+        let mut unavailable_state = state.clone();
+        unavailable_state.vuln = unavailable.database(database.name());
+        assert!(
+            match_profile(&unavailable_state, &report, 100)
+                .await
+                .is_err()
+        );
+        database.drop().await.unwrap();
     }
 
     #[test]

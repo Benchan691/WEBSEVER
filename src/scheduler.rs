@@ -185,7 +185,13 @@ async fn scheduled_report(state: &AppState, sub: &Document) {
     let next = next_weekly(profile, now);
     let _=db::collection(&state.web,"sub_account").update_one(doc!{"_id":id},doc!{"$set":{"report_profile.next_run_at":next,"report_profile.last_run_at":bson::DateTime::now()}}).await;
     let mode = profile["generation_mode"].as_str().unwrap_or("template");
-    let matches = subscriptions::match_profile(state, profile, 500).await;
+    let matches = match subscriptions::match_profile(state, profile, 500).await {
+        Ok(matches) => matches,
+        Err(error) => {
+            tracing::error!(%error, subscription_id = %id, "Unable to match scheduled report records");
+            return;
+        }
+    };
     let count = matches.len();
     if count == 0 {
         let _ = db::collection(&state.web, "sub_account")
@@ -293,7 +299,8 @@ async fn newsletters_tick(state: &AppState, sub: &Document) {
     // A subscription follows news from its last change onward: whenever the
     // subscription scope changes (filters, enabled state), the cursor
     // restarts at now and the historical backlog is intentionally skipped.
-    let filters_hash = text_hash(&json!({"enabled":profile["enabled"],"filters":profile["filters"]}));
+    let filters_hash =
+        text_hash(&json!({"enabled":profile["enabled"],"filters":profile["filters"]}));
     if profile["filters_hash"].as_str().unwrap_or("") != filters_hash {
         let now = chrono::Utc::now().to_rfc3339();
         let _ = db::collection(&state.web, "sub_account")

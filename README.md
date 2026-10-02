@@ -73,3 +73,5 @@ node --check static/js/subscriptions/index.js
 ## Docker deployment
 
 `Dockerfile` builds the Rust binary in a pinned Rust builder image and copies only the runtime assets into a Debian image. Use `docker-compose.example.yml` as the candidate service. Deploy beside the existing service on an alternate port with `RUST_SCHEDULER_ENABLED=false`, verify local login, a test Zimbra login, `web.accounts`, folder setup, subscription ownership, and SMTP delivery, then switch the port mapping. Keep the previous image, compose file, source tree, `.env`, and MongoDB backups for rollback.
+
+For the report preview fix, see [deployment and verification steps](DEPLOY_REPORT_PREVIEW_FIX.md), including updates to an existing Docker Compose, systemd, or manual deployment.
