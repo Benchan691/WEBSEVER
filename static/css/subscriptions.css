@@ -35,3 +35,14 @@
 #report-vendor-product-status {
     white-space: pre-line;
 }
+
+.subscription-statistics-panel {
+    padding: 1rem;
+    border: 1px solid var(--bs-border-color);
+    border-radius: .75rem;
+    background: var(--bs-tertiary-bg);
+}
+
+.subscription-statistics-panel h6 .bi {
+    color: var(--bs-primary);
+}

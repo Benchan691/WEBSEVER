@@ -1,6 +1,6 @@
 {% extends 'layouts/base.html' %}
 {% block title %}{{ t('Subscriptions') }}{% endblock %}
-{% block styles %}<link href="{{ url_for('static', filename='css/subscriptions.css') }}" rel="stylesheet">{% endblock %}
+{% block styles %}<link href="{{ url_for('static', filename='css/subscriptions.css', v='20261013-1') }}" rel="stylesheet">{% endblock %}
 
 {% block content %}
 <div class="container">
@@ -46,16 +46,23 @@
                             <div class="form-check form-switch mb-3"><input id="newsletter-enabled" class="form-check-input" type="checkbox"><label class="form-check-label fw-semibold" for="newsletter-enabled">{{ t('Newsletter feed enabled') }}</label></div>
                             <div id="newsletter-fields"></div>
                             <hr>
+                            <div class="subscription-statistics-panel">
+                            <h6 class="fw-semibold mb-3"><i class="bi bi-bar-chart me-2" aria-hidden="true"></i>{{ t('Newsletter delivery statistics') }}</h6>
                             <div class="form-check form-switch mb-2">
                                 <input id="newsletter-statistic-schedule-enabled" class="form-check-input" type="checkbox">
                                 <label class="form-check-label small" for="newsletter-statistic-schedule-enabled">{{ t('Monthly statistic email schedule enabled') }}</label>
                             </div>
-                            <div class="form-text mb-3">{{ t('Sends previous-month delivery counts on the 1st at 09:00 HKT.') }}</div>
+                            <div class="form-text mb-3">{{ t('Sends previous-month delivery counts for each source on the 1st at 09:00 HKT.') }}</div>
                             <div id="newsletter-send-statistic-wrap" class="d-none">
-                                <button id="newsletter-send-statistic" class="btn btn-success btn-sm" type="button">
-                                    <span class="send-statistic-label">{{ t('Send Statistic') }}</span>
+                                <div class="d-flex flex-wrap gap-2">
+                                <a id="newsletter-statistic-preview" class="btn btn-outline-primary btn-sm" target="_blank" rel="noopener"><i class="bi bi-eye me-1" aria-hidden="true"></i>{{ t('Preview monthly statistics') }}</a>
+                                <button id="newsletter-send-statistic" class="btn btn-primary btn-sm" type="button">
+                                    <span class="send-statistic-label">{{ t('Send monthly statistics') }}</span>
                                 </button>
+                                </div>
+                                <div class="form-text mt-2">{{ t('Preview and send use saved settings and the previous calendar month.') }}</div>
                                 <div id="newsletter-send-statistic-status" class="alert small mt-2 mb-0 d-none" role="status"></div>
+                            </div>
                             </div>
                         </div></div>
                     </div>
@@ -105,5 +112,5 @@
     'accountHubEnabled': true,
 }|tojson }}</script>
 <script src="{{ url_for('static', filename='js/shared/collection-picker.js', v='20260921-1') }}"></script>
-<script src="{{ url_for('static', filename='js/subscriptions/index.js', v='20261002-1') }}"></script>
+<script src="{{ url_for('static', filename='js/subscriptions/index.js', v='20261013-1') }}"></script>
 {% endblock %}

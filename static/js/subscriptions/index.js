@@ -197,7 +197,7 @@
         if (busy) {
             label.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>' + t('Sending...');
         } else {
-            label.textContent = t('Send Statistic');
+            label.textContent = t('Send monthly statistics');
         }
     }
     function requestJson(url, options) {
@@ -688,6 +688,9 @@
         const wrap = document.getElementById('newsletter-send-statistic-wrap');
         const show = !!editingId && document.getElementById('newsletter-enabled').checked;
         wrap.classList.toggle('d-none', !show);
+        const preview = document.getElementById('newsletter-statistic-preview');
+        if (show) preview.href = apiUrl(editingId, '/statistic-preview');
+        else preview.removeAttribute('href');
         if (!show) {
             setSendStatisticStatus('', '');
             setSendStatisticBusy(false);

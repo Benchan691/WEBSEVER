@@ -3,6 +3,7 @@ mod config;
 mod db;
 mod mail;
 mod newsletter_normalizer;
+mod newsletter_statistics;
 mod newsletters;
 mod operations;
 mod reports;

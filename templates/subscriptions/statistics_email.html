@@ -3,80 +3,110 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Newsletter delivery statistics</title>
+    <title>Newsletter delivery statistics: {{ period }}</title>
     <style>
-        body { margin: 0; padding: 0; background: #f5f3f8; color: #20242a; font-family: Arial, sans-serif; line-height: 1.5; }
-        .email-shell { width: 100%; background: #f5f3f8; padding: 32px 12px; }
-        .email-card { width: 100%; max-width: 640px; margin: 0 auto; background: #ffffff; border: 1px solid #e5e0eb; border-radius: 12px; overflow: hidden; }
-        .header { background: #45237b; color: #ffffff; padding: 28px 32px; }
-        .brand { margin: 0; font-size: 14px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
-        .title { margin: 10px 0 0; font-size: 28px; line-height: 1.25; }
-        .content { padding: 30px 32px; }
-        .badge { display: inline-block; margin: 0 0 16px; padding: 5px 10px; border-radius: 999px; color: #ffffff; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; background: #6f42c1; }
-        .badge-period { background: #16794b; }
-        .intro { margin: 0 0 24px; color: #4b5563; font-size: 16px; }
-        .metric { margin: 0 0 28px; padding: 22px 20px; border-radius: 10px; background: linear-gradient(135deg, #faf8ff 0%, #f3eef9 100%); border: 1px solid #ded6e8; text-align: center; }
-        .metric-label { margin: 0 0 8px; color: #5a32a3; font-size: 13px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
-        .metric-value { margin: 0; color: #2c164d; font-size: 48px; font-weight: 700; line-height: 1.1; }
-        .metric-meta { margin: 10px 0 0; color: #667085; font-size: 13px; }
-        .section-title { margin: 0 0 12px; color: #45237b; font-size: 17px; }
-        .breakdown { width: 100%; border-collapse: collapse; }
-        .breakdown-row td { padding: 14px 0; border-top: 1px solid #eee8f4; vertical-align: middle; }
-        .breakdown-row:first-child td { border-top: 0; }
-        .collection-name { margin: 0; color: #2c164d; font-size: 15px; font-weight: 700; }
-        .collection-db { margin: 4px 0 0; color: #667085; font-size: 12px; }
-        .collection-count { color: #45237b; font-size: 22px; font-weight: 700; text-align: right; white-space: nowrap; }
-        .empty { margin: 0; padding: 18px 16px; border-radius: 8px; background: #fcfbfd; border: 1px dashed #ded6e8; color: #667085; font-size: 14px; text-align: center; }
-        .footer { padding: 20px 32px; border-top: 1px solid #e5e0eb; background: #fcfbfd; color: #667085; font-size: 12px; }
+        body { margin: 0; padding: 0; }
+        table { border-spacing: 0; }
         @media only screen and (max-width: 600px) {
-            .email-shell { padding: 0; }
-            .email-card { border: 0; border-radius: 0; }
-            .header, .content, .footer { padding-left: 20px; padding-right: 20px; }
-            .title { font-size: 24px; }
-            .metric-value { font-size: 40px; }
+            .email-shell { padding: 12px 6px !important; }
+            .email-padding { padding-left: 20px !important; padding-right: 20px !important; }
+            .email-title { font-size: 24px !important; }
+            .metric-value { font-size: 36px !important; }
+            .metric-secondary { font-size: 25px !important; }
+            .source-id { overflow-wrap: anywhere; }
         }
     </style>
 </head>
-<body>
-    <table class="email-shell" role="presentation" cellpadding="0" cellspacing="0"><tr><td>
-        <table class="email-card" role="presentation" cellpadding="0" cellspacing="0"><tr><td>
-            <div class="header">
-                <p class="brand">&#128737; Security Portal</p>
-                <h1 class="title">Newsletter delivery statistics</h1>
-            </div>
-            <div class="content">
-                {% if period %}
-                <span class="badge badge-period">{{ period }}</span>
-                {% else %}
-                <span class="badge">All time</span>
-                {% endif %}
-                <p class="intro">Delivery summary for <strong>{{ email }}</strong>.</p>
-                <div class="metric">
-                    <p class="metric-label">{% if period %}Newsletters sent this period{% else %}Total newsletters sent{% endif %}</p>
-                    <p class="metric-value">{{ total }}</p>
-                    {% if databases %}
-                    <p class="metric-meta">Database{{ 's' if databases|length != 1 else '' }}: {{ databases|join(', ') }}</p>
-                    {% endif %}
-                </div>
-                <h2 class="section-title">By collection</h2>
-                {% if by_collection %}
-                <table class="breakdown" role="presentation" cellpadding="0" cellspacing="0">
-                    {% for item in by_collection %}
-                    <tr class="breakdown-row">
-                        <td>
-                            <p class="collection-name">{{ item.source_collection }}</p>
-                            <p class="collection-db">{{ item.database }}</p>
+<body style="margin:0;padding:0;background-color:#edf2f7;color:#243448;font-family:Arial,Helvetica,sans-serif;line-height:1.5;">
+    <div style="display:none;font-size:1px;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;">
+        {{ period }}: {{ total_display }} successful newsletter deliveries, summarized by source.
+    </div>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;background-color:#edf2f7;">
+        <tr>
+            <td class="email-shell" align="center" style="padding:32px 12px;">
+                <table role="presentation" align="center" width="680" cellpadding="0" cellspacing="0" style="width:100%;max-width:680px;background-color:#ffffff;border:1px solid #dce4ee;border-radius:12px;overflow:hidden;">
+                    <tr><td style="height:5px;background-color:#267bc0;line-height:5px;font-size:1px;">&nbsp;</td></tr>
+                    <tr>
+                        <td class="email-padding" bgcolor="#122844" style="padding:28px 32px 30px;background-color:#122844;color:#ffffff;">
+                            <p style="margin:0 0 14px;font-size:12px;font-weight:700;letter-spacing:1.5px;color:#b7c9df;text-transform:uppercase;">Security Portal · Monthly overview</p>
+                            <h1 class="email-title" style="margin:0 0 12px;font-size:28px;line-height:1.25;font-weight:700;color:#ffffff;">Newsletter delivery statistics</h1>
+                            <p style="margin:0;font-size:16px;color:#dbe7f5;">{{ period }}</p>
                         </td>
-                        <td class="collection-count">{{ item.count }}</td>
                     </tr>
-                    {% endfor %}
+                    <tr>
+                        <td class="email-padding" style="padding:26px 32px 20px;">
+                            <p style="margin:0 0 6px;font-size:15px;color:#243448;">Delivery summary for <strong>{{ email }}</strong></p>
+                            {% if subscription_name %}<p style="margin:0 0 6px;font-size:13px;color:#66768b;">Subscription: {{ subscription_name }}</p>{% endif %}
+                            <p style="margin:0;font-size:13px;color:#66768b;">{{ date_range }} · Hong Kong time (UTC+8)</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="email-padding" style="padding:0 32px 26px;">
+                            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;background-color:#f1f6fc;border:1px solid #dce7f4;border-radius:8px;">
+                                <tr>
+                                    <td width="50%" style="width:50%;padding:22px 16px;vertical-align:top;">
+                                        <p style="margin:0 0 8px;font-size:12px;font-weight:700;color:#536b87;">Successful deliveries</p>
+                                        <p class="metric-value" style="margin:0;font-size:42px;font-weight:700;line-height:1.1;color:#153f6e;">{{ total_display }}</p>
+                                    </td>
+                                    <td width="25%" style="width:25%;padding:22px 12px;vertical-align:top;">
+                                        <p style="margin:0 0 8px;font-size:12px;font-weight:700;color:#536b87;">Active sources</p>
+                                        <p class="metric-secondary" style="margin:0;font-size:32px;font-weight:700;line-height:1.4;color:#243448;">{{ active_sources }}</p>
+                                    </td>
+                                    <td width="25%" style="width:25%;padding:22px 12px;vertical-align:top;">
+                                        <p style="margin:0 0 8px;font-size:12px;font-weight:700;color:#536b87;">Sources listed</p>
+                                        <p class="metric-secondary" style="margin:0;font-size:32px;font-weight:700;line-height:1.4;color:#243448;">{{ source_count }}</p>
+                                    </td>
+                                </tr>
+                            </table>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="email-padding" style="padding:0 32px 30px;">
+                            <h2 style="margin:0 0 7px;font-size:18px;font-weight:700;color:#122844;">Delivery breakdown by source</h2>
+                            <p style="margin:0 0 18px;font-size:13px;color:#66768b;">Successful newsletter deliveries to this recipient during {{ period }}.</p>
+                            {% if total == 0 %}
+                            <p style="margin:0 0 18px;padding:14px 16px;border:1px solid #dce4ee;border-radius:6px;background-color:#f8fafc;font-size:14px;color:#66768b;">No successful newsletter deliveries were recorded for this month.</p>
+                            {% endif %}
+                            {% if by_source %}
+                            <table width="100%" cellpadding="0" cellspacing="0" aria-label="Newsletter deliveries by source" style="width:100%;border-collapse:collapse;border:1px solid #dce4ee;">
+                                <thead>
+                                    <tr bgcolor="#eaf0f7" style="background-color:#eaf0f7;">
+                                        <th scope="col" align="left" style="padding:12px 14px;font-size:12px;font-weight:700;color:#496079;border-bottom:1px solid #dce4ee;">Source</th>
+                                        <th scope="col" align="right" style="padding:12px 14px;font-size:12px;font-weight:700;color:#496079;border-bottom:1px solid #dce4ee;white-space:nowrap;">Delivered</th>
+                                        <th scope="col" align="right" style="padding:12px 14px;font-size:12px;font-weight:700;color:#496079;border-bottom:1px solid #dce4ee;">Share</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for item in by_source %}
+                                    <tr style="background-color:{{ '#f8fafc' if loop.index % 2 == 0 else '#ffffff' }};">
+                                        <td style="padding:14px;border-bottom:1px solid #e7edf4;vertical-align:middle;">
+                                            <p style="margin:0;font-size:14px;font-weight:700;color:#243448;">{{ item.name }}</p>
+                                            {% if item.name != item.source %}<p class="source-id" style="margin:3px 0 0;font-size:11px;color:#79889b;">{{ item.source }}</p>{% endif %}
+                                        </td>
+                                        <td align="right" style="padding:14px;border-bottom:1px solid #e7edf4;font-size:17px;font-weight:700;color:#153f6e;white-space:nowrap;">{{ item.count_display }}</td>
+                                        <td align="right" style="padding:14px;border-bottom:1px solid #e7edf4;font-size:13px;color:#66768b;white-space:nowrap;">{{ item.share_display }}</td>
+                                    </tr>
+                                    {% endfor %}
+                                    <tr bgcolor="#eaf0f7" style="background-color:#eaf0f7;">
+                                        <th scope="row" align="left" style="padding:14px;font-size:14px;color:#122844;">Monthly total</th>
+                                        <td align="right" style="padding:14px;font-size:18px;font-weight:700;color:#153f6e;">{{ total_display }}</td>
+                                        <td align="right" style="padding:14px;font-size:13px;color:#496079;">{{ '100.0%' if total else '0.0%' }}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                            {% endif %}
+                            <p style="margin:16px 0 0;font-size:12px;color:#79889b;">Selected sources with no deliveries are shown as zero. Sources delivered earlier in the month remain included if the subscription changed.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="email-padding" bgcolor="#f8fafc" style="padding:20px 32px;border-top:1px solid #dce4ee;background-color:#f8fafc;">
+                            <p style="margin:0 0 5px;font-size:12px;font-weight:700;color:#496079;">Security Portal</p>
+                            <p style="margin:0;font-size:12px;color:#79889b;">Counts reflect successful email deliveries, grouped by delivery time. Monthly summaries are scheduled for the 1st at 09:00 HKT.</p>
+                        </td>
+                    </tr>
                 </table>
-                {% else %}
-                <p class="empty">No newsletters have been sent yet.</p>
-                {% endif %}
-            </div>
-            <div class="footer">Automated delivery statistics from Security Portal.</div>
-        </td></tr></table>
-    </td></tr></table>
+            </td>
+        </tr>
+    </table>
 </body>
 </html>

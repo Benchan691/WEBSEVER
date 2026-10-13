@@ -61,6 +61,15 @@ The scheduler is disabled by default. Enable it only after SMTP delivery has bee
 RUST_SCHEDULER_ENABLED=true cargo run --release
 ```
 
+Newsletter delivery statistics summarize the previous calendar month in Hong
+Kong time, with successful delivery counts and shares for each source. Counts
+are scoped to the subscription and personalized for each recipient; selected
+sources with no deliveries remain visible. The subscription editor can preview
+the styled email or send it immediately. When the monthly schedule is enabled,
+the scheduler sends on the 1st at 09:00 HKT, catches up a missed run, and records
+each recipient's completed month to avoid resending on subsequent ticks or
+restarts. New subscriptions begin with their signup month.
+
 ## Checks
 
 ```sh

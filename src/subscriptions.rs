@@ -1,8 +1,10 @@
-use crate::{AppState, ReqCtx, auth, db, mail, render, reviews, vendor_matcher, view};
+use crate::{
+    AppState, ReqCtx, auth, db, mail, newsletter_statistics, render, reviews, vendor_matcher, view,
+};
 use axum::{
     body::Bytes,
     http::{Method, StatusCode, header},
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use futures::{TryStreamExt, stream};
 use mongodb::bson::{self, Bson, Document, doc};
@@ -51,7 +53,7 @@ fn logical_collection_names(filters: &Value) -> Vec<String> {
         .collect()
 }
 
-async fn source_providers(state: &AppState) -> Result<Vec<String>, String> {
+pub(crate) async fn source_providers(state: &AppState) -> Result<Vec<String>, String> {
     let catalog = db::find_one(&state.vuln, "source_catalog", doc! {"_id":"active"})
         .await
         .map_err(|error| {
@@ -84,7 +86,7 @@ fn parse_source_catalog(catalog: &Document) -> Result<Vec<String>, String> {
     Ok(providers)
 }
 
-fn selected_provider_names(filters: &Value, physical_collection: &str) -> Vec<String> {
+pub(crate) fn selected_provider_names(filters: &Value, physical_collection: &str) -> Vec<String> {
     let collection_sources = filters["collections"]
         .as_array()
         .into_iter()
@@ -153,6 +155,9 @@ async fn profile(state: &AppState, kind: &str, input: &Value) -> Result<Value, S
     }
     let mut profile = default_profile(kind);
     merge(&mut profile, input);
+    if kind == "newsletter" && !profile["statistic_schedule_enabled"].is_boolean() {
+        return Err("Monthly statistics schedule must be true or false.".into());
+    }
     let filters = profile["filters"].clone();
     if !filters.is_object() {
         return Err("Filters must be an object.".into());
@@ -855,7 +860,7 @@ async fn organization_subscription_rows(
     }
     Ok(rows)
 }
-fn recipients(data: &Value) -> Result<Vec<String>, String> {
+pub(crate) fn recipients(data: &Value) -> Result<Vec<String>, String> {
     let raw = if let Some(items) = data.get("emails") {
         items.clone()
     } else if let Some(email) = data.get("email") {
@@ -2047,6 +2052,20 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 json!({"selections":selections,"count":selections.len()}),
             ));
         }
+        if action == "statistic-preview" && ctx.method == Method::GET {
+            return Some(
+                match newsletter_statistics::preview(state, &existing).await {
+                    Ok(html) => {
+                        let mut response = axum::response::Html(html).into_response();
+                        response
+                            .headers_mut()
+                            .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+                        response
+                    }
+                    Err(error) => view::error(StatusCode::SERVICE_UNAVAILABLE, &error),
+                },
+            );
+        }
         if action == "send-statistic" && ctx.method == Method::POST {
             let sub = db::bson_json(&existing);
             if sub["newsletter_profile"]["enabled"] != true {
@@ -2055,32 +2074,11 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                     "Newsletter feed is disabled for this subscription.",
                 );
             }
-            let emails = recipients(&sub).unwrap_or_default();
-            let mut total = 0u64;
-            for email in &emails {
-                total += db::collection(&state.web, "newsletter_deliveries")
-                    .count_documents(doc! {"email":email})
-                    .await
-                    .unwrap_or(0)
-            }
-            let stats =
-                json!({"email":emails.join(", "),"total":total,"by_collection":[],"databases":[]});
-            let html = format!(
-                "<html><body><h2>Newsletter delivery statistics</h2><p>Total delivered: {total}</p></body></html>"
-            );
             return Some(
-                match mail::send(
-                    state,
-                    &emails,
-                    "individual",
-                    "Newsletter delivery statistics",
-                    &html,
-                )
-                .await
-                {
-                    Ok(_) => view::json_response(
+                match newsletter_statistics::send(state, &existing, false).await {
+                    Ok(stats) => view::json_response(
                         StatusCode::OK,
-                        json!({"success":true,"message":"Newsletter statistics email sent.","statistics":stats}),
+                        json!({"success":true,"message":"Monthly newsletter statistics email sent.","statistics":stats}),
                     ),
                     Err(e) => view::error(StatusCode::BAD_GATEWAY, &e),
                 },

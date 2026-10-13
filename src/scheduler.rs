@@ -1,4 +1,4 @@
-use crate::{AppState, db, mail, newsletters, reports, subscriptions};
+use crate::{AppState, db, mail, newsletter_statistics, newsletters, reports, subscriptions};
 use chrono::{Datelike, TimeZone};
 use mongodb::bson::{self, Document, doc, oid::ObjectId};
 use serde_json::{Value, json};
@@ -402,7 +402,7 @@ async fn newsletters_tick(state: &AppState, sub: &Document) {
                 newsletter_failure(state, id, &error).await;
                 return;
             }
-            let mut delivery = doc! {"subscription_id":id,"email":&email,"source_collection":source,"selection_id":selection_id,"title":newsletter["title"].as_str().unwrap_or(""),"database":&state.cfg.vulnerabilities_database,"sent_at":bson::DateTime::now()};
+            let mut delivery = doc! {"subscription_id":id,"email":&email,"source_provider":source,"source_collection":source,"selection_id":selection_id,"title":newsletter["title"].as_str().unwrap_or(""),"database":&state.cfg.vulnerabilities_database,"sent_at":bson::DateTime::now()};
             if let Ok(owner) = sub.get_object_id("managed_by_user_id") {
                 delivery.insert("managed_by_user_id", owner);
             }
@@ -436,6 +436,7 @@ async fn tick(state: &AppState) {
         }
         scheduled_report(state, &sub).await;
         newsletters_tick(state, &sub).await;
+        newsletter_statistics::scheduled_tick(state, &sub).await;
     }
 }
 pub fn start(state: AppState) {
