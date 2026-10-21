@@ -143,7 +143,7 @@
         const list = recipientList(kind);
         list.replaceChildren();
         const values = Array.isArray(emails) && emails.length ? emails : [''];
-        const canEditRecipients = kind !== 'to' || isAdmin || editorLocalSubscription;
+        const canEditRecipients = kind !== 'to' || isAdmin || editorLocalSubscription || accountHubUser;
         values.forEach(function (email) {
             const row = document.createElement('div');
             row.className = 'input-group';
@@ -683,9 +683,7 @@
         const username = document.getElementById('username');
         username.value = subscription ? (subscription.username || '') : '';
         username.readOnly = !(isAdmin || editorLocalSubscription);
-        recipientLocked = !editorLocalSubscription && (
-            accountHubUser || !!(subscription && (subscription.zimbra_email || subscription.account_hub_email || subscription.recipientLocked))
-        );
+        recipientLocked = !editorLocalSubscription && !isAdmin && !accountHubUser;
         renderRecipientInputs(subscription ? (subscription.emails || (subscription.email ? [subscription.email] : [''])) : [''], recipientLocked);
         renderRecipientInputs(subscription && subscription.cc || [], false, 'cc');
         renderRecipientInputs(subscription && subscription.bcc || [], false, 'bcc');
@@ -857,9 +855,8 @@
             const localEmails = subscription && Array.isArray(subscription.emails)
                 ? subscription.emails.filter(Boolean).join(', ')
                 : '';
-            tr.children[0].querySelector('.email').textContent = localSubscription
-                ? localEmails
-                : (item.zimbra_email || t('Zimbra email unavailable'));
+            tr.children[0].querySelector('.email').textContent = localEmails
+                || item.zimbra_email || t('Zimbra email unavailable');
             tr.children[0].querySelector('.role').textContent = localSubscription
                 ? t('Local subscription')
                 : (item.organization_admin ? t('Organization administrator') : t('Organization member'));
@@ -903,8 +900,10 @@
                 edit.onclick = function () {
                     openEditor(Object.assign({}, subscription, {
                         username: item.username || subscription.username,
-                        email: item.zimbra_email || subscription.email,
-                        emails: item.zimbra_email ? [item.zimbra_email] : (subscription.emails || []),
+                        email: subscription.email || item.zimbra_email,
+                        emails: subscription.emails && subscription.emails.length
+                            ? subscription.emails
+                            : (subscription.email ? [subscription.email] : (item.zimbra_email ? [item.zimbra_email] : [])),
                         zimbra_email: item.zimbra_email || subscription.zimbra_email || '',
                         recipientLocked: true
                     }));
@@ -1032,6 +1031,8 @@
         if (editorLocalSubscription) payload.local_subscription = true;
         if (isAdmin || organizationDashboard || (selfManagement && (!editingId || editorLocalSubscription))) {
             payload.username = document.getElementById('username').value;
+        }
+        if (isAdmin || organizationDashboard || accountHubUser || editorLocalSubscription || (selfManagement && !editingId)) {
             payload.emails = recipientValues();
         }
         requestJson(editingId ? apiUrl(editingId) : manageSubscriptionsUrl, {method:editingId?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(){editorDirty=false;saving=true;modal.hide();showMessage(t('Subscription saved.'),'success');return load();}).catch(function(e){saving=false;showModalMessage(e.message,'danger');});

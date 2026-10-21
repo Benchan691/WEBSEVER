@@ -553,8 +553,6 @@ pub async fn ensure_zimbra_subscription(state: &AppState, user: &Document) -> Re
         "owner_user_id": owner_id,
         "managed_by_user_id": owner_id,
         "username": db::string(user, "username"),
-        "email": &email,
-        "emails": [&email],
         "zimbra_email": &email,
         "organization": db::string(user, "organization"),
         "delivery_mode": "individual",
@@ -1826,7 +1824,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         } else {
             submitted_username
         };
-        let mut emails = if self_only {
+        let emails = if self_only {
             let Some(user) = ctx.user.as_ref() else {
                 return json_error(StatusCode::UNAUTHORIZED, "Authentication required.");
             };
@@ -1838,9 +1836,10 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 );
             }
             let current_email = self_email.as_deref().unwrap_or("");
-            if current_email.is_empty()
-                || submitted_emails.len() != 1
-                || !same_email(&submitted_emails[0], current_email)
+            if !is_zimbra_user(ctx)
+                && (current_email.is_empty()
+                    || submitted_emails.len() != 1
+                    || !same_email(&submitted_emails[0], current_email))
             {
                 return json_error(
                     StatusCode::FORBIDDEN,
@@ -1848,7 +1847,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 );
             }
             username = current_username;
-            vec![current_email.to_owned()]
+            submitted_emails
         } else {
             submitted_emails
         };
@@ -2033,18 +2032,8 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             }
         }
         if let Some(owner) = owner.as_ref() {
-            let zimbra_email = match zimbra_recipient(owner) {
-                Ok(email) => email,
-                Err(error) => return json_error(StatusCode::BAD_REQUEST, &error),
-            };
-            if let Some(zimbra_email) = zimbra_email {
-                if emails.len() != 1 || !same_email(&emails[0], &zimbra_email) {
-                    return json_error(
-                        StatusCode::FORBIDDEN,
-                        "Zimbra subscriptions must use the Zimbra email.",
-                    );
-                }
-                emails = vec![zimbra_email];
+            if let Err(error) = zimbra_recipient(owner) {
+                return json_error(StatusCode::BAD_REQUEST, &error);
             }
         }
         let existing=db::find_one(&state.web,"sub_account",doc!{"username":{"$regex":format!("^{}$",regex::escape(username.trim())),"$options":"i"}}).await.ok().flatten();
@@ -2272,9 +2261,13 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             }
             if !can_manage_subscriptions(state, ctx)
                 && !local_subscription
-                && ["username", "emails", "email", "password"]
+                && (["username", "password"]
                     .iter()
                     .any(|key| ctx.json.get(*key).is_some())
+                    || (!is_zimbra_user(ctx)
+                        && ["emails", "email"]
+                            .iter()
+                            .any(|key| ctx.json.get(*key).is_some())))
             {
                 return json_error(
                     StatusCode::FORBIDDEN,
@@ -2311,6 +2304,11 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             };
             let mut data = db::bson_json(&existing);
             merge(&mut data, &ctx.json);
+            if ctx.json.get("emails").is_none()
+                && let Some(email) = ctx.json.get("email").and_then(Value::as_str)
+            {
+                data["emails"] = json!([email]);
+            }
             if ctx.json.get("organization").is_none()
                 && let Some(organization) = ctx.json.get("team").and_then(Value::as_str)
             {
@@ -2324,7 +2322,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             {
                 data["organization"] = json!(organization);
             }
-            let mut emails = match recipients(&data) {
+            let emails = match recipients(&data) {
                 Ok(v) => v,
                 Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
             };
@@ -2351,8 +2349,6 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 );
             }
             let mode = "individual";
-            let recipient_submitted =
-                ctx.json.get("emails").is_some() || ctx.json.get("email").is_some();
             let identity_change = !local_subscription
                 && ctx.is_organization_admin(state)
                 && ctx.json.get("username").is_some();
@@ -2366,17 +2362,6 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             } else {
                 None
             };
-            if let Some(zimbra_email) = current_owner_hub_email.as_ref() {
-                if recipient_submitted
-                    && (emails.len() != 1 || !same_email(&emails[0], zimbra_email))
-                {
-                    return json_error(
-                        StatusCode::FORBIDDEN,
-                        "Zimbra subscriptions must use the Zimbra email.",
-                    );
-                }
-                emails = vec![zimbra_email.clone()];
-            }
             if is_self_manager(state, ctx) && !local_subscription {
                 let Some(owner_id) = ctx.user_id() else {
                     return json_error(StatusCode::UNAUTHORIZED, "Authentication required.");
@@ -2463,19 +2448,8 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                         "Zimbra email is unavailable. Ask the user to sign in again.",
                     );
                 };
-                if recipient_submitted
-                    && (emails.len() != 1 || !same_email(&emails[0], &zimbra_email))
-                {
-                    return json_error(
-                        StatusCode::FORBIDDEN,
-                        "Zimbra subscriptions must use the Zimbra email.",
-                    );
-                }
-                emails = vec![zimbra_email.clone()];
                 update.insert("owner_user_id", member_id);
                 update.insert("username", db::string(&member, "username"));
-                update.insert("email", zimbra_email.clone());
-                update.insert("emails", emails.clone());
                 update.insert("zimbra_email", zimbra_email);
             }
             let mut unset = doc! {"team":""};
@@ -2732,6 +2706,156 @@ mod tests {
         let filters = default_filters();
         assert_eq!(filters["collections"], json!([]));
         assert_eq!(filters["collections_mode"], "selected");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires SUBSCRIPTION_TEST_MONGO_URI and no SMTP_HOST"]
+    async fn zimbra_owner_can_change_delivery_recipients_and_login_preserves_them() {
+        use std::{path::PathBuf, sync::Arc};
+        // Subscription writes still report notification errors. Keep this test
+        // offline for SMTP, and inspect the saved data after that expected error.
+        assert!(std::env::var_os("SMTP_HOST").is_none());
+        let uri = std::env::var("SUBSCRIPTION_TEST_MONGO_URI").unwrap();
+        let client = mongodb::Client::with_uri_str(&uri).await.unwrap();
+        let database = client.database(&format!(
+            "zimbra_recipients_test_{}",
+            ObjectId::new().to_hex()
+        ));
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let cfg = crate::config::Config {
+            root: root.clone(),
+            file: json!({}),
+            mongo_uri: uri,
+            web_database: database.name().into(),
+            vulnerabilities_database: database.name().into(),
+            vulnerabilities_collection: "test_news".into(),
+            secret: "test".into(),
+            bootstrap_username: "test-admin".into(),
+            bootstrap_password: String::new(),
+            zimbra_base_url: String::new(),
+            zimbra_folder_name: "news".into(),
+            zimbra_timeout_seconds: 1,
+            zimbra_verify_tls: true,
+            zimbra_credential_key: String::new(),
+            account_collection: "accounts".into(),
+            newsletter_root: root.join("newsletters"),
+            port: 0,
+        };
+        let state = AppState {
+            cfg,
+            web: database.clone(),
+            vuln: database.clone(),
+            templates: Arc::new(crate::view::environment(&root)),
+            http: reqwest::Client::new(),
+        };
+        let owner = ObjectId::new();
+        let user = doc! {"_id":owner,"username":"owner","username_key":"owner","email":"owner@example.test","zimbra_email":"owner@example.test","auth_source":"zimbra","role":"user","organization":"Team"};
+        db::collection(&database, "accounts")
+            .insert_one(user.clone())
+            .await
+            .unwrap();
+        db::collection(&database, "source_catalog")
+            .insert_one(doc! {"_id":"active","providers":["cve"]})
+            .await
+            .unwrap();
+        ensure_zimbra_subscription(&state, &user).await.unwrap();
+        let subscriptions = db::collection(&database, "sub_account");
+        let automatic = subscriptions
+            .find_one(doc! {"owner_user_id":owner,"auto_provisioned":true})
+            .await
+            .unwrap()
+            .unwrap();
+        let id = automatic.get_object_id("_id").unwrap();
+        let mut ctx = ReqCtx {
+            method: Method::PUT,
+            path: format!("/api/subscriptions/{}", id.to_hex()),
+            query: vec![],
+            headers: Default::default(),
+            body: vec![],
+            form: Default::default(),
+            user: Some(user.clone()),
+            json: json!({"emails":["External@Example.test","team@example.test"],"cc":["copy@example.test"],"bcc":["hidden@example.test"]}),
+        };
+        let response = handle(&state, &ctx).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let response_body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(
+            String::from_utf8(response_body.to_vec())
+                .unwrap()
+                .contains("SMTP_HOST is required")
+        );
+        ensure_zimbra_subscription(&state, &user).await.unwrap();
+        ensure_zimbra_subscriptions(&state).await.unwrap();
+        let saved = subscriptions
+            .find_one(doc! {"_id":id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recipients(&db::bson_json(&saved)).unwrap(),
+            ["external@example.test", "team@example.test"]
+        );
+        assert_eq!(saved.get_str("zimbra_email").unwrap(), "owner@example.test");
+        assert_eq!(saved.get_object_id("owner_user_id").unwrap(), owner);
+        assert_eq!(
+            copy_recipients(&db::bson_json(&saved)).unwrap().bcc,
+            ["hidden@example.test"]
+        );
+
+        ctx.json = json!({"emails":[]});
+        assert_eq!(
+            handle(&state, &ctx).await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+        ctx.json = json!({"username":"different-owner","emails":["other@example.test"]});
+        assert_eq!(
+            handle(&state, &ctx).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        ctx.json = json!({"email":"replacement@example.test"});
+        assert_eq!(
+            handle(&state, &ctx).await.unwrap().status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        let saved = subscriptions
+            .find_one(doc! {"_id":id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recipients(&db::bson_json(&saved)).unwrap(),
+            ["replacement@example.test"]
+        );
+
+        ctx.user = Some(
+            doc! {"_id":ObjectId::new(),"username":"stranger","auth_source":"zimbra","role":"user"},
+        );
+        ctx.json = json!({"emails":["stranger@example.test"]});
+        assert_eq!(
+            handle(&state, &ctx).await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
+        ctx.user = Some(user.clone());
+        ctx.method = Method::POST;
+        ctx.path = "/api/subscriptions".into();
+        ctx.json = json!({"username":"owner","emails":["new.external@example.test"],"newsletter_profile":default_profile("newsletter"),"report_profile":default_profile("report")});
+        assert_eq!(
+            handle(&state, &ctx).await.unwrap().status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        ensure_zimbra_subscription(&state, &user).await.unwrap();
+        assert_eq!(
+            subscriptions
+                .count_documents(
+                    doc! {"owner_user_id":owner,"emails":["new.external@example.test"]}
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        database.drop().await.unwrap();
     }
 
     #[test]

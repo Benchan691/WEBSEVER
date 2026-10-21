@@ -53,7 +53,7 @@ After a successful Zimbra `AuthRequest`, the service ensures the configured `new
 
 ## Subscriptions
 
-Each Zimbra account receives one protected, owner-scoped `sub_account` record when it first signs in (and existing accounts are backfilled at startup). Its newsletter and report profiles start disabled, so the user can enable and configure delivery without waiting for a separate subscription record. Zimbra users can add more subscriptions and view or manage only their own records; the automatic record cannot be deleted by the Zimbra user, while user-created records can be deleted. Recipients on Zimbra-owned records remain fixed to the Zimbra email. The local administrator can manage every subscription and may enter multiple external recipients. New delivery history includes `subscription_id`, so records from older deployments cannot suppress delivery for a new subscription.
+Each Zimbra account receives one protected, owner-scoped `sub_account` record when it first signs in (and existing accounts are backfilled at startup). Its newsletter and report profiles start disabled, so the user can enable and configure delivery without waiting for a separate subscription record. Zimbra users can add more subscriptions and view or manage only their own records; the automatic record cannot be deleted by the Zimbra user, while user-created records can be deleted. Zimbra users can edit the To, CC, and BCC recipients on their own subscriptions, including external addresses without including their own mailbox. The local administrator can manage every subscription and may enter multiple external recipients. New delivery history includes `subscription_id`, so records from older deployments cannot suppress delivery for a new subscription.
 
 Each subscription supports optional `cc` and `bcc` email-address arrays in addition
 to its `emails` (To) list. Copies apply to subscription notifications, newsletters,
@@ -61,8 +61,10 @@ scheduled reports, and monthly delivery statistics. Each To recipient still gets
 an individual email; CC/BCC recipients receive a copy of each. BCC addresses are
 included in the SMTP envelope but omitted from the message headers. Addresses are
 validated and deduplicated across To, CC, and BCC, with at most 50 unique recipients.
-Existing subscriptions default to empty copy lists; the Zimbra primary To address
-remains locked to the account.
+Existing subscriptions default to empty copy lists. A new Zimbra subscription
+starts with the account's email as its To recipient; users can replace it with
+other addresses. Login and startup preserve saved recipients, while the Zimbra
+account and subscription ownership remain unchanged.
 
 Download each person's saved product inventories using **Newsletter CSV** or
 **Report CSV** beside their subscription, or **Download saved CSV** in the editor.
