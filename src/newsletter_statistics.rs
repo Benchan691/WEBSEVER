@@ -280,6 +280,7 @@ async fn deliver(
         .get_object_id("_id")
         .map_err(|_| "Subscription ID is missing.")?;
     let snapshots = prepare(state, sub, period).await?;
+    let copies = subscriptions::copy_recipients(&db::bson_json(sub))?;
     let html = snapshots
         .iter()
         .map(|stats| render(state, stats))
@@ -308,6 +309,7 @@ async fn deliver(
         mail::send(
             state,
             &[email.to_owned()],
+            &copies,
             "individual",
             &format!("Newsletter delivery statistics: {}", period.label),
             html,

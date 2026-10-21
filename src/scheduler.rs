@@ -271,7 +271,12 @@ async fn send_completed_report(state: AppState, id: ObjectId, sub: Document) {
                 html.push_str("</body></html>");
                 let value = db::bson_json(&sub);
                 let emails = recipients(&value);
-                let result = mail::send(&state, &emails, "individual", title, &html).await;
+                let result = match subscriptions::copy_recipients(&value) {
+                    Ok(copies) => {
+                        mail::send(&state, &emails, &copies, "individual", title, &html).await
+                    }
+                    Err(error) => Err(error),
+                };
                 let status = if result.is_ok() { "sent" } else { "failed" };
                 let error = result.err().unwrap_or_default();
                 let _ = db::collection(&state.web, "report_jobs")
@@ -327,6 +332,13 @@ async fn newsletters_tick(state: &AppState, sub: &Document) {
         newsletter_failure(state, id, "Newsletter subscription has no recipients.").await;
         return;
     }
+    let copies = match subscriptions::copy_recipients(&value) {
+        Ok(value) => value,
+        Err(error) => {
+            newsletter_failure(state, id, &error).await;
+            return;
+        }
+    };
     let config = newsletters::template_config(state).await;
     let Some(cursor_time) = chrono::DateTime::parse_from_rfc3339(cursor)
         .ok()
@@ -393,6 +405,7 @@ async fn newsletters_tick(state: &AppState, sub: &Document) {
             if let Err(error) = mail::send(
                 state,
                 std::slice::from_ref(&email),
+                &copies,
                 "individual",
                 subject,
                 &html,

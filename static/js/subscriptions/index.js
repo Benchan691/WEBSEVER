@@ -61,7 +61,7 @@
             ? '<div id="' + prefix + '-legacy-keywords-warning" class="alert alert-warning small py-2 mt-2 mb-0 d-none" role="alert"></div>'
             : '';
         return '<div class="col-12"><div id="' + prefix + '-vendor-product-import" class="subscription-vendor-product-import border rounded p-3">' +
-        '<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2"><label class="form-label small fw-semibold mb-0" for="' + prefix + '-vendor-product-file">' + t('Product inventory (CSV)') + '</label><a id="' + prefix + '-vendor-product-template" class="btn btn-outline-secondary btn-sm" href="#" download><i class="bi bi-download me-1"></i>' + t('Download CSV template') + '</a></div>' +
+        '<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2"><label class="form-label small fw-semibold mb-0" for="' + prefix + '-vendor-product-file">' + t('Product inventory (CSV)') + '</label><div class="d-flex flex-wrap gap-2"><a id="' + prefix + '-vendor-product-download" class="btn btn-outline-primary btn-sm d-none" download><i class="bi bi-download me-1"></i>' + t('Download saved CSV') + '</a><a id="' + prefix + '-vendor-product-template" class="btn btn-outline-secondary btn-sm" href="#" download><i class="bi bi-download me-1"></i>' + t('Download CSV template') + '</a></div></div>' +
         '<input id="' + prefix + '-vendor-product-file" class="form-control form-control-sm" type="file" accept=".csv,text/csv" aria-describedby="' + prefix + '-vendor-product-help">' +
         '<div id="' + prefix + '-vendor-product-help" class="form-text">' + t('Choose a CSV with vendor and product rows. It is validated and loaded into this form; changes apply only after you save.') + '</div>' +
         '<div class="subscription-match-warning small mt-2"><i class="bi bi-exclamation-triangle me-1"></i>' + warning + '</div>' +
@@ -135,22 +135,26 @@
     function markEditorDirty() {
         if (!saving) editorDirty = true;
     }
-    function renderRecipientInputs(emails, locked) {
-        const list = document.getElementById('recipient-list');
+    function recipientList(kind) {
+        return document.getElementById(kind === 'to' ? 'recipient-list' : kind + '-recipient-list');
+    }
+    function renderRecipientInputs(emails, locked, kind) {
+        kind = kind || 'to';
+        const list = recipientList(kind);
         list.replaceChildren();
         const values = Array.isArray(emails) && emails.length ? emails : [''];
-        const canEditRecipients = isAdmin || editorLocalSubscription;
+        const canEditRecipients = kind !== 'to' || isAdmin || editorLocalSubscription;
         values.forEach(function (email) {
             const row = document.createElement('div');
             row.className = 'input-group';
             const input = document.createElement('input');
             input.type = 'email';
-            input.className = 'form-control recipient-input';
+            input.className = 'form-control recipient-input recipient-input-' + kind;
             input.placeholder = t('recipient@example.com');
             input.value = email || '';
-            input.required = true;
+            input.required = kind === 'to';
             input.readOnly = locked || !canEditRecipients;
-            input.setAttribute('aria-label', t('Email recipient'));
+            input.setAttribute('aria-label', kind === 'to' ? t('Email recipient') : kind.toUpperCase() + ' ' + t('Email recipient'));
             row.append(input);
             if (canEditRecipients && !locked) {
                 const remove = document.createElement('button');
@@ -158,26 +162,30 @@
                 remove.className = 'btn btn-outline-danger remove-recipient';
                 remove.innerHTML = '<i class="bi bi-dash-lg" aria-hidden="true"></i><span class="visually-hidden">' + t('Remove recipient') + '</span>';
                 remove.onclick = function () {
-                    if (list.children.length > 1) {
+                    if (list.children.length > 1 || kind !== 'to') {
                         row.remove();
-                        updateRecipientRemoveButtons();
+                        updateRecipientRemoveButtons(kind);
                     }
                 };
                 row.append(remove);
             }
             list.append(row);
         });
-        updateRecipientRemoveButtons();
+        updateRecipientRemoveButtons(kind);
     }
-    function updateRecipientRemoveButtons() {
-        const list = document.getElementById('recipient-list');
+    function updateRecipientRemoveButtons(kind) {
+        kind = kind || 'to';
+        const list = recipientList(kind);
         list.querySelectorAll('.remove-recipient').forEach(function (button) {
-            button.disabled = list.children.length <= 1;
+            button.disabled = kind === 'to' && list.children.length <= 1;
         });
     }
-    function recipientValues() {
-        return Array.from(document.querySelectorAll('.recipient-input')).map(function (input) {
+    function recipientValues(kind) {
+        kind = kind || 'to';
+        return Array.from(recipientList(kind).querySelectorAll('.recipient-input')).map(function (input) {
             return input.value.trim();
+        }).filter(function (value) {
+            return kind === 'to' || value.length > 0;
         });
     }
     function setSendStatisticStatus(text, kind) {
@@ -215,6 +223,27 @@
         });
     }
     function apiUrl(id, suffix) { return manageSubscriptionsUrl + '/' + encodeURIComponent(id) + (suffix || ''); }
+    function inventoryDownloadUrl(id, profile) {
+        return apiUrl(id, '/vendor-products.csv') + '?profile=' + encodeURIComponent(profile);
+    }
+    function hasSavedInventory(subscription, profile) {
+        const rows = subscription && subscription[profile + '_profile']
+            && subscription[profile + '_profile'].filters
+            && subscription[profile + '_profile'].filters.vendor_product_filter
+            && subscription[profile + '_profile'].filters.vendor_product_filter.rows;
+        return Array.isArray(rows) && rows.length > 0;
+    }
+    function appendInventoryDownloads(actions, subscription) {
+        ['newsletter', 'report'].forEach(function (profile) {
+            if (!subscription || !subscription.id || !hasSavedInventory(subscription, profile)) return;
+            const link = document.createElement('a');
+            link.className = 'btn btn-outline-secondary btn-sm';
+            link.href = inventoryDownloadUrl(subscription.id, profile);
+            link.download = '';
+            link.textContent = profile === 'newsletter' ? t('Newsletter CSV') : t('Report CSV');
+            actions.append(link);
+        });
+    }
     function setReportPreview(summary, kind, examples) {
         const box = document.getElementById('report-preview');
         const target = document.getElementById('report-preview-summary');
@@ -658,6 +687,15 @@
             accountHubUser || !!(subscription && (subscription.zimbra_email || subscription.account_hub_email || subscription.recipientLocked))
         );
         renderRecipientInputs(subscription ? (subscription.emails || (subscription.email ? [subscription.email] : [''])) : [''], recipientLocked);
+        renderRecipientInputs(subscription && subscription.cc || [], false, 'cc');
+        renderRecipientInputs(subscription && subscription.bcc || [], false, 'bcc');
+        ['newsletter', 'report'].forEach(function (profile) {
+            const link = document.getElementById(profile + '-vendor-product-download');
+            const available = !!editingId && hasSavedInventory(subscription, profile);
+            link.classList.toggle('d-none', !available);
+            if (available) link.href = inventoryDownloadUrl(editingId, profile);
+            else link.removeAttribute('href');
+        });
         const addRecipientButton = document.getElementById('add-recipient-btn');
         if (addRecipientButton) addRecipientButton.classList.toggle('d-none', recipientLocked);
         const organization = document.getElementById('organization');
@@ -711,6 +749,13 @@
             const emails = Array.isArray(item.emails) && item.emails.length ? item.emails : [item.email];
             tr.children[0].querySelector('strong').textContent = item.username || t('Unnamed user');
             tr.children[0].querySelector('.recipients').textContent = emails.filter(Boolean).join(', ');
+            ['cc', 'bcc'].forEach(function (kind) {
+                if (!Array.isArray(item[kind]) || !item[kind].length) return;
+                const line = document.createElement('div');
+                line.className = 'small text-muted';
+                line.textContent = kind.toUpperCase() + ': ' + item[kind].join(', ');
+                tr.children[0].append(line);
+            });
             tr.children[0].querySelector('.organization').textContent = item.organization || '';
             if (item.newsletter_profile.enabled) {
                 const newsletterFilters = item.newsletter_profile.filters || {};
@@ -782,6 +827,7 @@
                 };
                 actions.append(remove);
             }
+            appendInventoryDownloads(actions, item);
             tr.children[3].append(actions); rows.append(tr);
         });
     }
@@ -873,6 +919,7 @@
                 add.onclick = function () { openEditor({username:item.username, email:item.zimbra_email || '', emails:item.zimbra_email ? [item.zimbra_email] : [], organization:item.organization || '', zimbra_email:item.zimbra_email || '', recipientLocked:true}); };
                 actions.append(add);
             }
+            appendInventoryDownloads(actions, subscription);
             tr.children[4].append(actions); rows.append(tr);
         });
     }
@@ -888,7 +935,7 @@
     subscriptionForm.addEventListener('input', markEditorDirty);
     subscriptionForm.addEventListener('change', markEditorDirty);
     subscriptionForm.addEventListener('click', function (event) {
-        if (event.target.closest('.collections-action, .remove-recipient, #add-recipient-btn, .subscription-vendor-product-clear')) {
+        if (event.target.closest('.collections-action, .remove-recipient, #add-recipient-btn, .add-recipient, .subscription-vendor-product-clear')) {
             markEditorDirty();
         }
     });
@@ -936,14 +983,15 @@
     const addButton = document.getElementById('add-btn');
     if (addButton) addButton.onclick = function () { openEditor(null); };
     document.getElementById('newsletter-enabled').addEventListener('change', updateNewsletterSendStatisticVisibility);
-    const addRecipientButton = document.getElementById('add-recipient-btn');
-    if (addRecipientButton) addRecipientButton.onclick = function () {
-        const list = document.getElementById('recipient-list');
-        const values = recipientValues();
-        values.push('');
-        renderRecipientInputs(values, recipientLocked);
-        list.lastElementChild.querySelector('input').focus();
-    };
+    ['to', 'cc', 'bcc'].forEach(function (kind) {
+        const button = document.getElementById(kind === 'to' ? 'add-recipient-btn' : 'add-' + kind + '-recipient-btn');
+        if (button) button.onclick = function () {
+            const values = recipientValues(kind);
+            values.push('');
+            renderRecipientInputs(values, kind === 'to' && recipientLocked, kind);
+            recipientList(kind).lastElementChild.querySelector('input').focus();
+        };
+    });
     document.getElementById('newsletter-send-statistic').addEventListener('click', function () {
         if (!editingId || document.getElementById('newsletter-send-statistic').disabled) return;
         setSendStatisticBusy(true);
@@ -979,6 +1027,8 @@
             },
             report_profile: buildReportProfilePayload().report_profile };
         if (organization) payload.organization = organization.value;
+        payload.cc = recipientValues('cc');
+        payload.bcc = recipientValues('bcc');
         if (editorLocalSubscription) payload.local_subscription = true;
         if (isAdmin || organizationDashboard || (selfManagement && (!editingId || editorLocalSubscription))) {
             payload.username = document.getElementById('username').value;

@@ -6,6 +6,12 @@ use lettre::{
 };
 use std::env;
 
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct CopyRecipients {
+    pub cc: Vec<String>,
+    pub bcc: Vec<String>,
+}
+
 fn smtp_transport(
     state: &AppState,
 ) -> Result<(AsyncSmtpTransport<Tokio1Executor>, lettre::message::Mailbox), String> {
@@ -63,14 +69,26 @@ fn smtp_transport(
 fn message(
     from: &lettre::message::Mailbox,
     recipient: &str,
+    copies: &CopyRecipients,
     subject: &str,
     html: &str,
 ) -> Result<Message, String> {
-    Message::builder()
-        .from(from.clone())
-        .to(recipient
+    let mut builder = Message::builder().from(from.clone()).to(recipient
+        .parse()
+        .map_err(|e: lettre::address::AddressError| e.to_string())?);
+    for email in &copies.cc {
+        builder = builder.cc(email
             .parse()
-            .map_err(|e: lettre::address::AddressError| e.to_string())?)
+            .map_err(|e: lettre::address::AddressError| e.to_string())?);
+    }
+    for email in &copies.bcc {
+        builder = builder.bcc(
+            email
+                .parse()
+                .map_err(|e: lettre::address::AddressError| e.to_string())?,
+        );
+    }
+    builder
         .subject(subject)
         .header(ContentType::TEXT_HTML)
         // Base64 keeps styled HTML portable across SMTP relays and mailbox
@@ -82,6 +100,7 @@ fn message(
 pub async fn send(
     state: &AppState,
     recipients: &[String],
+    copies: &CopyRecipients,
     _mode: &str,
     subject: &str,
     html: &str,
@@ -93,7 +112,7 @@ pub async fn send(
     for recipient in recipients {
         let normalized = recipient.trim().to_lowercase();
         transport
-            .send(message(&from, &normalized, subject, html)?)
+            .send(message(&from, &normalized, copies, subject, html)?)
             .await
             .map_err(|e| e.to_string())?;
     }
@@ -111,6 +130,7 @@ mod tests {
             message(
                 &from,
                 "recipient@example.com",
+                &CopyRecipients::default(),
                 "Security update",
                 "<p>Styled security notification</p>",
             )
@@ -119,5 +139,36 @@ mod tests {
         )
         .unwrap();
         assert!(rendered.contains("Content-Transfer-Encoding: base64\r\n"));
+    }
+
+    #[test]
+    fn copy_recipients_receive_mail_without_exposing_bcc_headers() {
+        let from = "newsletter@example.com".parse().unwrap();
+        let email = message(
+            &from,
+            "to@example.com",
+            &CopyRecipients {
+                cc: vec!["cc@example.com".into()],
+                bcc: vec!["hidden@example.com".into()],
+            },
+            "Security update",
+            "<p>Update</p>",
+        )
+        .unwrap();
+        let recipients = email
+            .envelope()
+            .to()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            recipients,
+            ["to@example.com", "cc@example.com", "hidden@example.com"]
+        );
+        let rendered = String::from_utf8(email.formatted()).unwrap();
+        assert!(rendered.contains("To: to@example.com\r\n"));
+        assert!(rendered.contains("Cc: cc@example.com\r\n"));
+        assert!(!rendered.contains("Bcc:"));
+        assert!(!rendered.contains("hidden@example.com"));
     }
 }

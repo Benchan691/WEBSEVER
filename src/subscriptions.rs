@@ -291,6 +291,11 @@ fn public(document: &Document) -> Value {
             .to_owned();
         obj.insert("organization".into(), json!(organization));
         obj.insert("delivery_mode".into(), json!("individual"));
+        for key in ["cc", "bcc"] {
+            if obj.get(key).is_none_or(Value::is_null) {
+                obj.insert(key.into(), json!([]));
+            }
+        }
         obj.remove("team");
         for key in [
             "owner_user_id",
@@ -445,6 +450,8 @@ fn default_zimbra_subscription_document(
         "managed_by_user_id": owner_id,
         "username": db::string(user, "username"),
         "emails": [email],
+        "cc": [],
+        "bcc": [],
         "email": email,
         "zimbra_email": email,
         "organization": db::string(user, "organization"),
@@ -493,9 +500,17 @@ fn same_subscription_identity(left: &Document, right: &Document) -> bool {
             .eq_ignore_ascii_case(right_organization.trim())
         && left.get("newsletter_profile") == right.get("newsletter_profile")
         && left.get("report_profile") == right.get("report_profile")
+        && copy_recipients(&db::bson_json(left)).ok() == copy_recipients(&db::bson_json(right)).ok()
 }
 
 fn is_default_zimbra_subscription(document: &Document) -> bool {
+    if ["cc", "bcc"].iter().any(|key| {
+        document
+            .get_array(*key)
+            .is_ok_and(|items| !items.is_empty())
+    }) {
+        return false;
+    }
     let newsletter = db::json_doc(&default_profile("newsletter")).ok();
     let report = db::json_doc(&default_profile("report")).ok();
     newsletter.is_some_and(|expected| {
@@ -880,17 +895,46 @@ pub(crate) fn recipients(data: &Value) -> Result<Vec<String>, String> {
             .ok_or("Email recipients must be non-empty text values.")?
             .trim()
             .to_lowercase();
-        if !email.contains('@')
-            || !email
-                .rsplit('@')
-                .next()
-                .is_some_and(|domain| domain.contains('.'))
-        {
+        if !auth::valid_email(&email) || email.parse::<lettre::Address>().is_err() {
             return Err(format!("Invalid email address: {email}"));
         }
         if seen.insert(email.clone()) {
             output.push(email)
         }
+    }
+    Ok(output)
+}
+
+pub(crate) fn copy_recipients(data: &Value) -> Result<mail::CopyRecipients, String> {
+    let to = recipients(data)?;
+    let mut seen = to.into_iter().collect::<HashSet<_>>();
+    let mut output = mail::CopyRecipients::default();
+    for (key, target) in [("cc", &mut output.cc), ("bcc", &mut output.bcc)] {
+        let Some(raw) = data.get(key).filter(|value| !value.is_null()) else {
+            continue;
+        };
+        let items = raw
+            .as_array()
+            .ok_or_else(|| format!("{key} recipients must be an array."))?;
+        if items.len() > 50 {
+            return Err("At most 50 recipients are allowed across To, CC, and BCC.".into());
+        }
+        for item in items {
+            let email = item
+                .as_str()
+                .ok_or_else(|| format!("{key} recipients must be email addresses."))?
+                .trim()
+                .to_lowercase();
+            if !auth::valid_email(&email) || email.parse::<lettre::Address>().is_err() {
+                return Err(format!("Invalid {key} email address: {email}"));
+            }
+            if seen.insert(email.clone()) {
+                target.push(email);
+            }
+        }
+    }
+    if seen.len() > 50 {
+        return Err("At most 50 recipients are allowed across To, CC, and BCC.".into());
     }
     Ok(output)
 }
@@ -907,6 +951,7 @@ fn escape_html(value: &str) -> String {
 async fn notify(
     state: &AppState,
     emails: &[String],
+    copies: &mail::CopyRecipients,
     kind: &str,
     username: &str,
     organization: &str,
@@ -1002,6 +1047,7 @@ async fn notify(
         mail::send(
             state,
             std::slice::from_ref(email),
+            copies,
             "individual",
             subject,
             &body,
@@ -1156,6 +1202,43 @@ async fn vendor_import(ctx: &ReqCtx) -> Response {
         StatusCode::OK,
         json!({"vendor_product_filter":{"enabled":true,"schema_version":1,"include_possible_matches":false,"rows":rows},"warnings":[]}),
     )
+}
+
+fn vendor_product_csv(subscription: &Value, profile_name: &str) -> Result<String, String> {
+    let profile_key = match profile_name {
+        "newsletter" => "newsletter_profile",
+        "report" => "report_profile",
+        _ => return Err("Inventory profile must be newsletter or report.".into()),
+    };
+    let mut writer = csv::Writer::from_writer(Vec::new());
+    writer
+        .write_record(["vendor", "product", "vendor_aliases", "product_aliases"])
+        .map_err(|error| error.to_string())?;
+    if let Some(rows) =
+        subscription[profile_key]["filters"]["vendor_product_filter"]["rows"].as_array()
+    {
+        for row in rows {
+            let aliases = |key: &str| {
+                row[key]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("|")
+            };
+            writer
+                .write_record([
+                    row["vendor"].as_str().unwrap_or(""),
+                    row["product"].as_str().unwrap_or(""),
+                    &aliases("vendor_aliases"),
+                    &aliases("product_aliases"),
+                ])
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    String::from_utf8(writer.into_inner().map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())
 }
 async fn collection_rows(state: &AppState) -> Result<Vec<Value>, String> {
     let collection = db::collection(&state.vuln, &state.cfg.vulnerabilities_collection);
@@ -1577,7 +1660,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             .collect::<Vec<_>>();
         return Some(view::json_response(
             StatusCode::OK,
-            json!({"schema_version":1,"subscription":{"fields":["username","emails","organization"],"delivery_mode":"individual"},"profile_types":["newsletter","report"],"source_providers":names.clone(),"review_collections":names,"filters":{"defaults":default_filters()},"profiles":{"newsletter":{"defaults":default_profile("newsletter")},"report":{"defaults":default_profile("report")}},"vendor_product_filter":{"schema_version":1,"defaults":{"enabled":false,"schema_version":1,"include_possible_matches":false,"rows":[]}},"allowed_values":{"severity":["Critical","High","Medium","Low"],"time_window":["all","daily","week","custom"],"generation_mode":["template","enriched_weekly"],"report_language":["en","zh","ch"]},"limits":{"report_scope_max_count":500}}),
+            json!({"schema_version":1,"subscription":{"fields":["username","emails","cc","bcc","organization"],"delivery_mode":"individual"},"profile_types":["newsletter","report"],"source_providers":names.clone(),"review_collections":names,"filters":{"defaults":default_filters()},"profiles":{"newsletter":{"defaults":default_profile("newsletter")},"report":{"defaults":default_profile("report")}},"vendor_product_filter":{"schema_version":1,"defaults":{"enabled":false,"schema_version":1,"include_possible_matches":false,"rows":[]}},"allowed_values":{"severity":["Critical","High","Medium","Low"],"time_window":["all","daily","week","custom"],"generation_mode":["template","enriched_weekly"],"report_language":["en","zh","ch"]},"limits":{"report_scope_max_count":500,"email_recipients_max_count":50}}),
         ));
     }
     if ctx.path == "/api/organization/subscriptions" && ctx.method == Method::GET {
@@ -1731,6 +1814,10 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             Ok(v) => v,
             Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
         };
+        let copies = match copy_recipients(&ctx.json) {
+            Ok(value) => value,
+            Err(error) => return json_error(StatusCode::BAD_REQUEST, &error),
+        };
         let submitted_username = ctx.field("username");
         let mut username = if local_subscription {
             submitted_username
@@ -1871,6 +1958,8 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 "username": username.trim(),
                 "emails": emails.clone(),
                 "email": &emails[0],
+                "cc": copies.cc.clone(),
+                "bcc": copies.bcc.clone(),
                 "organization": &local_organization,
                 "delivery_mode": "individual",
                 "auto_provisioned": false,
@@ -1888,6 +1977,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                         if let Err(error) = notify(
                             state,
                             &emails,
+                            &copies,
                             "created",
                             username.trim(),
                             &local_organization,
@@ -1989,6 +2079,8 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         };
         let now = bson::DateTime::now();
         let mut document = doc! {"owner_user_id":owner_id,"managed_by_user_id":ctx.user_id().unwrap(),"username":username.trim(),"emails":emails.clone(),"email":&emails[0],"organization":organization.trim(),"delivery_mode":mode,"auto_provisioned":false,"newsletter_profile":db::json_doc(&newsletter).unwrap(),"report_profile":db::json_doc(&report).unwrap(),"created_at":now,"updated_at":now};
+        document.insert("cc", copies.cc.clone());
+        document.insert("bcc", copies.bcc.clone());
         if let Some(email) = owner_zimbra_email {
             document.insert("zimbra_email", email);
         }
@@ -2001,6 +2093,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                     if let Err(error) = notify(
                         state,
                         &emails,
+                        &copies,
                         "created",
                         &username,
                         &organization,
@@ -2034,6 +2127,29 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             return json_error(StatusCode::NOT_FOUND, "Subscription not found.");
         };
         let id = existing.get_object_id("_id").unwrap();
+        if action == "vendor-products.csv" && ctx.method == Method::GET {
+            let requested = ctx.arg("profile");
+            let profile_name = if requested.is_empty() {
+                "report"
+            } else {
+                &requested
+            };
+            return Some(
+                match vendor_product_csv(&db::bson_json(&existing), profile_name) {
+                    Ok(csv) => {
+                        let filename =
+                            format!("subscription_{}_{profile_name}_inventory.csv", id.to_hex());
+                        let mut response =
+                            view::attachment("text/csv; charset=utf-8", &filename, csv);
+                        response
+                            .headers_mut()
+                            .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+                        response
+                    }
+                    Err(error) => view::error(StatusCode::BAD_REQUEST, &error),
+                },
+            );
+        }
         if action == "run" && ctx.method == Method::POST {
             let old = db::bson_json(&existing);
             if old["report_profile"]["enabled"] != true {
@@ -2100,6 +2216,10 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             }
             let old = db::bson_json(&existing);
             let emails = recipients(&old).unwrap_or_default();
+            let copies = match copy_recipients(&old) {
+                Ok(value) => value,
+                Err(error) => return json_error(StatusCode::BAD_REQUEST, &error),
+            };
             let username = old["username"].as_str().unwrap_or("");
             let organization = subscription_organization(&old);
             return Some(match coll.delete_one(doc! {"_id":id}).await {
@@ -2107,6 +2227,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                     if let Err(error) = notify(
                         state,
                         &emails,
+                        &copies,
                         "cancelled",
                         username,
                         organization,
@@ -2207,6 +2328,10 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 Ok(v) => v,
                 Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
             };
+            let copies = match copy_recipients(&data) {
+                Ok(value) => value,
+                Err(error) => return json_error(StatusCode::BAD_REQUEST, &error),
+            };
             let newsletter = match profile(state, "newsletter", &data["newsletter_profile"]).await {
                 Ok(v) => v,
                 Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
@@ -2281,6 +2406,8 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 }
             }
             let mut update = doc! {"username":username,"email":&emails[0],"emails":emails.clone(),"organization":organization,"delivery_mode":mode,"newsletter_profile":db::json_doc(&newsletter).unwrap(),"report_profile":db::json_doc(&report).unwrap(),"updated_at":bson::DateTime::now()};
+            update.insert("cc", copies.cc.clone());
+            update.insert("bcc", copies.bcc.clone());
             if let Some(zimbra_email) = current_owner_hub_email.as_ref() {
                 update.insert("zimbra_email", zimbra_email.clone());
             }
@@ -2374,12 +2501,15 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                             || ctx.json.get("newsletter_profile").is_some()
                             || ctx.json.get("report_profile").is_some()
                             || ctx.json.get("emails").is_some()
+                            || ctx.json.get("cc").is_some()
+                            || ctx.json.get("bcc").is_some()
                             || ctx.json.get("organization").is_some()
                             || ctx.json.get("team").is_some();
                         let notification_error = if changed {
                             notify(
                                 state,
                                 &emails,
+                                &copies,
                                 "updated",
                                 username,
                                 organization,
@@ -2412,6 +2542,190 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
 mod tests {
     use super::*;
     use mongodb::bson::oid::ObjectId;
+
+    #[test]
+    fn copy_recipients_default_empty_and_normalize_across_recipient_groups() {
+        assert_eq!(
+            copy_recipients(&json!({"email":"owner@example.com"})).unwrap(),
+            mail::CopyRecipients::default()
+        );
+        let copies = copy_recipients(&json!({
+            "emails":["Owner@Example.com"],
+            "cc":[" owner@example.com ","COPY@example.com","copy@example.com"],
+            "bcc":["copy@example.com"," Hidden@Example.com "]
+        }))
+        .unwrap();
+        assert_eq!(copies.cc, ["copy@example.com"]);
+        assert_eq!(copies.bcc, ["hidden@example.com"]);
+    }
+
+    #[test]
+    fn invalid_copy_recipients_are_rejected_before_saving() {
+        for invalid in [
+            json!("copy@example.com"),
+            json!([7]),
+            json!([""]),
+            json!(["bad"]),
+            json!(["copy@example.com\r\nBcc: bad@example.com"]),
+        ] {
+            for key in ["cc", "bcc"] {
+                let mut data = json!({"emails":["owner@example.com"]});
+                data[key] = invalid.clone();
+                assert!(copy_recipients(&data).is_err(), "{key}: {invalid}");
+            }
+        }
+        let mut data = json!({"emails":["owner@example.com"], "cc":[]});
+        data["bcc"] = json!(
+            (0..50)
+                .map(|n| format!("copy{n}@example.com"))
+                .collect::<Vec<_>>()
+        );
+        assert!(copy_recipients(&data).is_err());
+    }
+
+    #[test]
+    fn copy_updates_preserve_omitted_lists_and_allow_clearing() {
+        let mut data = json!({"emails":["owner@example.com"],"cc":["copy@example.com"],"bcc":["hidden@example.com"]});
+        merge(&mut data, &json!({"cc":[]}));
+        let copies = copy_recipients(&data).unwrap();
+        assert!(copies.cc.is_empty());
+        assert_eq!(copies.bcc, ["hidden@example.com"]);
+    }
+
+    #[test]
+    fn configured_copy_recipients_prevent_default_subscription_cleanup() {
+        let owner = ObjectId::new();
+        let mut row = default_zimbra_subscription_document(
+            &doc! {"username":"owner"},
+            owner,
+            "owner@example.com",
+            bson::DateTime::now(),
+        );
+        assert!(is_default_zimbra_subscription(&row));
+        let default = row.clone();
+        row.insert("cc", vec!["copy@example.com"]);
+        assert!(!is_default_zimbra_subscription(&row));
+        assert!(!same_subscription_identity(&row, &default));
+    }
+
+    #[test]
+    fn inventory_csv_preserves_quotes_unicode_aliases_and_profile_scope() {
+        let data = json!({
+            "newsletter_profile":{"filters":{"vendor_product_filter":{"rows":[{"vendor":"Newsletter vendor","product":"Other","vendor_aliases":[],"product_aliases":[]}]}}},
+            "report_profile":{"filters":{"vendor_product_filter":{"rows":[{"vendor":"Acme, Inc.","product":"安全 \"Server\"\nEdition","vendor_aliases":["Acme","Acme Corp"],"product_aliases":["Server 2026"]}]}}}
+        });
+        let output = vendor_product_csv(&data, "report").unwrap();
+        let mut csv = csv::Reader::from_reader(output.as_bytes());
+        assert_eq!(
+            csv.headers().unwrap().iter().collect::<Vec<_>>(),
+            ["vendor", "product", "vendor_aliases", "product_aliases"]
+        );
+        let rows = csv.records().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(&rows[0][0], "Acme, Inc.");
+        assert_eq!(&rows[0][1], "安全 \"Server\"\nEdition");
+        assert_eq!(&rows[0][2], "Acme|Acme Corp");
+        assert!(!output.contains("Newsletter vendor"));
+        assert!(
+            vendor_product_csv(&data, "newsletter")
+                .unwrap()
+                .contains("Newsletter vendor")
+        );
+        assert!(vendor_product_csv(&data, "other").is_err());
+        assert_eq!(
+            vendor_product_csv(&json!({}), "report").unwrap(),
+            "vendor,product,vendor_aliases,product_aliases\n"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires SUBSCRIPTION_TEST_MONGO_URI for a disposable database"]
+    async fn inventory_download_is_scoped_to_subscription_owner() {
+        use std::{path::PathBuf, sync::Arc};
+        let uri = std::env::var("SUBSCRIPTION_TEST_MONGO_URI").unwrap();
+        let client = mongodb::Client::with_uri_str(&uri).await.unwrap();
+        let database = client.database(&format!(
+            "subscription_download_test_{}",
+            ObjectId::new().to_hex()
+        ));
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let cfg = crate::config::Config {
+            root: root.clone(),
+            file: json!({}),
+            mongo_uri: uri,
+            web_database: database.name().into(),
+            vulnerabilities_database: database.name().into(),
+            vulnerabilities_collection: "test_news".into(),
+            secret: "test".into(),
+            bootstrap_username: "test-admin".into(),
+            bootstrap_password: String::new(),
+            zimbra_base_url: String::new(),
+            zimbra_folder_name: "news".into(),
+            zimbra_timeout_seconds: 1,
+            zimbra_verify_tls: true,
+            zimbra_credential_key: String::new(),
+            account_collection: "accounts".into(),
+            newsletter_root: root.join("newsletters"),
+            port: 0,
+        };
+        let state = AppState {
+            cfg,
+            web: database.clone(),
+            vuln: database.clone(),
+            templates: Arc::new(crate::view::environment(&root)),
+            http: reqwest::Client::new(),
+        };
+        let owner = ObjectId::new();
+        let stranger = ObjectId::new();
+        let id = ObjectId::new();
+        db::collection(&database,"sub_account").insert_one(doc!{
+            "_id":id, "owner_user_id":owner, "emails":["owner@example.com"],
+            "report_profile":{"filters":{"vendor_product_filter":{"rows":[{"vendor":"Owner vendor","product":"Private product"}]}}}
+        }).await.unwrap();
+        let mut ctx = ReqCtx {
+            method: Method::GET,
+            path: format!("/api/subscriptions/{}/vendor-products.csv", id.to_hex()),
+            query: vec![("profile".into(), "report".into())],
+            headers: Default::default(),
+            body: vec![],
+            json: Value::Null,
+            form: Default::default(),
+            user: Some(doc! {"_id":owner,"username":"owner","auth_source":"zimbra","role":"user"}),
+        };
+        let response = handle(&state, &ctx).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/csv; charset=utf-8"
+        );
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert!(
+            response.headers()[header::CONTENT_DISPOSITION]
+                .to_str()
+                .unwrap()
+                .contains("_report_inventory.csv")
+        );
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(
+            String::from_utf8(body.to_vec())
+                .unwrap()
+                .contains("Private product")
+        );
+        ctx.user =
+            Some(doc! {"_id":stranger,"username":"stranger","auth_source":"zimbra","role":"user"});
+        assert_eq!(
+            handle(&state, &ctx).await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
+        ctx.user = None;
+        assert_eq!(
+            handle(&state, &ctx).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        database.drop().await.unwrap();
+    }
 
     #[test]
     fn new_profiles_start_without_selected_collections() {
