@@ -66,8 +66,8 @@ starts with the account's email as its To recipient; users can replace it with
 other addresses. Login and startup preserve saved recipients, while the Zimbra
 account and subscription ownership remain unchanged.
 
-Download each person's saved product inventories using **Newsletter CSV** or
-**Report CSV** beside their subscription, or **Download saved CSV** in the editor.
+Download each person's saved product inventories using **Download saved CSV**
+in the newsletter or report section of the subscription editor.
 Exports use the same four columns and pipe-separated aliases as the import
 template, so they can be imported again. Downloads contain saved data, not pending
 form changes, and use the same subscription ownership and administrator scopes.

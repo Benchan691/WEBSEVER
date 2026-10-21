@@ -233,17 +233,6 @@
             && subscription[profile + '_profile'].filters.vendor_product_filter.rows;
         return Array.isArray(rows) && rows.length > 0;
     }
-    function appendInventoryDownloads(actions, subscription) {
-        ['newsletter', 'report'].forEach(function (profile) {
-            if (!subscription || !subscription.id || !hasSavedInventory(subscription, profile)) return;
-            const link = document.createElement('a');
-            link.className = 'btn btn-outline-secondary btn-sm';
-            link.href = inventoryDownloadUrl(subscription.id, profile);
-            link.download = '';
-            link.textContent = profile === 'newsletter' ? t('Newsletter CSV') : t('Report CSV');
-            actions.append(link);
-        });
-    }
     function setReportPreview(summary, kind, examples) {
         const box = document.getElementById('report-preview');
         const target = document.getElementById('report-preview-summary');
@@ -825,7 +814,6 @@
                 };
                 actions.append(remove);
             }
-            appendInventoryDownloads(actions, item);
             tr.children[3].append(actions); rows.append(tr);
         });
     }
@@ -918,7 +906,6 @@
                 add.onclick = function () { openEditor({username:item.username, email:item.zimbra_email || '', emails:item.zimbra_email ? [item.zimbra_email] : [], organization:item.organization || '', zimbra_email:item.zimbra_email || '', recipientLocked:true}); };
                 actions.append(add);
             }
-            appendInventoryDownloads(actions, subscription);
             tr.children[4].append(actions); rows.append(tr);
         });
     }
