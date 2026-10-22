@@ -1,13 +1,16 @@
+{% from 'newsletters/overview.html' import overview, source_table %}
 <!DOCTYPE html>
 <html lang="{{ newsletter.language }}">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ newsletter.title }}</title>
     <style>
         body { font-family: Tahoma, Arial, sans-serif; font-size: 12px; line-height: 1.5; color: #111; }
         h1 { text-align: center; font-size: 22px; }
         .indent { margin-left: 2em; }
         .indent img { max-width: 100%; height: auto; }
+        a { overflow-wrap: anywhere; }
         table { width: 100%; border-collapse: collapse; margin-bottom: 1em; }
         th, td { border: 1px solid #222; padding: 5px; text-align: left; vertical-align: top; }
         th { font-weight: bold; text-align: center; }
@@ -26,7 +29,7 @@
 
     {% elif field == 'overview' %}
     <p><b>{{ newsletter.labels.overview }}</b></p>
-    <div class="indent">{{ newsletter.overview }}</div>
+    <div class="indent">{{ overview(newsletter) }}</div>
 
     {% elif field == 'table' and newsletter.table %}
     <table>
@@ -52,6 +55,9 @@
     {% elif field == 'affected' and newsletter.show_affected %}
     <p><b>{{ newsletter.labels.affected }}</b></p>
     {% if newsletter.affected_table %}
+    {% if newsletter.template_key == 'splunk' %}
+    {{ source_table(newsletter.affected_table) }}
+    {% else %}
     <table>
         <thead><tr>{% for header in newsletter.affected_table.headers %}<th>{{ header }}</th>{% endfor %}</tr></thead>
         <tbody>
@@ -60,6 +66,7 @@
         {% endfor %}
         </tbody>
     </table>
+    {% endif %}
     {% else %}
     <ul>{% for value in newsletter.affected %}<li>{{ value }}</li>{% else %}<li>{{ newsletter.labels.not_specified }}</li>{% endfor %}</ul>
     {% endif %}

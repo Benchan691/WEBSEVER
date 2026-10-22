@@ -1,3 +1,4 @@
+{% from 'newsletters/overview.html' import overview %}
 <!DOCTYPE html>
 <html lang="{{ html_language }}">
 <head>
@@ -52,10 +53,10 @@
     <article>
         <h3>{{ item.title }}</h3>
         <p class="meta">{{ item.code or '' }}{% if item.severity %} | {{ item.severity }}{% endif %}</p>
-        {% if newsletter.overview %}
+        {% if newsletter.overview or newsletter.overview_blocks %}
         <div class="newsletter-section">
             <p class="newsletter-section-title">{{ item_labels.overview or 'Overview:' }}</p>
-            <div>{{ newsletter.overview|safe }}</div>
+            <div>{% if newsletter.overview_blocks %}{{ overview(newsletter) }}{% else %}{{ newsletter.overview|safe }}{% endif %}</div>
         </div>
         {% endif %}
         {% if newsletter.table and newsletter.table.headers %}

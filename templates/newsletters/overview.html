@@ -1,0 +1,24 @@
+{% macro source_table(table, css_class='source-overview-table') %}
+<div style="max-width:100%;overflow-x:auto;">
+<table class="{{ css_class }}" style="width:100%;min-width:480px;border-collapse:collapse;margin:12px 0;font-family:Tahoma,Arial,sans-serif;font-size:12px;line-height:1.5;overflow-wrap:anywhere;">
+    <thead><tr>{% for header in table.headers %}<th scope="col" style="border:1px solid #222;padding:7px;text-align:center;vertical-align:top;background-color:#f1f5f9;font-weight:bold;white-space:nowrap;">{{ header }}</th>{% endfor %}</tr></thead>
+    <tbody>{% for row in table.rows %}<tr>{% for cell in row %}<td style="border:1px solid #222;padding:7px;text-align:left;vertical-align:top;overflow-wrap:anywhere;">{{ cell|nl2br }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+</table>
+</div>
+{% endmacro %}
+
+{% macro overview(newsletter) %}
+{% if newsletter.overview_blocks %}
+    {% for block in newsletter.overview_blocks %}
+        {% if block.kind == 'table' %}
+        {{ source_table(block.table) }}
+        {% elif block.kind == 'heading' %}
+        <h3 style="font-size:14px;margin:16px 0 8px;">{{ block.text }}</h3>
+        {% else %}
+        <p style="margin:0 0 10px;">{{ block.text }}</p>
+        {% endif %}
+    {% endfor %}
+{% else %}
+    {{ newsletter.overview }}
+{% endif %}
+{% endmacro %}

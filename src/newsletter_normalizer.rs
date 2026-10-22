@@ -2,6 +2,8 @@ use regex::Regex;
 use serde_json::{Map, Value, json};
 use std::collections::HashSet;
 
+mod splunk;
+
 const ORDER: [&str; 12] = [
     "title",
     "collection",
@@ -876,6 +878,17 @@ pub fn normalize(document: &Value, source: &str, config: &Value) -> Value {
         "paloalto" => {
             affected = values(&details["products"]);
             recommendations = values(&json!([details["solution"], details["workarounds"]]));
+        }
+        "splunk" => {
+            let description = text(&details["description"]);
+            if !description.is_empty() {
+                overview = description;
+            }
+            let content = splunk::overview(details, &overview);
+            if !content.is_empty() {
+                extras.insert("overview_blocks".into(), json!(content));
+            }
+            affected_table = splunk::product_status(details);
         }
         "fortiguard" => {
             if !text(&details["summary"]).is_empty() {

@@ -169,10 +169,19 @@ fn template_report(records: &[Value]) -> Value {
         .iter()
         .flat_map(|key| strings(&details[*key]))
         .collect::<Vec<_>>();
+        let mut newsletter = json!({"overview":summary,"severity":if severity.is_empty(){vec![]}else{vec![severity.clone()]},"impacts":[],"affected":affected,"cves":if code.is_empty(){vec![]}else{vec![code.clone()]},"recommendations":recs,"references":refs,"related_links":[],"show_severity":!severity.is_empty(),"show_impacts":false,"show_affected":!affected.is_empty(),"show_recommendations":true,"labels":{"overview":"Overview:","severity":"Severity:","affected":"Affected system:","recommendations":"Recommendations:","references":"References:"}});
+        if record.pointer("/source/provider").and_then(Value::as_str) == Some("splunk") {
+            let normalized = crate::newsletter_normalizer::normalize(record, "splunk", &json!({}));
+            for field in ["overview", "overview_blocks", "affected_table"] {
+                newsletter[field] = normalized[field].clone();
+            }
+            newsletter["show_affected"] =
+                json!(!affected.is_empty() || newsletter["affected_table"].is_object());
+        }
         if !severity.is_empty() {
             with_severity += 1
         }
-        if !affected.is_empty() {
+        if newsletter["show_affected"] == true {
             with_affected += 1
         }
         if !recs.is_empty() {
@@ -182,7 +191,7 @@ fn template_report(records: &[Value]) -> Value {
             with_reference += 1
         };
         recommendations.extend(recs.clone());
-        highlights.push(json!({"title":title,"code":code,"severity":severity,"summary":summary,"affected":affected,"references":refs,"source_link":first_text(&record["source"],&["detail_url","url"]),"newsletter":{"overview":summary,"severity":if severity.is_empty(){vec![]}else{vec![severity.clone()]},"impacts":[],"affected":affected,"cves":if code.is_empty(){vec![]}else{vec![code.clone()]},"recommendations":recs,"references":refs,"related_links":[],"show_severity":!severity.is_empty(),"show_impacts":false,"show_affected":!affected.is_empty(),"show_recommendations":true,"labels":{"overview":"Overview:","severity":"Severity:","affected":"Affected system:","recommendations":"Recommendations:","references":"References:"}}}));
+        highlights.push(json!({"title":title,"code":code,"severity":severity,"summary":summary,"affected":affected,"references":refs,"source_link":first_text(&record["source"],&["detail_url","url"]),"newsletter":newsletter}));
     }
     let n = records.len();
     let summary = format!(
@@ -854,4 +863,36 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn template_reports_render_splunk_overview_and_product_tables() {
+        let report = template_report(&[json!({
+            "title": "Splunk advisory", "source": {"provider": "splunk"},
+            "details": {
+                "description": "Security fixes.",
+                "tables": [{"headers": ["cve", "summary"], "rows": [["CVE-2026-12345", "A security fix"]]}],
+                "product_status": [{"product": "Splunk Enterprise", "base_version": "10.0", "affected_version": "Below 10.0.2", "fix_version": "10.0.2"}]
+            }
+        })]);
+        assert!(
+            report["executive_summary"]
+                .as_str()
+                .unwrap()
+                .contains("system data is available for 1 of 1")
+        );
+        let html = view::environment(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+            .get_template("reports/generated.html")
+            .unwrap()
+            .render(json!({"html_language": "en", "labels": {}, "report": report}))
+            .unwrap();
+        assert!(html.contains("class=\"source-overview-table\""));
+        assert!(html.contains("A security fix"));
+        assert!(html.contains("Base Version"));
+        assert!(html.contains("Below 10.0.2"));
+    }
 }
