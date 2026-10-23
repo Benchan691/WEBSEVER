@@ -23,6 +23,13 @@ exec(compile(PYTHON_SOURCE, "setup.sh:python", "exec"), HELPER)
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_invalid_port_can_be_retyped(self):
+        answers = iter(('abc', '70000', '9100'))
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            result = HELPER['validated'](lambda: next(answers), HELPER['require_port'])
+        self.assertEqual(result, '9100')
+        self.assertEqual(output.getvalue().count('Please retype'), 2)
+
     def test_password_characters_stay_literal_and_duplicates_are_removed(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / ".env"
@@ -243,6 +250,25 @@ class RepositoryTests(unittest.TestCase):
 
 
 class DeploymentTests(unittest.TestCase):
+    def test_failed_command_retries_without_exiting(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            self.run_shell(Path(temporary), '''
+attempts=0
+flaky() { attempts=$((attempts + 1)); [[ "$attempts" -eq 2 ]]; }
+choose_recovery() { RETRY_ACTION=retry; }
+retry_command 'Test command' flaky
+[[ "$attempts" -eq 2 ]]
+''')
+
+    def test_cancel_returns_original_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            self.run_shell(Path(temporary), '''
+choose_recovery() { RETRY_ACTION=cancel; }
+fails() { return 42; }
+if retry_command 'Test command' fails; then exit 1; else status=$?; fi
+[[ "$status" -eq 42 ]]
+''')
+
     def run_shell(self, root, body):
         return subprocess.run(
             ["bash", "-c", 'source "$1"; INSTALL_ROOT=$2; BACKUP_DIR=$2/backup; RELEASE_DIR=$2/release; UNIT_DIR=$2/units; PUBLIC_PORT=9100; TRACE=$2/trace; mkdir -p "$BACKUP_DIR" "$RELEASE_DIR" "$UNIT_DIR"; ' + body,
@@ -261,6 +287,7 @@ systemctl() {
     esac
     return 0
 }
+MODE=native
 systemd-analyze() { printf 'unit verified\\n' >> "$TRACE"; }
 stop_legacy() { printf 'legacy stopped\\n' >> "$TRACE"; }
 wait_for_login() { printf 'HTTP verified\\n' >> "$TRACE"; }
@@ -279,6 +306,7 @@ activate_native
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             self.run_shell(root, '''
+MODE=docker
 printf 'previous manifest' > "$INSTALL_ROOT/compose.json"
 printf 'new manifest' > "$BACKUP_DIR/new-compose.json"
 docker() { printf 'docker %s\\n' "$*" >> "$TRACE"; }
@@ -290,7 +318,7 @@ activate_docker
             self.assertEqual((root / "compose.json").read_text(), "new manifest")
             commands = (root / "trace").read_text()
             self.assertIn("-p webserver-rust-setup", commands)
-            self.assertIn("up -d --no-deps --no-build web", commands)
+            self.assertIn("up -d --force-recreate --no-deps --no-build web", commands)
             self.assertLess(commands.index("legacy stopped"), commands.index("up -d"))
             self.assertLess(commands.index("up -d"), commands.index("HTTP verified"))
 

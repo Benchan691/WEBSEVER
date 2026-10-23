@@ -25,6 +25,7 @@ read_value() {
     else printf '%s: ' "$label" >&3; fi
     IFS= read -r REPLY <&3 || return 1
     REPLY=${REPLY:-$default}
+    [[ "$REPLY" != :cancel ]] || return 130
 }
 confirm() {
     local label=$1 default=${2:-n} answer
@@ -37,6 +38,34 @@ confirm() {
     done
 }
 g() { git -c "safe.directory=$REPO_DIR" -C "$REPO_DIR" "$@"; }
+
+choose_recovery() {
+    local label=$1 configure=${2:-no}
+    say "$label" >&3
+    while true; do
+        if [[ "$configure" == yes ]]; then
+            read_value '1=retry, 2=re-enter configuration, 3=cancel and restore' 1 || return 130
+            case "$REPLY" in 1) RETRY_ACTION=retry; return 0 ;; 2) RETRY_ACTION=configure; return 0 ;; 3) RETRY_ACTION=cancel; return 0 ;; esac
+        else
+            read_value '1=retry after fixing the cause, 2=cancel' 1 || return 130
+            case "$REPLY" in 1) RETRY_ACTION=retry; return 0 ;; 2) RETRY_ACTION=cancel; return 0 ;; esac
+        fi
+        say 'Enter one of the listed choices.' >&3
+    done
+}
+
+# Only wrap individual commands, not compound Bash stages: putting a function
+# in an if-condition disables errexit inside that entire function.
+retry_command() {
+    local label=$1 status
+    shift
+    while true; do
+        if "$@"; then return 0; else status=$?; fi
+        [[ "$status" != 130 && "$status" != 143 ]] || return "$status"
+        choose_recovery "$label failed (exit $status)." || return 130
+        [[ "$RETRY_ACTION" == retry ]] || return "$status"
+    done
+}
 
 # Python handles data, never sources .env as executable shell code, and keeps
 # secret values out of shell arguments, command output, and process listings.
@@ -161,13 +190,69 @@ def prompt(label, default=''):
         answer = tty.readline()
     if not answer:
         raise EOFError('Interactive input ended')
+    if answer.rstrip('\n') == ':cancel':
+        raise EOFError('Configuration cancelled')
     return answer.rstrip('\n') or default
 
 def hidden(label, current='', default=''):
     hint = ' (Enter to keep configured value)' if current else ''
     with open('/dev/tty', 'w') as tty:
         answer = getpass.getpass(label + hint + ': ', stream=tty)
+    if answer == ':cancel':
+        raise EOFError('Configuration cancelled')
     return answer or current or default
+
+def validated(reader, validator):
+    while True:
+        value = reader()
+        if value == ':cancel':
+            raise EOFError('Configuration cancelled')
+        try:
+            return validator(value)
+        except ValueError as error:
+            print('Invalid entry: ' + str(error) + '. Please retype this value.')
+
+def require_choice(value, choices):
+    value = value.strip().lower()
+    if value not in choices:
+        raise ValueError('Choose ' + ', '.join(choices))
+    return value
+
+def require_mongo(value):
+    if not value.startswith(('mongodb://', 'mongodb+srv://')) or any(ch.isspace() for ch in value):
+        raise ValueError('MongoDB URI must start with mongodb:// or mongodb+srv:// and contain no unescaped whitespace')
+    if not re.split(r'[/?]', value.split('://', 1)[1], 1)[0]:
+        raise ValueError('MongoDB URI requires a host')
+    return value
+
+def require_zimbra_url(value):
+    try:
+        url = urlsplit(value)
+        valid = url.scheme == 'https' and url.hostname and not url.username and not url.password
+        valid = valid and not any(ch.isspace() for ch in value) and (url.port is None or 1 <= url.port <= 65535)
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError('Use a valid HTTPS Zimbra URL without embedded credentials')
+    return value
+
+def require_key(value):
+    value = value.strip()
+    if not valid_key(value):
+        raise ValueError('The encryption key must be base64 encoding of exactly 32 bytes')
+    return value
+
+def require_newsletter_path(value, repo):
+    if not value or any(ch in value for ch in (',', '\n', '\r', '\x00')):
+        raise ValueError('The directory must be nonempty and contain no commas or line breaks')
+    try:
+        path = Path(value).expanduser()
+        path = (repo / path).resolve() if not path.is_absolute() else path.resolve()
+        if path.exists() and not path.is_dir():
+            raise ValueError('Select a directory rather than a file')
+    except OSError:
+        raise ValueError('The directory path cannot be resolved') from None
+    return path
 
 def valid_key(value):
     try:
@@ -197,19 +282,18 @@ def docker_mongo_uri(value):
     hosts = re.sub(r'(^|,)(localhost|127\.0\.0\.1|\[::1\])(?=[:,]|$)', r'\1host.docker.internal', hosts)
     return scheme + '://' + (credentials + '@' if separator else '') + hosts + suffix
 
-def configure(repo, backup, mode):
+def configure(repo, backup, mode, reuse_current=False):
     original_env = backup / '.env'
-    _, env = read_env(original_env if original_env.exists() else repo / '.env')
+    env_path = repo / '.env' if reuse_current else (original_env if original_env.exists() else repo / '.env')
+    original_text, env = read_env(env_path)
     config_path = repo / 'config/config.json'
     defaults = json.loads(config_path.read_text())
-    old_path = backup / 'config/config.json'
+    old_path = config_path if reuse_current else backup / 'config/config.json'
     previous = json.loads(old_path.read_text()) if old_path.exists() else {}
     if not isinstance(defaults, dict) or not isinstance(previous, dict):
         raise ValueError('config/config.json must be a JSON object')
     config = merge_settings(defaults, previous)
-    mongo = hidden('MongoDB URI (hidden; default mongodb://127.0.0.1:27017/)', env.get('MONGO_URI') or env.get('LOCAL_MONGO_URI', ''), 'mongodb://127.0.0.1:27017/')
-    if not mongo.startswith(('mongodb://', 'mongodb+srv://')):
-        raise ValueError('MongoDB URI must start with mongodb:// or mongodb+srv://')
+    mongo = validated(lambda: hidden('MongoDB URI (hidden; default mongodb://127.0.0.1:27017/)', env.get('MONGO_URI') or env.get('LOCAL_MONGO_URI', ''), 'mongodb://127.0.0.1:27017/'), require_mongo)
     if mode == 'docker':
         rewritten = docker_mongo_uri(mongo)
         if rewritten != mongo:
@@ -238,26 +322,30 @@ def configure(repo, backup, mode):
         session_key = secrets.token_hex(32)
         print('Generated a new session signing key.')
     zimbra = config.get('zimbra', {})
-    zimbra_url = prompt('Zimbra HTTPS URL', env.get('ZIMBRA_BASE_URL') or zimbra.get('base_url', 'https://zmailbox.citictel-cpc.com'))
-    url = urlsplit(zimbra_url)
-    if url.scheme != 'https' or not url.hostname or url.username or url.password:
-        raise ValueError('Use a valid HTTPS Zimbra URL without embedded credentials')
+    zimbra_url = validated(lambda: prompt('Zimbra HTTPS URL', env.get('ZIMBRA_BASE_URL') or zimbra.get('base_url', 'https://zmailbox.citictel-cpc.com')), require_zimbra_url)
     zimbra_folder = prompt('Zimbra news folder', env.get('ZIMBRA_FOLDER_NAME') or zimbra.get('folder_name', 'news'))
     encryption_key = env.get('ZIMBRA_CREDENTIAL_KEY', '').strip()
     if encryption_key:
         if not valid_key(encryption_key):
-            raise ValueError('Saved ZIMBRA_CREDENTIAL_KEY is invalid. Recover the correct shared key before continuing')
-        print('Keeping the existing Zimbra encryption key.')
+            print('The saved Zimbra encryption key is invalid. Enter the original shared key to preserve encrypted credentials.')
+            encryption_key = validated(lambda: hidden('Correct shared Zimbra encryption key (hidden)'), require_key)
+        else:
+            print('Keeping the existing Zimbra encryption key.')
     else:
         print('If another server uses this accounts collection, paste its SAME encryption key.')
-        encryption_key = hidden('Shared Zimbra encryption key (hidden; Enter only for a NEW accounts collection)')
-        if not encryption_key:
-            if prompt('Type NEW to generate a key for a new accounts collection') != 'NEW':
-                raise ValueError('No encryption key selected')
-            encryption_key = base64.b64encode(secrets.token_bytes(32)).decode()
-        if not valid_key(encryption_key):
-            raise ValueError('ZIMBRA_CREDENTIAL_KEY must be base64 encoding of exactly 32 bytes')
-    port = require_port(prompt('Public HTTP port', env.get('PORT', '9100')))
+        while True:
+            encryption_key = hidden('Shared Zimbra encryption key (hidden; Enter only for a NEW accounts collection)')
+            if encryption_key == ':cancel':
+                raise EOFError('Configuration cancelled')
+            if not encryption_key:
+                if prompt('Type NEW to generate a key, or Enter to return to key entry') != 'NEW':
+                    print('No key generated. Enter the shared key or confirm NEW for a new collection.')
+                    continue
+                encryption_key = base64.b64encode(secrets.token_bytes(32)).decode()
+            if valid_key(encryption_key):
+                break
+            print('Invalid encryption key. Paste a key that decodes to exactly 32 bytes.')
+    port = validated(lambda: prompt('Public HTTP port', env.get('PORT', '9100')), require_port)
     updates = {
         'LOCAL_MONGO_URI': mongo, 'MONGO_URI': mongo,
         'WEB_DATABASE': web_db, 'VULNERABILITIES_DATABASE': vuln_db,
@@ -269,31 +357,23 @@ def configure(repo, backup, mode):
         'ZIMBRA_VERIFY_TLS': 'true', 'ZIMBRA_CREDENTIAL_KEY': encryption_key,
         'PORT': port, 'RUST_SCHEDULER_ENABLED': 'false',
     }
-    if prompt('Configure SMTP now? (otherwise existing values are kept)', 'yes').lower() in ('y', 'yes'):
+    smtp_choice = validated(lambda: prompt('Configure SMTP now? (otherwise existing values are kept)', 'yes'), lambda value: require_choice(value, ('yes', 'y', 'no', 'n')))
+    if smtp_choice in ('y', 'yes'):
         updates['SMTP_HOST'] = prompt('SMTP host (optional)', env.get('SMTP_HOST', ''))
         if updates['SMTP_HOST']:
-            updates['SMTP_PORT'] = require_port(prompt('SMTP port', env.get('SMTP_PORT', '587')))
+            updates['SMTP_PORT'] = validated(lambda: prompt('SMTP port', env.get('SMTP_PORT', '587')), require_port)
             updates['SMTP_USERNAME'] = prompt('SMTP username (optional)', env.get('SMTP_USERNAME', ''))
             updates['SMTP_PASSWORD'] = hidden('SMTP password (optional)', env.get('SMTP_PASSWORD', ''))
             updates['SMTP_FROM'] = prompt('SMTP sender address', env.get('SMTP_FROM', ''))
             current_transport = 'tls' if env.get('SMTP_USE_SSL', '').lower() == 'true' else ('plain' if env.get('SMTP_USE_TLS', '').lower() == 'false' else 'starttls')
-            transport = prompt('SMTP transport: starttls, tls, or plain', current_transport)
-            if transport not in ('starttls', 'tls', 'plain'):
-                raise ValueError('Invalid SMTP transport')
+            transport = validated(lambda: prompt('SMTP transport: starttls, tls, or plain', current_transport), lambda value: require_choice(value, ('starttls', 'tls', 'plain')))
             updates['SMTP_USE_TLS'] = str(transport == 'starttls').lower()
             updates['SMTP_USE_SSL'] = str(transport == 'tls').lower()
     newsletter = env.get('NEWSLETTER_ROOT') or config.get('newsletter_root', 'newsletters')
-    newsletter_path = Path(newsletter)
-    if not newsletter_path.is_absolute():
-        newsletter_path = repo / newsletter_path
-    newsletter_path = newsletter_path.resolve()
+    newsletter_path = validated(lambda: prompt('Newsletter files directory', newsletter), lambda value: require_newsletter_path(value, repo))
     updates['NEWSLETTER_ROOT'] = str(newsletter_path)
-    if (repo / '.env').exists():
-        # Preserve comments and settings that this installer does not manage.
-        original_text = original_env.read_text() if original_env.exists() else (repo / '.env').read_text()
-        atomic_text(repo / '.env', original_text)
-    elif original_env.exists():
-        atomic_text(repo / '.env', original_env.read_text())
+    # Preserve comments, unrelated settings, and corrected values on a retry.
+    atomic_text(repo / '.env', original_text)
     update_env(repo / '.env', updates)
     config.setdefault('mongodb', {}).update(web_database=web_db, vulnerabilities_database=vuln_db, vulnerabilities_collection='news')
     config['account_collection'] = 'accounts'
@@ -304,7 +384,7 @@ def configure(repo, backup, mode):
 def main():
     operation = sys.argv[1]
     if operation == 'configure':
-        configure(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4])
+        configure(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4], len(sys.argv) > 5 and sys.argv[5] == 'current')
     elif operation == 'get':
         print(json.loads(Path(sys.argv[2]).read_text())[sys.argv[3]])
     elif operation == 'scheduler':
@@ -342,10 +422,39 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except (ValueError, EOFError, OSError) as error:
+    except EOFError as error:
+        print(str(error), file=sys.stderr)
+        sys.exit(130)
+    except (ValueError, OSError) as error:
         print('Configuration error: ' + str(error), file=sys.stderr)
         sys.exit(1)
 PY_SETUP
+}
+
+configure_interactively() {
+    local use_current=${1:-original} status
+    while true; do
+        if config_helper configure "$REPO_DIR" "$BACKUP_DIR" "$MODE" "$use_current"; then return 0;
+        else status=$?; fi
+        [[ "$status" != 130 ]] || return 130
+        say "Check $REPO_DIR/.env and config/config.json if a saved file could not be read."
+        choose_recovery 'Configuration could not be saved.' || return 130
+        [[ "$RETRY_ACTION" == retry ]] || return "$status"
+        use_current=current
+    done
+}
+
+refresh_runtime_config() {
+    PUBLIC_PORT=$(config_helper get "$BACKUP_DIR/settings.json" port)
+    NEWSLETTER_PATH=$(config_helper get "$BACKUP_DIR/settings.json" newsletter_path)
+    retry_command 'Create newsletter directory' mkdir -p "$NEWSLETTER_PATH"
+    retry_command 'Copy runtime configuration' cp -a "$REPO_DIR/config/." "$RELEASE_DIR/config/"
+    retry_command 'Copy runtime secrets' cp -p "$REPO_DIR/.env" "$RELEASE_DIR/.env"
+}
+
+reconfigure_runtime() {
+    configure_interactively current
+    refresh_runtime_config
 }
 
 ensure_tools() {
@@ -356,8 +465,8 @@ ensure_tools() {
     if [[ -n "$missing" ]]; then
         command -v apt-get >/dev/null 2>&1 || die "Install these tools first:$missing"
         confirm "Install missing prerequisites using apt-get?$missing" y || die 'Prerequisites are required.'
-        apt-get update
-        apt-get install -y git python3 curl ca-certificates tar
+        retry_command 'Refresh apt packages' apt-get update
+        retry_command 'Install prerequisites' apt-get install -y git python3 curl ca-certificates tar
     fi
 }
 
@@ -366,7 +475,7 @@ ensure_docker() {
     if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
         command -v apt-get >/dev/null 2>&1 || die 'Install Docker Engine and the Compose v2 plugin first, or select local installation.'
         confirm 'Install missing Docker/Compose packages from the configured apt repositories?' y || return 1
-        apt-get update
+        retry_command 'Refresh apt packages' apt-get update
         if ! command -v docker >/dev/null 2>&1; then packages=docker.io; fi
         if ! docker compose version >/dev/null 2>&1; then
             if apt-cache show docker-compose-v2 >/dev/null 2>&1; then compose_package=docker-compose-v2;
@@ -374,15 +483,15 @@ ensure_docker() {
             else die 'No Compose v2 package is available in the configured apt repositories. Install the official Compose plugin, then rerun.'; fi
         fi
         # Both variables contain only installer-selected package names.
-        apt-get install -y ${packages:+"$packages"} ${compose_package:+"$compose_package"}
+        retry_command 'Install Docker/Compose' apt-get install -y ${packages:+"$packages"} ${compose_package:+"$compose_package"}
     fi
     if ! docker info >/dev/null 2>&1; then
         command -v systemctl >/dev/null 2>&1 || die 'Start the Docker daemon, then rerun.'
         confirm 'Start Docker and enable it at boot?' y || return 1
-        systemctl enable --now docker
+        retry_command 'Start Docker' systemctl enable --now docker
     fi
-    docker info >/dev/null
-    docker compose version >/dev/null
+    retry_command 'Connect to Docker' docker info >/dev/null
+    retry_command 'Check Docker Compose' docker compose version >/dev/null
 }
 
 snapshot_repository() {
@@ -392,15 +501,16 @@ snapshot_repository() {
     printf '%s\n' "$ORIGINAL_HEAD" > "$BACKUP_DIR/original-head"
     g status --short > "$BACKUP_DIR/git-status.txt"
     g diff --binary HEAD > "$BACKUP_DIR/local-changes.patch"
-    if [[ -f "$REPO_DIR/.env" ]]; then cp -p "$REPO_DIR/.env" "$BACKUP_DIR/.env"; fi
-    if [[ -d "$REPO_DIR/config" ]]; then cp -a "$REPO_DIR/config" "$BACKUP_DIR/config"; fi
+    if [[ -f "$REPO_DIR/.env" ]]; then retry_command 'Back up secrets' cp -p "$REPO_DIR/.env" "$BACKUP_DIR/.env"; fi
+    if [[ -d "$REPO_DIR/config" ]]; then retry_command 'Back up configuration' cp -a "$REPO_DIR/config" "$BACKUP_DIR/config"; fi
     say "Saving working files to $BACKUP_DIR/working-tree.tar.gz"
-    tar -C "$REPO_DIR" --exclude='./.git' --exclude='./target' --exclude='./node_modules' \
+    retry_command 'Archive working files' tar -C "$REPO_DIR" --exclude='./.git' --exclude='./target' --exclude='./node_modules' \
         --exclude='./outputs' --exclude='./output' -czf "$BACKUP_DIR/working-tree.tar.gz" .
     g branch "backup/setup-$SETUP_ID" HEAD
     if [[ -n "$(g status --porcelain --untracked-files=normal)" ]]; then
-        g stash push --include-untracked --message "setup.sh backup $SETUP_ID"
+        retry_command 'Save local edits in Git stash' g stash push --include-untracked --message "setup.sh backup $SETUP_ID"
         STASH_SHA=$(g rev-parse refs/stash)
+        SOURCE_CHANGED=1
         printf '%s\n' "$STASH_SHA" > "$BACKUP_DIR/stash-commit"
     fi
     SOURCE_CHANGED=1
@@ -417,20 +527,20 @@ switch_branch() {
         g remote set-branches --add origin "$TARGET_BRANCH"
     fi
     # Fetch only the required ref, including repositories cloned with --single-branch.
-    g fetch origin "refs/heads/$TARGET_BRANCH:$remote"
+    retry_command 'Fetch deployment branch from GitHub' g fetch origin "refs/heads/$TARGET_BRANCH:$remote"
     if g show-ref --verify --quiet "refs/heads/$TARGET_BRANCH"; then
         if ! g merge-base --is-ancestor "refs/heads/$TARGET_BRANCH" "$remote"; then
             say "The local $TARGET_BRANCH branch has commits outside origin."
             confirm 'Preserve that branch under a backup name and deploy origin?' n || return 1
             SAVED_TARGET_BRANCH="backup/target-$SETUP_ID"
             g branch -m "$TARGET_BRANCH" "$SAVED_TARGET_BRANCH"
-            g switch --create "$TARGET_BRANCH" --track "origin/$TARGET_BRANCH"
+            retry_command 'Check out deployment branch' g switch --create "$TARGET_BRANCH" --track "origin/$TARGET_BRANCH"
         else
-            g switch "$TARGET_BRANCH"
-            g merge --ff-only "$remote"
+            retry_command 'Check out deployment branch' g switch "$TARGET_BRANCH"
+            retry_command 'Fast-forward deployment branch' g merge --ff-only "$remote"
         fi
     else
-        g switch --create "$TARGET_BRANCH" --track "origin/$TARGET_BRANCH"
+        retry_command 'Check out deployment branch' g switch --create "$TARGET_BRANCH" --track "origin/$TARGET_BRANCH"
     fi
     g branch --set-upstream-to="origin/$TARGET_BRANCH" "$TARGET_BRANCH"
     [[ -f "$REPO_DIR/src/zimbra.rs" ]] || die 'Selected branch does not contain the Zimbra implementation.'
@@ -532,7 +642,7 @@ failed() {
     exit "$status"
 }
 
-wait_for_login() {
+probe_login() {
     local port=$1 attempt
     for attempt in $(seq 1 40); do
         if curl --noproxy '*' --connect-timeout 1 --max-time 2 --fail --silent \
@@ -542,12 +652,79 @@ wait_for_login() {
                     "http://127.0.0.1:$port/login/local" > /dev/null; then return 0; fi
         fi
         if [[ -n "$CANDIDATE_PID" ]] && ! kill -0 "$CANDIDATE_PID" 2>/dev/null; then break; fi
+        if [[ -n "$CANDIDATE_CONTAINER" ]] && \
+            [[ "$(docker inspect --format '{{.State.Running}}' "$CANDIDATE_CONTAINER" 2>/dev/null || true)" != true ]]; then break; fi
         sleep 2
     done
-    die "Login checks failed on port $port. Private logs are in $BACKUP_DIR."
+    return 1
+}
+
+wait_for_login() { probe_login "$1"; }
+
+test_candidate() {
+    local candidate_port started
+    while true; do
+        candidate_port=$(config_helper free-port)
+        say "Testing the new application on 127.0.0.1:$candidate_port with its scheduler disabled."
+        started=0
+        if [[ "$MODE" == native ]]; then
+            env -i PATH="$PATH" HOME="$HOME" WEBSERVER_ROOT="$RELEASE_DIR" PORT="$candidate_port" \
+                RUST_SCHEDULER_ENABLED=false "$RELEASE_DIR/webserver-rust" > "$BACKUP_DIR/candidate.log" 2>&1 &
+            CANDIDATE_PID=$!
+            started=1
+        else
+            CANDIDATE_CONTAINER="webserver-rust-check-$SETUP_ID"
+            if docker run --detach --name "$CANDIDATE_CONTAINER" \
+                --publish "127.0.0.1:$candidate_port:9100" \
+                --add-host host.docker.internal:host-gateway \
+                --env WEBSERVER_ROOT=/app --env PORT=9100 --env RUST_SCHEDULER_ENABLED=false \
+                --env NEWSLETTER_ROOT=/app/newsletters \
+                --mount "type=bind,source=$RELEASE_DIR/.env,target=/app/.env,readonly" \
+                --mount "type=bind,source=$RELEASE_DIR/config,target=/app/config,readonly" \
+                --mount "type=bind,source=$NEWSLETTER_PATH,target=/app/newsletters" \
+                "$IMAGE_TAG" >/dev/null; then started=1; fi
+        fi
+        if [[ "$started" == 1 ]] && wait_for_login "$candidate_port"; then
+            stop_candidate
+            return 0
+        fi
+        stop_candidate
+        choose_recovery "Candidate startup failed. Private logs: $BACKUP_DIR/candidate.log" yes || return 130
+        case "$RETRY_ACTION" in
+            retry) ;;
+            configure) reconfigure_runtime; choose_legacy ;;
+            cancel) return 1 ;;
+        esac
+    done
+}
+
+start_and_verify_runtime() {
+    while true; do
+        if [[ "$MODE" == native ]]; then
+            if systemctl restart "$UNIT_NAME" && wait_for_login "$PUBLIC_PORT" && \
+                systemctl is-active --quiet "$UNIT_NAME"; then return 0; fi
+        else
+            if docker compose -p "$COMPOSE_PROJECT" -f "$INSTALL_ROOT/compose.json" up -d --force-recreate --no-deps --no-build web && \
+                wait_for_login "$PUBLIC_PORT"; then return 0; fi
+        fi
+        choose_recovery "Service startup failed on port $PUBLIC_PORT. Check its service/container logs." yes || return 130
+        case "$RETRY_ACTION" in
+            retry) ;;
+            configure)
+                reconfigure_runtime
+                if [[ "$MODE" == docker ]]; then
+                    config_helper compose "$RELEASE_DIR" "$IMAGE_TAG" "$PUBLIC_PORT" "$NEWSLETTER_PATH" "$BACKUP_DIR/new-compose.json"
+                    retry_command 'Update Compose configuration' install -m 0600 "$BACKUP_DIR/new-compose.json" "$INSTALL_ROOT/compose.json"
+                fi
+                ;;
+            cancel) return 1 ;;
+        esac
+    done
 }
 
 choose_legacy() {
+    while true; do
+    if [[ "$LEGACY_STOPPED" == 0 ]]; then LEGACY_NAME=; LEGACY_KIND=; fi
     config_helper port-free "$PUBLIC_PORT" && return 0
     say "Port $PUBLIC_PORT is currently occupied. The candidate will be tested before cutover."
     if command -v ss >/dev/null 2>&1; then ss -ltnp "sport = :$PUBLIC_PORT" || true; fi
@@ -562,77 +739,83 @@ choose_legacy() {
         say 'The previous setup Compose deployment will be replaced after the candidate passes.'
         return 0
     fi
-    read_value 'Current deployment: 1=systemd service, 2=Docker container, 3=cancel' 3
+    read_value '1=existing systemd service, 2=existing Docker container, 3=change configuration/port, 4=cancel' 3
     case "$REPLY" in
         1)
             LEGACY_KIND=systemd
-            read_value 'Existing systemd service name'
-            LEGACY_NAME=$REPLY
-            [[ "$LEGACY_NAME" =~ ^[A-Za-z0-9_.@-]+\.service$ && "$LEGACY_NAME" != -* ]] || die 'Enter an exact .service name.'
-            systemctl is-active --quiet "$LEGACY_NAME" || die 'That service is not active.'
+            while true; do
+                read_value 'Existing systemd service name (or :cancel)'
+                LEGACY_NAME=$REPLY
+                if [[ "$LEGACY_NAME" =~ ^[A-Za-z0-9_.@-]+\.service$ && "$LEGACY_NAME" != -* ]] && \
+                    systemctl is-active --quiet "$LEGACY_NAME"; then break; fi
+                say 'Enter the exact name of an active .service. Please retype it.'
+            done
             LEGACY_ENABLED=$(systemctl is-enabled "$LEGACY_NAME" 2>/dev/null || true)
             ;;
         2)
             LEGACY_KIND=docker
-            read_value 'Existing Docker container name'
-            LEGACY_NAME=$REPLY
-            [[ "$LEGACY_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die 'Invalid container name.'
-            [[ "$(docker inspect --format '{{.State.Running}}' "$LEGACY_NAME")" == true ]] || die 'That container is not running.'
+            while true; do
+                read_value 'Existing Docker container name (or :cancel)'
+                LEGACY_NAME=$REPLY
+                if [[ "$LEGACY_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] && \
+                    [[ "$(docker inspect --format '{{.State.Running}}' "$LEGACY_NAME" 2>/dev/null || true)" == true ]]; then break; fi
+                say 'That container name is invalid or not running. Please retype it.'
+            done
             LEGACY_RESTART=$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$LEGACY_NAME")
             if [[ "$LEGACY_RESTART" == on-failure ]]; then
                 LEGACY_RESTART="on-failure:$(docker inspect --format '{{.HostConfig.RestartPolicy.MaximumRetryCount}}' "$LEGACY_NAME")"
             fi
             ;;
-        *) die 'Choose another public port or identify the existing deployment before continuing.' ;;
+        3) reconfigure_runtime; continue ;;
+        4) return 1 ;;
+        *) say 'Choose 1, 2, 3, or 4.'; continue ;;
     esac
-    confirm "Stop $LEGACY_NAME at cutover and disable its automatic restart after success?" n || return 1
+    if confirm "Stop $LEGACY_NAME at cutover and disable its automatic restart after success?" n; then return 0; fi
+    done
 }
 
 stop_legacy() {
     [[ -n "$LEGACY_NAME" ]] || return 0
     LEGACY_STOPPED=1
-    if [[ "$LEGACY_KIND" == systemd ]]; then systemctl stop "$LEGACY_NAME";
-    else docker stop "$LEGACY_NAME" >/dev/null; fi
-    config_helper port-free "$PUBLIC_PORT" || die 'The public port is still occupied; cutover was stopped.'
+    if [[ "$LEGACY_KIND" == systemd ]]; then retry_command 'Stop selected legacy service' systemctl stop "$LEGACY_NAME";
+    else retry_command 'Stop selected legacy container' docker stop "$LEGACY_NAME" >/dev/null; fi
+    while ! config_helper port-free "$PUBLIC_PORT"; do
+        choose_recovery "Port $PUBLIC_PORT is still occupied. Free it before retrying, or choose another port." yes || return 130
+        case "$RETRY_ACTION" in retry) ;; configure) reconfigure_runtime ;; cancel) return 1 ;; esac
+    done
 }
 
 retire_legacy() {
     [[ "$LEGACY_STOPPED" == 1 ]] || return 0
     if [[ "$LEGACY_KIND" == systemd ]]; then
-        if [[ "$LEGACY_ENABLED" == enabled ]]; then systemctl disable "$LEGACY_NAME"; fi
+        if [[ "$LEGACY_ENABLED" == enabled ]]; then retry_command 'Disable legacy service autostart' systemctl disable "$LEGACY_NAME"; fi
     else
-        docker update --restart=no "$LEGACY_NAME" >/dev/null
+        retry_command 'Disable legacy container autostart' docker update --restart=no "$LEGACY_NAME" >/dev/null
     fi
 }
 
 build_native() {
     command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]] || die 'systemd is not running; select Docker or prepare-only.'
-    if [[ -n "$(systemctl show --property=DropInPaths --value "$UNIT_NAME" 2>/dev/null)" ]]; then
-        die "$UNIT_NAME has custom systemd overrides; move them aside or choose a different deployment method."
-    fi
+    while [[ -n "$(systemctl show --property=DropInPaths --value "$UNIT_NAME" 2>/dev/null)" ]]; do
+        choose_recovery "$UNIT_NAME has custom overrides. Resolve them before retrying." || return 130
+        [[ "$RETRY_ACTION" == retry ]] || return 1
+    done
     if ! command -v cc >/dev/null 2>&1; then
         command -v apt-get >/dev/null 2>&1 || die 'Install a C linker/build-essential first.'
         confirm 'Install native build prerequisites with apt-get?' y || return 1
-        apt-get update
-        apt-get install -y build-essential pkg-config ca-certificates
+        retry_command 'Refresh apt packages' apt-get update
+        retry_command 'Install native build prerequisites' apt-get install -y build-essential pkg-config ca-certificates
     fi
     export PATH="${HOME}/.cargo/bin:$PATH"
     if ! command -v rustup >/dev/null 2>&1; then
         confirm 'Install the official Rust toolchain using https://sh.rustup.rs?' y || return 1
-        curl --proto '=https' --tlsv1.2 --fail --silent --show-error https://sh.rustup.rs -o "$BACKUP_DIR/rustup-init.sh"
-        sh "$BACKUP_DIR/rustup-init.sh" -y --profile minimal --default-toolchain 1.91.0 --no-modify-path
+        retry_command 'Download Rust installer' curl --proto '=https' --tlsv1.2 --fail --silent --show-error https://sh.rustup.rs -o "$BACKUP_DIR/rustup-init.sh"
+        retry_command 'Install Rust' sh "$BACKUP_DIR/rustup-init.sh" -y --profile minimal --default-toolchain 1.91.0 --no-modify-path
     fi
-    rustup toolchain install 1.91.0 --profile minimal
-    (cd "$REPO_DIR" && cargo +1.91.0 build --release --locked --target-dir "$BACKUP_DIR/build")
-    install -m 0755 "$BACKUP_DIR/build/release/webserver-rust" "$RELEASE_DIR/webserver-rust"
-    local candidate_port
-    candidate_port=$(config_helper free-port)
-    say "Testing the new binary on 127.0.0.1:$candidate_port with its scheduler disabled."
-    env -i PATH="$PATH" HOME="$HOME" WEBSERVER_ROOT="$RELEASE_DIR" PORT="$candidate_port" \
-        RUST_SCHEDULER_ENABLED=false "$RELEASE_DIR/webserver-rust" > "$BACKUP_DIR/candidate.log" 2>&1 &
-    CANDIDATE_PID=$!
-    wait_for_login "$candidate_port"
-    stop_candidate
+    retry_command 'Install Rust toolchain' rustup toolchain install 1.91.0 --profile minimal
+    retry_command 'Build Rust application' cargo +1.91.0 build --manifest-path "$REPO_DIR/Cargo.toml" --release --locked --target-dir "$BACKUP_DIR/build"
+    retry_command 'Stage compiled application' install -m 0755 "$BACKUP_DIR/build/release/webserver-rust" "$RELEASE_DIR/webserver-rust"
+    test_candidate
 }
 
 activate_native() {
@@ -660,15 +843,13 @@ NoNewPrivileges=true
 [Install]
 WantedBy=multi-user.target
 EOF_UNIT
-    systemd-analyze verify "$BACKUP_DIR/new.service"
+    retry_command 'Validate systemd service' systemd-analyze verify "$BACKUP_DIR/new.service"
     stop_legacy
     SERVICE_CHANGED=1
-    install -m 0644 "$BACKUP_DIR/new.service" "$unit"
-    systemctl daemon-reload
-    systemctl restart "$UNIT_NAME"
-    wait_for_login "$PUBLIC_PORT"
-    systemctl is-active --quiet "$UNIT_NAME"
-    systemctl enable "$UNIT_NAME"
+    retry_command 'Install systemd service' install -m 0644 "$BACKUP_DIR/new.service" "$unit"
+    retry_command 'Reload systemd configuration' systemctl daemon-reload
+    start_and_verify_runtime
+    retry_command 'Enable managed service' systemctl enable "$UNIT_NAME"
 }
 
 prepare_docker_context() {
@@ -684,31 +865,19 @@ prepare_docker_context() {
 
 build_docker() {
     command -v docker >/dev/null 2>&1 || die 'Install Docker Engine and its Compose plugin first, or choose systemd.'
-    docker info >/dev/null
-    docker compose version >/dev/null
+    retry_command 'Connect to Docker' docker info >/dev/null
+    retry_command 'Check Docker Compose' docker compose version >/dev/null
     if [[ ! -f "$INSTALL_ROOT/compose.json" ]] && \
         [[ -n "$(docker ps --all --quiet --filter "label=com.docker.compose.project=$COMPOSE_PROJECT")" ]]; then
         die "Docker project $COMPOSE_PROJECT already exists without an installer manifest; deployment was stopped."
     fi
-    local context="$BACKUP_DIR/docker-build" candidate_port
+    local context="$BACKUP_DIR/docker-build"
     prepare_docker_context "$context"
     IMAGE_TAG="webserver-rust:setup-$SETUP_ID"
-    docker build --tag "$IMAGE_TAG" "$context"
-    candidate_port=$(config_helper free-port)
-    CANDIDATE_CONTAINER="webserver-rust-check-$SETUP_ID"
-    docker run --detach --name "$CANDIDATE_CONTAINER" \
-        --publish "127.0.0.1:$candidate_port:9100" \
-        --add-host host.docker.internal:host-gateway \
-        --env WEBSERVER_ROOT=/app --env PORT=9100 --env RUST_SCHEDULER_ENABLED=false \
-        --env NEWSLETTER_ROOT=/app/newsletters \
-        --mount "type=bind,source=$RELEASE_DIR/.env,target=/app/.env,readonly" \
-        --mount "type=bind,source=$RELEASE_DIR/config,target=/app/config,readonly" \
-        --mount "type=bind,source=$NEWSLETTER_PATH,target=/app/newsletters" \
-        "$IMAGE_TAG" >/dev/null
-    wait_for_login "$candidate_port"
-    stop_candidate
+    retry_command 'Build Docker image' docker build --tag "$IMAGE_TAG" "$context"
+    test_candidate
     config_helper compose "$RELEASE_DIR" "$IMAGE_TAG" "$PUBLIC_PORT" "$NEWSLETTER_PATH" "$BACKUP_DIR/new-compose.json"
-    docker compose -p "$COMPOSE_PROJECT" -f "$BACKUP_DIR/new-compose.json" config --quiet
+    retry_command 'Validate Compose configuration' docker compose -p "$COMPOSE_PROJECT" -f "$BACKUP_DIR/new-compose.json" config --quiet
 }
 
 activate_docker() {
@@ -720,9 +889,8 @@ activate_docker() {
     fi
     stop_legacy
     COMPOSE_CHANGED=1
-    install -m 0600 "$BACKUP_DIR/new-compose.json" "$INSTALL_ROOT/compose.json"
-    docker compose -p "$COMPOSE_PROJECT" -f "$INSTALL_ROOT/compose.json" up -d --no-deps --no-build web
-    wait_for_login "$PUBLIC_PORT"
+    retry_command 'Install Compose configuration' install -m 0600 "$BACKUP_DIR/new-compose.json" "$INSTALL_ROOT/compose.json"
+    start_and_verify_runtime
 }
 
 usage() {
@@ -736,12 +904,69 @@ Modes: native Rust + systemd, Docker Compose, or configuration only.
 Backs up local files/configuration, stashes edits, preserves divergent commits,
 and tests the new application before stopping a selected old deployment.
 The script does not migrate MongoDB collections or delete Git stashes/backups.
+Invalid entries can be retyped. Failed commands offer retry or cancellation;
+startup failures also offer configuration correction. Type :cancel to leave.
 --check only checks syntax/prerequisites; it does not install or contact services.
 EOF_HELP
 }
 
+choose_installation_mode() {
+    while true; do
+        say 'Where would you like to install?'
+        printf '  1) Locally (Rust + systemd)\n  2) In Docker (Docker Compose)\n  3) Configure only, without starting a service\n'
+        read_value 'Installation method (or :cancel)' 1
+        case "$REPLY" in
+            1)
+                if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+                    MODE=native
+                    say 'The local systemd service runs as root, matching a root-owned server installation.'
+                    return 0
+                fi
+                say 'systemd is not running. Choose Docker or configure-only, or type :cancel.'
+                ;;
+            2) MODE=docker; return 0 ;;
+            3) MODE=prepare; return 0 ;;
+            *) say 'Invalid installation method. Choose 1, 2, or 3.' ;;
+        esac
+    done
+}
+
+choose_repository() {
+    local default_repo=$1
+    while true; do
+        read_value 'Project checkout directory (or :cancel)' "$default_repo"
+        if ! REPO_DIR=$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).expanduser().resolve())' "$REPLY"); then
+            say 'The directory could not be resolved. Please retype it.'
+            continue
+        fi
+        if [[ "$REPO_DIR" == / || "$REPO_DIR" == *$'\n'* || "$REPO_DIR" == *$'\r'* ]]; then
+            say 'Invalid repository path. Please choose a project directory.'
+            continue
+        fi
+        if ! g rev-parse --git-dir >/dev/null 2>&1; then
+            if [[ -e "$REPO_DIR" ]] && { [[ ! -d "$REPO_DIR" ]] || [[ -n "$(ls -A "$REPO_DIR")" ]]; }; then
+                say 'That path is not an empty directory or a Git checkout. Please choose another path.'
+                continue
+            fi
+            if ! confirm "Clone $DEFAULT_REPOSITORY into $REPO_DIR?" y; then continue; fi
+            retry_command 'Clone repository' git clone --branch "$TARGET_BRANCH" "$DEFAULT_REPOSITORY" "$REPO_DIR"
+        fi
+        if [[ "$(g rev-parse --show-toplevel)" != "$REPO_DIR" ]]; then
+            default_repo=$(g rev-parse --show-toplevel)
+            say "Select the repository root: $default_repo"
+            continue
+        fi
+        if [[ -n "$(g ls-files -u)" ]]; then
+            choose_recovery 'Resolve the existing merge conflicts in another terminal, then retry.' || return 130
+            [[ "$RETRY_ACTION" == retry ]] || return 1
+            continue
+        fi
+        return 0
+    done
+}
+
 main() {
-    local requested_repo= default_repo= mode_answer
+    local requested_repo=
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --repo) [[ $# -ge 2 ]] || die '--repo requires a directory'; requested_repo=$2; shift 2 ;;
@@ -754,29 +979,11 @@ main() {
     say 'Interactive security newsletter portal installation'
     say 'This branch uses Zimbra login, web.accounts, and unified news documents.'
     say 'AccountHub identities/subscription ownership are not migrated. Existing settings and keys will be preserved.'
-    say 'Where would you like to install?'
-    printf '  1) Locally (Rust + systemd)\n  2) In Docker (Docker Compose)\n  3) Configure only, without starting a service\n'
-    read_value 'Installation method' 1
-    mode_answer=$REPLY
-    case "$mode_answer" in 1) MODE=native ;; 2) MODE=docker ;; 3) MODE=prepare ;; *) die 'Choose 1, 2, or 3.' ;; esac
+    say 'Invalid entries can be retyped; type :cancel to stop. Failed steps offer retry choices.'
+    choose_installation_mode
     ensure_tools
-    if [[ "$MODE" == native ]]; then
-        say 'The local systemd service runs as root, matching a root-owned server installation.'
-        command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]] || die 'systemd is not running; rerun and select Docker or configure-only.'
-    elif [[ "$MODE" == docker ]]; then
-        ensure_docker
-    fi
-    default_repo=${requested_repo:-/root/WEBSEVER}
-    read_value 'Project checkout directory' "$default_repo"
-    REPO_DIR=$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).expanduser().resolve())' "$REPLY")
-    [[ "$REPO_DIR" != / && "$REPO_DIR" != *$'\n'* && "$REPO_DIR" != *$'\r'* ]] || die 'Invalid repository path.'
-    if ! g rev-parse --git-dir >/dev/null 2>&1; then
-        [[ ! -e "$REPO_DIR" ]] || [[ -z "$(ls -A "$REPO_DIR")" ]] || die 'The selected directory exists and is not a Git checkout.'
-        confirm "Clone $DEFAULT_REPOSITORY into $REPO_DIR?" y || return 1
-        git clone --branch "$TARGET_BRANCH" "$DEFAULT_REPOSITORY" "$REPO_DIR"
-    fi
-    [[ "$(g rev-parse --show-toplevel)" == "$REPO_DIR" ]] || die 'Select the repository root directory.'
-    if [[ -n "$(g ls-files -u)" ]]; then die 'Resolve the existing Git merge conflicts before installing.'; fi
+    if [[ "$MODE" == docker ]]; then ensure_docker; fi
+    choose_repository "${requested_repo:-/root/WEBSEVER}"
     g branch --show-current
     g status --short
     say 'Runtime releases: /opt/webserver-rust-setup. Private backups: /var/backups/webserver-rust-setup.'
@@ -793,13 +1000,9 @@ main() {
     trap 'failed 143' TERM
     snapshot_repository
     switch_branch
-    config_helper configure "$REPO_DIR" "$BACKUP_DIR" "$MODE"
-    PUBLIC_PORT=$(config_helper get "$BACKUP_DIR/settings.json" port)
-    NEWSLETTER_PATH=$(config_helper get "$BACKUP_DIR/settings.json" newsletter_path)
-    [[ "$NEWSLETTER_PATH" != *','* && "$NEWSLETTER_PATH" != *$'\n'* ]] || die 'Newsletter path cannot contain a comma or newline.'
-    mkdir -p "$NEWSLETTER_PATH"
-    cp -a "$REPO_DIR/templates" "$REPO_DIR/static" "$REPO_DIR/config" "$RELEASE_DIR/"
-    cp -p "$REPO_DIR/.env" "$RELEASE_DIR/.env"
+    configure_interactively
+    retry_command 'Stage application files' cp -a "$REPO_DIR/templates" "$REPO_DIR/static" "$REPO_DIR/config" "$RELEASE_DIR/"
+    refresh_runtime_config
     # Runtime root is independent of the checkout, even if an old .env had WEBSERVER_ROOT.
     if [[ "$MODE" == native ]]; then
         choose_legacy
@@ -817,10 +1020,8 @@ main() {
         say 'Test an actual Zimbra login, subscription ownership, and SMTP delivery in the browser.'
         say 'For a shared database, run scheduled delivery on only one server.'
         if confirm 'Enable scheduled email delivery on THIS instance now?' n; then
-            config_helper scheduler true "$REPO_DIR/.env" "$RELEASE_DIR/.env"
-            if [[ "$MODE" == native ]]; then systemctl restart "$UNIT_NAME";
-            else docker compose -p "$COMPOSE_PROJECT" -f "$INSTALL_ROOT/compose.json" up -d --force-recreate --no-deps --no-build web; fi
-            wait_for_login "$PUBLIC_PORT"
+            retry_command 'Enable scheduled delivery' config_helper scheduler true "$REPO_DIR/.env" "$RELEASE_DIR/.env"
+            start_and_verify_runtime
         fi
         retire_legacy
     fi
