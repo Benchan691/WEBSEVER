@@ -1,0 +1,5 @@
+"vendor","product","vendor_aliases","product_aliases"
+"Palo Alto Networks","PAN-OS","PaloAltoNetworks|palo_alto_networks","PANOS|PAN OS|PAN-OS Software"
+"Palo Alto Networks","Panorama","PaloAltoNetworks|palo_alto_networks","Panorama Management|Panorama Appliance"
+"SonicWall","SonicOS","SonicWALL|SonicWALL, Inc.","Sonic OS|SonicOS Firmware"
+"Fortinet","FortiOS","Fortinet, Inc.","FortiGate|FortiGate/FortiOS|FortiGate OS|FortiGate Firewall"

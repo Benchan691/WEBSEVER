@@ -2,6 +2,50 @@
 
 Rust implementation of the security newsletter portal. The new authentication store is `web.accounts`; the legacy `web.auth` and `web.subscriptions` collections are never read or migrated.
 
+## Interactive server setup
+
+Copy `setup.sh` to the Linux server, then run:
+
+```sh
+sudo bash setup.sh --repo /root/WEBSEVER
+```
+
+The first choice is **Locally (Rust + systemd)** or **In Docker (Docker Compose)**.
+There is also a configuration-only option. Local setup installs Rust 1.91 and
+build prerequisites when needed; Docker setup can install missing Engine/Compose
+packages from the server's configured apt repositories. Other distributions must
+provide these prerequisites themselves. GitHub access and an existing MongoDB
+deployment are required; MongoDB is not installed by this script.
+
+The installer handles a checkout still on `main`, different directory ownership,
+single-branch clones, and uncommitted edits. It archives working files and saves
+local edits in a Git stash before switching to `redesign/unified-news-collection`.
+Existing commits are preserved under backup branch names. Existing JSON settings
+are merged with new defaults; secrets, SMTP settings, and a valid existing Zimbra
+encryption key are retained. Configuration prompts hide secret values. If multiple
+servers share Zimbra accounts, enter the same `ZIMBRA_CREDENTIAL_KEY` on every server.
+
+Deployment files live in `/opt/webserver-rust-setup`; private backups live in
+`/var/backups/webserver-rust-setup`. Local setup creates
+`webserver-rust-setup.service`, running as root for a root-owned server installation.
+Docker setup manages the `webserver-rust-setup` Compose project. Both modes keep
+the deployed runtime separate from the Git checkout and check both login pages
+on a candidate port before replacing an explicitly selected existing deployment.
+If installation fails, the script attempts to restore the original checkout,
+configuration, and services, retaining all backups and stashes.
+
+The login-page checks verify application startup and MongoDB account initialization;
+test an actual Zimbra login and SMTP delivery yourself before enabling scheduled
+mail. The scheduler remains disabled unless you enable it in the final prompt.
+Run it on only one instance per shared database. Data migration, AccountHub identity
+and subscription migration, and removal of legacy review views are separate tasks;
+this installer does not run `vuln-scrape unify-mongo` or delete database data.
+
+```sh
+bash setup.sh --check
+python3 -m unittest discover -s tests -p 'test_setup.py' -v
+```
+
 ## Configure and run
 
 1. Copy `.env.example` to `.env`.
