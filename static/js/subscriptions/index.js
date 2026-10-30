@@ -955,8 +955,7 @@
     });
     document.getElementById('report-language').addEventListener('change', scheduleReportPreview);
     document.getElementById('report-schedule-enabled').addEventListener('change', scheduleReportPreview);
-    document.getElementById('report-schedule-weekday').addEventListener('change', scheduleReportPreview);
-    document.getElementById('report-schedule-time').addEventListener('change', scheduleReportPreview);
+    document.getElementById('report-schedule-cron').addEventListener('input', scheduleReportPreview);
     document.getElementById('report-time-window').addEventListener('change', scheduleReportPreview);
     document.getElementById('report-start').addEventListener('input', scheduleReportPreview);
     document.getElementById('report-end').addEventListener('input', scheduleReportPreview);
