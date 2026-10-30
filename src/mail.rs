@@ -3,8 +3,9 @@ use lettre::{
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
     message::header::ContentTransferEncoding, message::header::ContentType,
     transport::smtp::authentication::Credentials,
+    transport::smtp::client::{Certificate, Tls, TlsParameters},
 };
-use std::{env, time::Duration};
+use std::{env, fs, path::Path, time::Duration};
 
 fn smtp_setting(state: &AppState, key: &str, field: &str, default: &str) -> String {
     env::var(key)
@@ -29,6 +30,29 @@ fn smtp_setting(state: &AppState, key: &str, field: &str, default: &str) -> Stri
 pub(crate) struct CopyRecipients {
     pub cc: Vec<String>,
     pub bcc: Vec<String>,
+}
+
+/// TLS parameters for the relay. Internal relays often present certificates
+/// issued by a private CA, so SMTP_CA_BUNDLE (a PEM file path, absolute or
+/// relative to the application root) adds that CA to the trusted roots while
+/// keeping full certificate and hostname verification.
+fn tls_parameters(state: &AppState, host: &str) -> Result<TlsParameters, String> {
+    let mut builder = TlsParameters::builder(host.to_owned());
+    let bundle = smtp_setting(state, "SMTP_CA_BUNDLE", "ca_bundle", "");
+    if !bundle.is_empty() {
+        let path = Path::new(&bundle);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            state.cfg.root.join(path)
+        };
+        let pem = fs::read(&path)
+            .map_err(|e| format!("SMTP_CA_BUNDLE {}: {e}", path.display()))?;
+        let cert = Certificate::from_pem(&pem)
+            .map_err(|e| format!("SMTP_CA_BUNDLE {}: {e}", path.display()))?;
+        builder = builder.add_root_certificate(cert);
+    }
+    builder.build().map_err(|e| e.to_string())
 }
 
 fn smtp_transport(
@@ -60,16 +84,12 @@ fn smtp_transport(
     };
     let ssl = enabled("SMTP_USE_SSL", "use_ssl", "false");
     let tls = enabled("SMTP_USE_TLS", "use_tls", "true");
-    let builder = if ssl {
-        AsyncSmtpTransport::<Tokio1Executor>::relay(&host)
+    let mut builder = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&host);
+    if ssl {
+        builder = builder.tls(Tls::Wrapper(tls_parameters(state, &host)?));
     } else if tls {
-        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&host)
-    } else {
-        Ok(AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(
-            &host,
-        ))
+        builder = builder.tls(Tls::Required(tls_parameters(state, &host)?));
     }
-    .map_err(|e| e.to_string())?;
     let mut builder = builder.port(port);
     if let Some(timeout) = timeout {
         builder = builder.timeout(Some(timeout));
