@@ -1,5 +1,5 @@
 //! Application-managed organizations, scoped local users and delegated roles.
-use crate::{AppState, ReqCtx, auth, db, rbac, render, view};
+use crate::{AppState, ReqCtx, auth, db, mail, rbac, render, view};
 use axum::{
     http::{Method, StatusCode, header},
     response::Response,
@@ -92,14 +92,20 @@ async fn temporary_credentials() -> Result<(String, Document), String> {
         doc! {"password":hash,"must_change_password":true,"temporary_password_expires_at":bson::DateTime::from_millis(bson::DateTime::now().timestamp_millis()+24*3600*1000),"session_version":auth::new_secret(),"updated_at":bson::DateTime::now()},
     ))
 }
-fn credential_response(id: ObjectId, temporary: String) -> Response {
+fn credential_response(id: ObjectId, email: &str) -> Response {
     let mut response = response(
-        json!({"success":true,"id":id.to_hex(),"temporary_password":temporary,"expires_in_hours":24,"instructions":"Deliver this once through a secure channel. The user must choose a NEW local password at first login; never use an external service password."}),
+        json!({"success":true,"id":id.to_hex(),"email":email,"temporary_password_sent":true,"expires_in_hours":24}),
     );
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
     response
+}
+fn email_unavailable(message: &str) -> Response {
+    view::json_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        json!({"error":message,"code":"credential_email_failed"}),
+    )
 }
 async fn target_user(state: &AppState, ctx: &ReqCtx, id: ObjectId) -> Option<Document> {
     let target = auth::accounts(state)
@@ -289,11 +295,22 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 .iter()
                 .any(|key| ctx.json.get(*key).is_some_and(|value| !value.is_string()))
             {
-                return Some(bad("Optional email and role_id must be text."));
+                return Some(bad("Email and role_id must be text."));
             }
             let email = auth::key(&ctx.field("email"));
-            if !email.is_empty() && !auth::valid_email(&email) {
-                return Some(bad("Invalid email address."));
+            if !auth::valid_email(&email) {
+                return Some(bad(
+                    "A valid email address is required to receive the temporary password.",
+                ));
+            }
+            if ctx
+                .json
+                .get("organization_id")
+                .and_then(Value::as_str)
+                .and_then(db::object_id)
+                .is_none()
+            {
+                return Some(bad("Select an organization for the new account."));
             }
             let Some(org) = requested_org(ctx) else {
                 return Some(denied());
@@ -329,21 +346,52 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 }
                 account.insert("role", db::string(&role, "name"));
             }
-            if !email.is_empty() {
-                account.insert("email_key", &email);
-            }
+            account.insert("email_key", &email);
             let (temporary, credentials) = match temporary_credentials().await {
                 Ok(values) => values,
                 Err(_) => return Some(unavailable()),
             };
             account.extend(credentials);
-            return Some(match auth::accounts(state).insert_one(account).await {
-                Ok(_) => credential_response(id, temporary),
-                Err(_) => view::error(
+            let delivery = match mail::TemporaryPasswordEmail::prepare(
+                state,
+                &email,
+                username,
+                &db::string(&organization, "name"),
+                &temporary,
+            ) {
+                Ok(delivery) => delivery,
+                Err(_) => {
+                    return Some(email_unavailable(
+                        "Unable to prepare the temporary-password email. Check SMTP_HOST, SMTP_FROM, transport settings and WEB_PUBLIC_URL. No account was created.",
+                    ));
+                }
+            };
+            let version = db::string(&account, "session_version");
+            if auth::accounts(state).insert_one(account).await.is_err() {
+                return Some(view::error(
                     StatusCode::CONFLICT,
                     "Account could not be created; username or email may already exist.",
-                ),
-            });
+                ));
+            }
+            if delivery.send().await.is_err() {
+                // Remove only this untouched provisioning attempt, never an
+                // account modified by a concurrent administrator.
+                let removed = auth::accounts(state)
+                    .delete_one(
+                        doc! {"_id":id,"session_version":version,"must_change_password":true},
+                    )
+                    .await;
+                return Some(if removed.is_ok_and(|result| result.deleted_count == 1) {
+                    email_unavailable(
+                        "Temporary-password email could not be sent. No account was created. Check SMTP delivery and retry.",
+                    )
+                } else {
+                    email_unavailable(
+                        "Temporary-password email could not be confirmed. The account remains saved; check SMTP delivery and use Reset password to retry.",
+                    )
+                });
+            }
+            return Some(credential_response(id, &email));
         }
     }
     let parts = ctx
@@ -496,14 +544,31 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             set.insert("disabled", true);
             set.insert("deleted_at", bson::DateTime::now());
         } else if tail.is_empty() && ctx.method == Method::PUT {
-            if !exact(ctx, &["disabled"])
-                || ctx.json.get("disabled").and_then(Value::as_bool).is_none()
+            if !exact(ctx, &["disabled", "email"])
+                || ctx.json.as_object().is_none_or(|object| object.is_empty())
+                || ctx
+                    .json
+                    .get("disabled")
+                    .is_some_and(|value| !value.is_boolean())
             {
                 return Some(bad(
-                    "Only a boolean disabled flag is accepted. Use the separate role assignment action.",
+                    "Only an email address and a boolean disabled flag are accepted. Use the separate role assignment action.",
                 ));
             }
-            set.insert("disabled", ctx.json["disabled"].as_bool().unwrap());
+            if let Some(disabled) = ctx.json.get("disabled").and_then(Value::as_bool) {
+                set.insert("disabled", disabled);
+            }
+            if let Some(value) = ctx.json.get("email") {
+                let Some(email) = value
+                    .as_str()
+                    .map(auth::key)
+                    .filter(|email| auth::valid_email(email))
+                else {
+                    return Some(bad("A valid email address is required."));
+                };
+                set.insert("email", &email);
+                set.insert("email_key", email);
+            }
         } else if *tail == ["password-reset"] && ctx.method == Method::POST {
             if !exact(ctx, &[]) {
                 return Some(bad(
@@ -514,16 +579,42 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 Ok(values) => values,
                 Err(_) => return Some(unavailable()),
             };
+            let email = db::string(&target, "email");
+            if !auth::valid_email(&email) {
+                return Some(bad(
+                    "Set a valid account email address before resetting the password.",
+                ));
+            }
+            let delivery = match mail::TemporaryPasswordEmail::prepare(
+                state,
+                &email,
+                &db::string(&target, "username"),
+                &db::string(&target, "organization"),
+                &temporary,
+            ) {
+                Ok(delivery) => delivery,
+                Err(_) => {
+                    return Some(email_unavailable(
+                        "Unable to prepare the temporary-password email. Check SMTP_HOST, SMTP_FROM, transport settings and WEB_PUBLIC_URL. The password was not changed.",
+                    ));
+                }
+            };
+            // Failed delivery must not invalidate the user's working password.
+            if delivery.send().await.is_err() {
+                return Some(email_unavailable(
+                    "Temporary-password email could not be sent. The password was not changed. Check SMTP delivery and retry.",
+                ));
+            }
             return Some(
                 match auth::accounts(state)
                     .update_one(
-                        doc! {"$and":[scoped_id(ctx,id),{"reserved_bootstrap":{"$ne":true}}]},
+                        doc! {"$and":[scoped_id(ctx,id),{"reserved_bootstrap":{"$ne":true},"email":&email,"session_version":db::string(&target,"session_version")}]},
                         doc! {"$set":credentials},
                     )
                     .await
                 {
-                    Ok(result) if result.matched_count == 1 => credential_response(id, temporary),
-                    _ => unavailable(),
+                    Ok(result) if result.matched_count == 1 => credential_response(id, &email),
+                    _ => view::error(StatusCode::CONFLICT, "The account changed while the email was being sent. Request a new password reset."),
                 },
             );
         } else if *tail == ["role"] && ctx.method == Method::PUT {

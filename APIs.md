@@ -32,17 +32,17 @@ Disabling an organization prevents its members from signing in or using existing
 | --- | --- | --- |
 | GET | `/api/permissions` | `roles.view`; fixed grouped catalog including global-only flags |
 | GET | `/api/users` | `users.view`; organization-scoped account metadata; no password hashes or tokens |
-| POST | `/api/users` | `users.create`; `username`, optional `email`, `organization_id`, optional custom `role_id`; assigning a role additionally requires `users.assign_roles` |
-| PUT | `/api/users/{id}` | `users.edit`; boolean `disabled` only |
+| POST | `/api/users` | `users.create`; `username`, required `email` and `organization_id`, optional custom `role_id`; assigning a role additionally requires `users.assign_roles` |
+| PUT | `/api/users/{id}` | `users.edit`; valid `email` and/or boolean `disabled` |
 | DELETE | `/api/users/{id}` | `users.delete`; retires account without removing its records |
-| POST | `/api/users/{id}/password-reset` | `users.reset_password`; empty object `{}`; generates a random temporary password and invalidates existing sessions |
+| POST | `/api/users/{id}/password-reset` | `users.reset_password`; empty object `{}`; emails a random temporary password to the account; rotates credentials/sessions only after SMTP acceptance |
 | PUT | `/api/users/{id}/role` | `users.assign_roles`; `role_id` for a custom role, or empty string to remove access |
 | GET | `/api/roles` | `roles.view`; roles within current organization |
 | POST | `/api/roles` | `roles.create`; `name`, `permissions` array from catalog, `organization_id` |
 | PUT | `/api/roles/{id}` | `roles.edit`; `name` and `permissions`; immutable organization and delegation parent |
 | DELETE | `/api/roles/{id}` | `roles.delete`; retires a custom role and revokes dependent authority |
 
-For tenant administrators, a supplied `organization_id` must match their own BSON ObjectId. Superadmin must explicitly select an organization when creating tenant resources. Provisioning/reset responses contain a `temporary_password` **once**, expire in 24 hours and use `Cache-Control: no-store`. Deliver this password through a secure channel. Do not submit external service passwords. First-login sessions can only change their password, view Settings, or sign out.
+Account creation requires an explicit active `organization_id`; tenant administrators can only submit their own BSON ObjectId. Provisioning/reset always require a valid account email and SMTP delivery. Successful responses return `success`, `id`, `email`, `temporary_password_sent: true` and `expires_in_hours: 24`, never plaintext passwords. Responses use `Cache-Control: no-store`. SMTP failures return JSON 503 with `code: credential_email_failed`. A failed reset leaves the previous password/session version unchanged. If the account changes during reset delivery, JSON 409 instructs the administrator to retry. First-login sessions can only change their password, view Settings, or sign out.
 
 Ordinary role assignment never grants the reserved superadmin or organization-administrator role. Only the explicit superadmin organization-appointment action grants the organization-administrator role. Self role changes, account-management changes to oneself, break-glass mutations, stronger target/role assignments and foreign-organization operations are rejected.
 

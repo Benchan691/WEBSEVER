@@ -11,7 +11,9 @@ Rust/Axum application with local username/password login, application-managed or
 
 First startup creates the configured local bootstrap account as the reserved `superadmin`, or explicitly reserves the existing matching local bootstrap administrator. Its password hash is preserved on subsequent startups. Changing `WEB_AUTH_BOOTSTRAP_PASSWORD` does **not** reset an existing account. Keep `WEB_AUTH_BOOTSTRAP_USERNAME` stable; startup refuses identity conflicts.
 
-All other accounts are provisioned in **Accounts & roles**. Provisioning and reset generate independent random temporary local passwords, displayed once, valid for 24 hours. Users must replace them before accessing application features. Local replacement passwords require 12 or more characters and at most 72 UTF-8 bytes. External credentials are never imported, decrypted, or used to authenticate.
+All other accounts are provisioned in **Accounts & roles**, with a required email address and an explicitly selected active organization. Provisioning and password reset email an independent temporary local password to that account; passwords are never returned to the administrator's browser. SMTP delivery must succeed before the operation reports success. Failed provisioning removes the untouched new account so it can be retried; failed reset delivery preserves the working password and sessions. Temporary passwords expire in 24 hours and must be replaced before accessing application features. Local replacement passwords require 12 or more characters and at most 72 UTF-8 bytes. External credentials are never imported, decrypted, or used to authenticate.
+
+Configure the SMTP settings in .env before provisioning users. WEB_PUBLIC_URL optionally supplies the canonical portal URL for credential emails; it is never inferred from a request's Host header. Existing accounts without an email can be corrected with **Edit email** before requesting a reset. First-login Settings only exposes the password form. Browser API calls detect expired sessions and HTML/proxy responses and offer a sign-in action instead of showing a JSON parser exception.
 
 ## Organizations and roles
 

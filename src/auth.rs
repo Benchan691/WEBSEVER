@@ -492,18 +492,14 @@ async fn update_profile(state: &AppState, ctx: &ReqCtx) -> Response {
         return view::error(StatusCode::BAD_REQUEST, "Email must be text.");
     }
     let email = key(&ctx.field("email"));
-    if !email.is_empty() && !valid_email(&email) {
-        return view::error(StatusCode::BAD_REQUEST, "Invalid email address.");
+    if !valid_email(&email) {
+        return view::error(
+            StatusCode::BAD_REQUEST,
+            "A valid email address is required.",
+        );
     }
-    let mut update = doc! {"$set":{"email":&email,"updated_at":bson::DateTime::now()}};
-    if email.is_empty() {
-        update.insert("$unset", doc! {"email_key":""});
-    } else {
-        update
-            .get_document_mut("$set")
-            .unwrap()
-            .insert("email_key", &email);
-    }
+    let update =
+        doc! {"$set":{"email":&email,"email_key":&email,"updated_at":bson::DateTime::now()}};
     match accounts(state)
         .update_one(doc! {"_id":ctx.user_id().unwrap()}, update)
         .await

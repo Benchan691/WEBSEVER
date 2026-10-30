@@ -8,6 +8,7 @@
     </div>
 
     <div id="message" class="alert d-none" role="alert"></div>
+    <a id="settings-sign-in" class="btn btn-outline-primary mb-3 d-none" href="/login?next=/settings">Sign in again</a>
 
     {% if current_user.must_change_password %}
     <div class="alert alert-warning" role="alert">
@@ -29,14 +30,16 @@
                 <dd class="col-sm-8">{{ current_user.role or 'No access role' }}</dd>
                 {% if current_user.organization %}<dt class="col-sm-4">Organization</dt><dd class="col-sm-8">{{ current_user.organization }}</dd>{% endif %}
             </dl>
+            {% if not current_user.must_change_password %}
             <form id="profile-form" class="mb-4">
                 <div class="mb-3">
-                    <label for="profile-email" class="form-label">{{ t('Email (optional)') }}</label>
-                    <input id="profile-email" type="email" class="form-control" autocomplete="email" value="{{ current_user.email }}">
+                    <label for="profile-email" class="form-label">{{ t('Email') }}</label>
+                    <input id="profile-email" type="email" class="form-control" autocomplete="email" value="{{ current_user.email }}" required>
                     <div class="form-text">{{ t('This email is used by the portal for your profile and notifications.') }}</div>
                 </div>
                 <button class="btn btn-outline-primary" type="submit"><i class="bi bi-person-check me-1"></i>{{ t('Save profile') }}</button>
             </form>
+            {% endif %}
             <h3 class="h5 mb-3">{{ t('Change password') }}</h3>
             <form id="password-form">
                 <div class="mb-3">
@@ -58,58 +61,7 @@
 </div>
 {% endblock %}
 {% block script %}
-<script>
-(function () {
-    const form = document.getElementById('password-form');
-    const message = document.getElementById('message');
-    const profile = document.getElementById('profile-form');
-    profile.addEventListener('submit', function (event) {
-        event.preventDefault();
-        message.className = 'alert d-none';
-        fetch('{{ url_for('auth.update_profile') }}', {
-            method: 'PUT',
-            headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
-            body: JSON.stringify({email: document.getElementById('profile-email').value.trim()})
-        }).then(function (response) {
-            return response.json().then(function (body) {
-                if (!response.ok) throw new Error(body.error || '{{ t('Request failed.') }}');
-                return body;
-            });
-        }).then(function () {
-            message.textContent = '{{ t('Profile saved successfully.') }}';
-            message.className = 'alert alert-success';
-        }).catch(function (error) {
-            message.textContent = error.message;
-            message.className = 'alert alert-danger';
-        });
-    });
-    if (!form) return;
-    form.addEventListener('submit', function (event) {
-        event.preventDefault();
-        message.className = 'alert d-none';
-        fetch('{{ url_for('auth.change_password') }}', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
-            body: JSON.stringify({
-                current_password: document.getElementById('current-password').value,
-                new_password: document.getElementById('new-password').value,
-                new_password_confirmation: document.getElementById('new-password-confirmation').value
-            })
-        }).then(function (response) {
-            return response.json().then(function (body) {
-                if (!response.ok) throw new Error(body.error || '{{ t('Request failed.') }}');
-                return body;
-            });
-        }).then(function () {
-            form.reset();
-            message.textContent = '{{ t('Password changed successfully.') }}';
-            window.location.assign('/');
-            message.className = 'alert alert-success';
-        }).catch(function (error) {
-            message.textContent = error.message;
-            message.className = 'alert alert-danger';
-        });
-    });
-}());
-</script>
+<script id="settings-config" type="application/json">{{ {'passwordUrl':url_for('auth.change_password'),'profileUrl':url_for('auth.update_profile')}|tojson }}</script>
+<script src="{{ url_for('static', filename='js/shared/api.js', v='local-rbac-2') }}"></script>
+<script src="{{ url_for('static', filename='js/auth/settings.js', v='local-rbac-2') }}"></script>
 {% endblock %}

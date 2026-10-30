@@ -5,11 +5,6 @@
   <h2>Accounts, roles and organizations</h2>
   <p class="text-muted">Permissions apply within one organization. The reserved superadmin alone manages organizations and appoints organization administrators.</p>
   <div id="management-message" class="alert d-none" role="alert"></div>
-  <div id="temporary-credential" class="alert alert-warning d-none" role="status">
-    <strong>Temporary local password — shown once</strong><pre id="temporary-password" class="my-2"></pre>
-    <p>Expires in 24 hours. Deliver securely; the user must choose a new local password at first login. Do not reuse an external service password.</p>
-    <button id="dismiss-credential" class="btn btn-sm btn-outline-dark" type="button">Clear password</button>
-  </div>
   <div class="card card-body mb-4">
     <label class="form-label" for="management-organization">Organization</label>
     <select id="management-organization" class="form-select"></select>
@@ -22,9 +17,16 @@
   {% if permissions['users.view'] or permissions['users.create'] %}
   <section class="card card-body mb-4"><h3 class="h5">Local accounts</h3>
     {% if permissions['users.create'] %}
-    <form id="user-form" class="row g-2 mb-3"><div class="col-md-3"><label for="new-username" class="form-label">Username</label><input id="new-username" class="form-control" maxlength="100" required autocomplete="off"></div><div class="col-md-3"><label for="new-email" class="form-label">Email (optional)</label><input id="new-email" type="email" class="form-control"></div><div class="col-md-4"><label for="new-user-role" class="form-label">Custom role</label><select id="new-user-role" class="form-select"></select></div><div class="col-md-2 d-flex align-items-end"><button class="btn btn-primary">Provision account</button></div></form>
+    <form id="user-form" class="row g-2 mb-3">
+      <div class="col-md-3"><label for="new-username" class="form-label">Username</label><input id="new-username" class="form-control" maxlength="100" required autocomplete="off"></div>
+      <div class="col-md-3"><label for="new-email" class="form-label">Email</label><input id="new-email" type="email" class="form-control" required autocomplete="email"></div>
+      <div class="col-md-3"><label for="new-user-organization" class="form-label">Organization</label><select id="new-user-organization" class="form-select" required></select></div>
+      <div class="col-md-3"><label for="new-user-role" class="form-label">Custom role</label><select id="new-user-role" class="form-select"></select></div>
+      <div class="col-12"><small class="text-muted">A temporary password will be emailed to this address and expires in 24 hours. The user must change it at first login.</small></div>
+      <div class="col-12"><button class="btn btn-primary">Create account and email password</button></div>
+    </form>
     {% endif %}
-    <div class="table-responsive"><table class="table align-middle"><thead><tr><th>Username</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead><tbody id="user-rows"></tbody></table></div>
+    <div class="table-responsive"><table class="table align-middle"><thead><tr><th>Username</th><th>Email</th><th>Organization</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead><tbody id="user-rows"></tbody></table></div>
     <small class="text-muted">Your own account and the break-glass account cannot be changed here. Retiring an account preserves subscriptions and history.</small>
   </section>
   {% endif %}
@@ -44,5 +46,6 @@
 {% endblock %}
 {% block script %}
 <script id="management-config" type="application/json">{{ {'user':current_user,'permissions':permissions,'catalog':permission_catalog,'superadmin':is_superadmin}|tojson }}</script>
-<script src="{{ url_for('static', filename='js/auth/management.js', v='local-rbac-1') }}"></script>
+<script src="{{ url_for('static', filename='js/shared/api.js', v='local-rbac-2') }}"></script>
+<script src="{{ url_for('static', filename='js/auth/management.js', v='local-rbac-2') }}"></script>
 {% endblock %}

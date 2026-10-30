@@ -1,4 +1,4 @@
-//! Opt-in HTTP/database regression. Never starts a scheduler or SMTP transport.
+//! Opt-in HTTP/database regression. Uses only a disposable loopback SMTP receiver.
 use crate::*;
 use mongodb::bson::{doc, oid::ObjectId};
 use tower::ServiceExt;
@@ -10,7 +10,11 @@ async fn call(
     path: &str,
     body: Option<Value>,
 ) -> (StatusCode, Value, String) {
-    let mut request = Request::builder().method(method).uri(path);
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("host", "portal.example.test")
+        .header("origin", "http://portal.example.test");
     if !cookie.is_empty() {
         request = request.header("cookie", cookie);
     }
@@ -61,8 +65,25 @@ async fn first_login(app: &Router, username: &str, password: &str) -> String {
     let cookie = login(app, username, password).await;
     let (status, _, _) = call(app, &cookie, Method::GET, "/api/users", None).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    let (status,_,cookie)=call(app,&cookie,Method::POST,"/api/auth/password",Some(json!({"current_password":password,"new_password":"replacement-local-password","new_password_confirmation":"replacement-local-password"}))).await;
+    let old_cookie = cookie.clone();
+    let (status,body,cookie)=call(app,&cookie,Method::POST,"/api/auth/password",Some(json!({"current_password":password,"new_password":"replacement-local-password","new_password_confirmation":"replacement-local-password"}))).await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["success"], true,
+        "password-change API must return JSON"
+    );
+    assert!(!cookie.is_empty());
+    assert_ne!(cookie, old_cookie);
+    assert_eq!(
+        call(app, &old_cookie, Method::GET, "/api/users", None)
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call(app, &cookie, Method::GET, "/settings", None).await.0,
+        StatusCode::OK
+    );
     cookie
 }
 
@@ -77,6 +98,7 @@ async fn local_rbac_http_lifecycle_and_tenant_isolation() {
     let client = Client::with_uri_str(&uri).await.unwrap();
     let database = client.database(&format!("local_rbac_test_{}", ObjectId::new().to_hex()));
     let mut state = crate::rbac_tests::state().await;
+    let mut smtp = crate::mail::tests::smtp_stub(&mut state).await;
     state.web = database.clone();
     state.vuln = database.clone();
     state.cfg.web_database = database.name().into();
@@ -109,15 +131,51 @@ async fn local_rbac_http_lifecycle_and_tenant_isolation() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let b = b["data"]["id"].as_str().unwrap().to_owned();
+    for body in [
+        json!({"username":"missing-email","organization_id":a}),
+        json!({"username":"empty-email","email":"","organization_id":a}),
+        json!({"username":"bad-email","email":"invalid","organization_id":a}),
+        json!({"username":"missing-org","email":"new@example.test"}),
+        json!({"username":"bad-org","email":"new@example.test","organization_id":""}),
+    ] {
+        let (status, body, _) = call(&app, &root, Method::POST, "/api/users", Some(body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["error"].is_string());
+    }
+    smtp.accept
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let (status, failed, _) = call(
+        &app,
+        &root,
+        Method::POST,
+        "/api/users",
+        Some(
+            json!({"username":"delivery-failed","email":"failed@example.test","organization_id":a}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(failed.get("temporary_password").is_none());
+    assert_eq!(
+        auth::accounts(&state)
+            .count_documents(doc! {"username_key":"delivery-failed"})
+            .await
+            .unwrap(),
+        0
+    );
+    smtp.accept.store(true, std::sync::atomic::Ordering::SeqCst);
     let (status, admin, _) = call(
         &app,
         &root,
         Method::POST,
         "/api/users",
-        Some(json!({"username":"org-admin","organization_id":a})),
+        Some(json!({"username":"org-admin","email":"org-admin@example.test","organization_id":a})),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(admin["temporary_password_sent"], true);
+    assert!(admin.get("temporary_password").is_none());
+    let admin_temporary = smtp.password_for("org-admin@example.test").await;
     let admin_id = admin["id"].as_str().unwrap();
     let (status, _, _) = call(
         &app,
@@ -128,12 +186,7 @@ async fn local_rbac_http_lifecycle_and_tenant_isolation() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let administrator = first_login(
-        &app,
-        "org-admin",
-        admin["temporary_password"].as_str().unwrap(),
-    )
-    .await;
+    let administrator = first_login(&app, "org-admin", &admin_temporary).await;
     let grants = vec![
         "reviews.view",
         "roles.view",
@@ -164,17 +217,35 @@ async fn local_rbac_http_lifecycle_and_tenant_isolation() {
         &administrator,
         Method::POST,
         "/api/users",
-        Some(json!({"username":"limited","role_id":role_id})),
+        Some(json!({"username":"limited","email":"limited@example.test","organization_id":a,"role_id":role_id})),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    assert!(member.get("temporary_password").is_none());
+    let member_temporary = smtp.password_for("limited@example.test").await;
+    let member_record = auth::accounts(&state)
+        .find_one(doc! {"username_key":"limited"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        member_record.get_object_id("organization_id").unwrap(),
+        db::object_id(&a).unwrap()
+    );
     let member_id = member["id"].as_str().unwrap();
-    let limited = first_login(
+    let limited = first_login(&app, "limited", &member_temporary).await;
+    let (status, _, _) = call(&app, &administrator, Method::POST, "/api/users",
+        Some(json!({"username":"foreign-user","email":"foreign-create@example.test","organization_id":b}))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, _) = call(
         &app,
-        "limited",
-        member["temporary_password"].as_str().unwrap(),
+        &limited,
+        Method::PUT,
+        "/api/auth/profile",
+        Some(json!({"email":""})),
     )
     .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     let (status, _, _) = call(
         &app,
         &limited,
@@ -314,6 +385,58 @@ async fn local_rbac_http_lifecycle_and_tenant_isolation() {
         db::string(&root_record, "password")
     );
     assert!(rbac::is_superadmin(&restarted));
+    let before_reset = auth::accounts(&state)
+        .find_one(doc! {"_id":db::object_id(member_id).unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
+    smtp.accept
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let (status, body, _) = call(
+        &app,
+        &administrator,
+        Method::POST,
+        &format!("/api/users/{member_id}/password-reset"),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(body.get("temporary_password").is_none());
+    let after_failure = auth::accounts(&state)
+        .find_one(doc! {"_id":db::object_id(member_id).unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        db::string(&before_reset, "password"),
+        db::string(&after_failure, "password")
+    );
+    assert_eq!(
+        db::string(&before_reset, "session_version"),
+        db::string(&after_failure, "session_version")
+    );
+    assert_eq!(
+        call(&app, &limited, Method::GET, "/settings", None).await.0,
+        StatusCode::OK
+    );
+    smtp.accept.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (status, body, _) = call(
+        &app,
+        &administrator,
+        Method::POST,
+        &format!("/api/users/{member_id}/password-reset"),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["temporary_password_sent"], true);
+    assert!(body.get("temporary_password").is_none());
+    let reset_password = smtp.password_for("limited@example.test").await;
+    assert_eq!(
+        call(&app, &limited, Method::GET, "/settings", None).await.0,
+        StatusCode::FOUND
+    );
+    let limited = first_login(&app, "limited", &reset_password).await;
     let (status, _, _) = call(
         &app,
         &administrator,

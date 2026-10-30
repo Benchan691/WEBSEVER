@@ -213,11 +213,25 @@ mod tests {
         let management = env
             .get_template("auth/management.html")
             .unwrap()
-            .render(context)
+            .render(context.clone())
             .unwrap();
         assert!(management.contains("permission-checkboxes"));
         assert!(management.contains("organizations.manage"));
-        assert!(management.contains("shown once"));
+        assert!(
+            management.contains("id=\"new-email\" type=\"email\" class=\"form-control\" required")
+        );
+        assert!(management.contains("id=\"new-user-organization\" class=\"form-select\" required"));
+        assert!(management.contains("emailed"));
+        assert!(!management.contains("id=\"temporary-password\""));
+        let mut first_login = context.clone();
+        first_login["current_user"]["must_change_password"] = json!(true);
+        let html = env
+            .get_template("auth/settings.html")
+            .unwrap()
+            .render(first_login)
+            .unwrap();
+        assert!(html.contains("id=\"password-form\""));
+        assert!(!html.contains("id=\"profile-form\""));
     }
 
     #[test]
