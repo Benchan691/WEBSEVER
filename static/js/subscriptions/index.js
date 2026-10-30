@@ -579,8 +579,7 @@
                 generation_mode: document.getElementById('report-generation-mode').value,
                 report_language: document.getElementById('report-language').value,
                 schedule_enabled: document.getElementById('report-schedule-enabled').checked,
-                schedule_weekday: document.getElementById('report-schedule-weekday').value,
-                schedule_time: document.getElementById('report-schedule-time').value
+                cron_expression: document.getElementById('report-schedule-cron').value.trim()
             }
         };
         if (editingId) payload.subscription_id = editingId;
@@ -700,8 +699,7 @@
         document.getElementById('report-language').value = report.report_language;
         document.getElementById('report-search-prompt').value = report.search_prompt || '';
         document.getElementById('report-schedule-enabled').checked = report.schedule_enabled === true;
-        document.getElementById('report-schedule-weekday').value = report.schedule_weekday || 'mon';
-        document.getElementById('report-schedule-time').value = report.schedule_time || '09:00';
+        document.getElementById('report-schedule-cron').value = report.cron_expression || '0 9 * * 1';
         setSendStatisticBusy(false);
         setSendStatisticStatus('', '');
         updateNewsletterSendStatisticVisibility();
@@ -779,7 +777,7 @@
             }
             if (item.report_profile.enabled) {
                 const reportSummary = [item.report_profile.schedule_enabled
-                    ? t('Enabled · weekly {weekday} {time} HKT', {weekday: item.report_profile.schedule_weekday || '', time: item.report_profile.schedule_time || ''})
+                    ? t('Enabled · cron {expression} HKT', {expression: item.report_profile.cron_expression || '0 9 * * 1'})
                     : t('Enabled')];
                 const inventorySuffix = inventorySummarySuffix(item.report_profile.filters);
                 if (inventorySuffix) {
@@ -829,7 +827,7 @@
                     : t('Enabled · no sources');
         }
         return profile.schedule_enabled
-            ? t('Enabled · weekly {weekday} {time} HKT', {weekday: profile.schedule_weekday || '', time: profile.schedule_time || ''})
+            ? t('Enabled · cron {expression} HKT', {expression: profile.cron_expression || '0 9 * * 1'})
             : t('Enabled');
     }
     function renderOrganizationRows() {

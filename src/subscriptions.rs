@@ -21,7 +21,7 @@ fn default_profile(kind: &str) -> Value {
         let mut filters = default_filters();
         filters["collections"] = json!(["cve"]);
         filters["sources"] = json!(["cve"]);
-        json!({"enabled":false,"filters":filters,"generation_mode":"template","report_language":"en","search_prompt":"","schedule_enabled":false,"schedule_weekday":"mon","schedule_time":"09:00"})
+        json!({"enabled":false,"filters":filters,"generation_mode":"template","report_language":"en","search_prompt":"","schedule_enabled":false,"cron_expression":"0 9 * * 1"})
     }
 }
 fn canonical_provider_name(value: &str) -> String {
@@ -241,21 +241,33 @@ async fn profile(state: &AppState, kind: &str, input: &Value) -> Result<Value, S
             profile["search_prompt"] = json!("")
         }
         profile["filters"] = report_filters(&profile, unified_collection);
-        if !matches!(
-            profile["schedule_weekday"].as_str(),
-            Some("mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun")
-        ) {
-            return Err("Invalid report schedule weekday.".into());
+        if !profile["schedule_enabled"].is_boolean() {
+            return Err("Report schedule must be true or false.".into());
         }
-        let time = profile["schedule_time"].as_str().unwrap_or("");
-        let valid = time.split_once(':').is_some_and(|(h, m)| {
-            h.len() == 2
-                && m.len() == 2
-                && h.parse::<u8>().is_ok_and(|v| v < 24)
-                && m.parse::<u8>().is_ok_and(|v| v < 60)
-        });
-        if !valid {
-            return Err("Invalid report schedule time.".into());
+        let cron_expression = if input["cron_expression"]
+            .as_str()
+            .is_some_and(|expression| !expression.trim().is_empty())
+        {
+            crate::cron_schedule::expression(&profile)
+        } else {
+            let mut legacy_profile = profile.clone();
+            legacy_profile["cron_expression"] = Value::Null;
+            crate::cron_schedule::expression(&legacy_profile)
+        };
+        crate::cron_schedule::validate(&cron_expression)
+            .map_err(|error| format!("Invalid report cron expression: {error}"))?;
+        profile["cron_expression"] = json!(cron_expression);
+        profile.as_object_mut().unwrap().remove("schedule_weekday");
+        profile.as_object_mut().unwrap().remove("schedule_time");
+        if profile["enabled"] == true && profile["schedule_enabled"] == true {
+            let next_run_at = crate::cron_schedule::next_after(
+                profile["cron_expression"].as_str().unwrap_or_default(),
+                chrono::Utc::now(),
+            )
+            .map_err(|error| format!("Invalid report cron expression: {error}"))?;
+            profile["next_run_at"] = json!(next_run_at.to_rfc3339());
+        } else if let Some(profile) = profile.as_object_mut() {
+            profile.remove("next_run_at");
         }
         if profile["enabled"] == true
             && profile["filters"]["vendor_product_filter"]["enabled"] != true
@@ -310,6 +322,16 @@ fn public(document: &Document) -> Value {
             "statistic_schedule_claim_owner",
         ] {
             obj.remove(key);
+        }
+        if let Some(profile) = obj
+            .get_mut("report_profile")
+            .filter(|profile| profile.is_object())
+        {
+            profile["cron_expression"] = json!(crate::cron_schedule::expression(profile));
+            if let Some(profile) = profile.as_object_mut() {
+                profile.remove("schedule_weekday");
+                profile.remove("schedule_time");
+            }
         }
         for profile_name in ["newsletter_profile", "report_profile"] {
             let collections = obj
@@ -1099,19 +1121,9 @@ fn notification_profile_card(name: &str, profile: &Value, newsletter: bool) -> V
         summary_lines.push(format!("Generation: {generation}"));
         summary_lines.push(format!("Language: {language}"));
         if profile["schedule_enabled"] == true {
-            let weekday = match profile["schedule_weekday"].as_str().unwrap_or("mon") {
-                "tue" => "Tuesday",
-                "wed" => "Wednesday",
-                "thu" => "Thursday",
-                "fri" => "Friday",
-                "sat" => "Saturday",
-                "sun" => "Sunday",
-                _ => "Monday",
-            };
-            let time = profile["schedule_time"].as_str().unwrap_or("09:00");
             summary_lines.push(format!(
-                "Schedule: Every {weekday} at {} HKT",
-                escape_html(time)
+                "Schedule: {} HKT",
+                escape_html(&crate::cron_schedule::expression(profile))
             ));
         } else {
             summary_lines.push("Schedule: Disabled".to_owned());

@@ -1,5 +1,6 @@
 mod auth;
 mod config;
+mod cron_schedule;
 mod db;
 mod mail;
 mod newsletter_normalizer;

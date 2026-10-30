@@ -106,7 +106,7 @@
                 ? row.emails.join(', ')
                 : row.email;
             const schedule = row.schedule_enabled
-                ? escapeHtml(row.schedule_weekday) + ' ' + escapeHtml(row.schedule_time) + ' ' + t('HKT')
+                ? escapeHtml(row.cron_expression || '') + ' ' + t('HKT')
                 : t('Off');
             const next = row.due
                 ? '<span class="badge text-bg-warning">' + t('Due') + '</span> ' + formatTime(row.next_run_at)

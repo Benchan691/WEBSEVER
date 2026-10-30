@@ -1,5 +1,5 @@
 use crate::{AppState, db, mail, newsletter_statistics, newsletters, reports, subscriptions};
-use chrono::{Datelike, TimeZone};
+use chrono::TimeZone;
 use mongodb::bson::{self, Document, doc, oid::ObjectId};
 use serde_json::{Value, json};
 use tokio::time::{Duration, interval};
@@ -45,36 +45,15 @@ fn bson_time(value: &mongodb::bson::Bson) -> Option<chrono::DateTime<chrono::Utc
         _ => None,
     }
 }
-fn next_weekly(profile: &Value, now: chrono::DateTime<chrono::Utc>) -> bson::DateTime {
-    let target_day = match profile["schedule_weekday"].as_str().unwrap_or("mon") {
-        "tue" => 1,
-        "wed" => 2,
-        "thu" => 3,
-        "fri" => 4,
-        "sat" => 5,
-        "sun" => 6,
-        _ => 0,
-    };
-    let time = profile["schedule_time"].as_str().unwrap_or("09:00");
-    let (hour, minute) = time.split_once(':').unwrap_or(("09", "00"));
-    let hour = hour.parse::<u32>().unwrap_or(9);
-    let minute = minute.parse::<u32>().unwrap_or(0);
-    let hk = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
-    let local = now.with_timezone(&hk);
-    let mut date = local.date_naive();
-    for _ in 0..8 {
-        let naive = date
-            .and_hms_opt(hour, minute, 0)
-            .unwrap_or_else(|| date.and_hms_opt(9, 0, 0).unwrap());
-        let candidate = hk.from_local_datetime(&naive).single().unwrap();
-        if date.weekday().num_days_from_monday() == target_day && candidate > local {
-            return bson::DateTime::from_millis(
-                candidate.with_timezone(&chrono::Utc).timestamp_millis(),
-            );
+fn next_cron(profile: &Value, now: chrono::DateTime<chrono::Utc>) -> Option<bson::DateTime> {
+    let expression = crate::cron_schedule::expression(profile);
+    match crate::cron_schedule::next_after(&expression, now) {
+        Ok(next) => Some(bson::DateTime::from_millis(next.timestamp_millis())),
+        Err(error) => {
+            tracing::error!(cron_expression = %expression, %error, "Invalid scheduled report cron expression");
+            None
         }
-        date += chrono::Duration::days(1)
     }
-    bson::DateTime::from_millis((now + chrono::Duration::days(7)).timestamp_millis())
 }
 async fn heartbeat(state: &AppState) {
     let _=db::collection(&state.web,"scheduler_health").update_one(doc!{"_id":"email_scheduler"},doc!{"$set":{"last_tick_at":bson::DateTime::now(),"hostname":std::env::var("HOSTNAME").unwrap_or_default(),"pid":std::process::id() as i64,"updated_at":bson::DateTime::now()}}).upsert(true).await;
@@ -170,7 +149,9 @@ async fn scheduled_report(state: &AppState, sub: &Document) {
         .and_then(|v| v.get("next_run_at"))
         .and_then(bson_time);
     if next.is_none() {
-        let next = next_weekly(profile, now);
+        let Some(next) = next_cron(profile, now) else {
+            return;
+        };
         let _ = db::collection(&state.web, "sub_account")
             .update_one(
                 doc! {"_id":id},
@@ -182,7 +163,9 @@ async fn scheduled_report(state: &AppState, sub: &Document) {
     if next.is_some_and(|v| v > now) {
         return;
     }
-    let next = next_weekly(profile, now);
+    let Some(next) = next_cron(profile, now) else {
+        return;
+    };
     let _=db::collection(&state.web,"sub_account").update_one(doc!{"_id":id},doc!{"$set":{"report_profile.next_run_at":next,"report_profile.last_run_at":bson::DateTime::now()}}).await;
     let mode = profile["generation_mode"].as_str().unwrap_or("template");
     let matches = match subscriptions::match_profile(state, profile, 500).await {
