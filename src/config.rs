@@ -15,11 +15,7 @@ pub struct Config {
     pub secret: String,
     pub bootstrap_username: String,
     pub bootstrap_password: String,
-    pub zimbra_base_url: String,
-    pub zimbra_folder_name: String,
-    pub zimbra_timeout_seconds: u64,
-    pub zimbra_verify_tls: bool,
-    pub zimbra_credential_key: String,
+    pub cookie_secure: bool,
     pub account_collection: String,
     pub newsletter_root: PathBuf,
     pub port: u16,
@@ -50,20 +46,6 @@ impl Config {
                         .map(str::to_owned)
                 })
                 .unwrap_or_else(|| default.to_owned())
-        };
-        let get_u64 = |key: &str, pointer: &str, default: u64| -> u64 {
-            env::var(key)
-                .ok()
-                .or_else(|| {
-                    file.pointer(pointer).and_then(|v| {
-                        v.as_u64()
-                            .map(|n| n.to_string())
-                            .or_else(|| v.as_str().map(str::to_owned))
-                    })
-                })
-                .and_then(|v| v.parse().ok())
-                .filter(|v: &u64| *v > 0)
-                .unwrap_or(default)
         };
         let get_bool = |key: &str, pointer: &str, default: bool| -> bool {
             env::var(key)
@@ -109,19 +91,7 @@ impl Config {
                 "admin",
             ),
             bootstrap_password: env::var("WEB_AUTH_BOOTSTRAP_PASSWORD").unwrap_or_default(),
-            zimbra_base_url: get(
-                "ZIMBRA_BASE_URL",
-                "/zimbra/base_url",
-                "https://zmailbox.citictel-cpc.com",
-            ),
-            zimbra_folder_name: get("ZIMBRA_FOLDER_NAME", "/zimbra/folder_name", "news"),
-            zimbra_timeout_seconds: get_u64(
-                "ZIMBRA_TIMEOUT_SECONDS",
-                "/zimbra/timeout_seconds",
-                10,
-            ),
-            zimbra_verify_tls: get_bool("ZIMBRA_VERIFY_TLS", "/zimbra/verify_tls", true),
-            zimbra_credential_key: env::var("ZIMBRA_CREDENTIAL_KEY").unwrap_or_default(),
+            cookie_secure: get_bool("WEB_AUTH_COOKIE_SECURE", "/web_auth/cookie_secure", true),
             account_collection: get("ACCOUNT_COLLECTION", "/account_collection", "accounts"),
             newsletter_root,
             port: env::var("PORT")

@@ -1,4 +1,6 @@
-# Deploy the report preview fix
+# Report preview fix — historical reference
+
+The deployment steps below describe the earlier report-only release. For this local-RBAC branch, use [DEPLOY_LOCAL_RBAC_100.80.2.110.md](DEPLOY_LOCAL_RBAC_100.80.2.110.md), including its separate candidate database, account recovery and HTTPS checks. Do not use the old in-place transfer procedure to deploy the authentication changes.
 
 These steps deploy the fix to the server at `100.114.50.103:9100`.
 Build on the server (or with the project's Dockerfile). The binary built on this

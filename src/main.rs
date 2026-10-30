@@ -3,17 +3,18 @@ mod config;
 mod cron_schedule;
 mod db;
 mod mail;
+mod management;
 mod newsletter_normalizer;
 mod newsletter_statistics;
 mod newsletters;
 mod operations;
+mod rbac;
 mod reports;
 mod reviews;
 mod scheduler;
 mod subscriptions;
 mod vendor_matcher;
 mod view;
-mod zimbra;
 
 use axum::{
     Router,
@@ -82,34 +83,19 @@ impl ReqCtx {
     pub fn is_api(&self) -> bool {
         self.path.starts_with("/api/")
     }
-    pub fn is_admin(&self, state: &AppState) -> bool {
-        self.user
-            .as_ref()
-            .is_some_and(|user| auth::is_admin(user, &state.cfg))
+    pub fn can(&self, permission: &str) -> bool {
+        rbac::allowed(self, permission)
     }
-    pub fn is_top_admin(&self, state: &AppState) -> bool {
-        self.user
-            .as_ref()
-            .is_some_and(|user| auth::is_top_admin(user, &state.cfg))
-    }
-    pub fn is_organization_admin(&self, state: &AppState) -> bool {
-        self.user
-            .as_ref()
-            .is_some_and(|user| auth::is_organization_admin(user, &state.cfg))
+    pub fn is_superadmin(&self) -> bool {
+        self.user.as_ref().is_some_and(rbac::is_superadmin)
     }
     pub fn user_id(&self) -> Option<mongodb::bson::oid::ObjectId> {
         self.user
             .as_ref()
             .and_then(|user| user.get_object_id("_id").ok())
     }
-    pub fn owner_filter(&self, state: &AppState) -> mongodb::bson::Document {
-        if self.is_top_admin(state) {
-            mongodb::bson::doc! {}
-        } else if let Some(id) = self.user_id() {
-            mongodb::bson::doc! {"managed_by_user_id": id}
-        } else {
-            mongodb::bson::doc! {"_id": mongodb::bson::Bson::Null}
-        }
+    pub fn owner_filter(&self, _state: &AppState) -> mongodb::bson::Document {
+        rbac::scope(self.user.as_ref())
     }
 }
 
@@ -146,7 +132,7 @@ fn request_context(ctx: &ReqCtx) -> Value {
     })
 }
 
-fn page_context(ctx: &ReqCtx, state: &AppState, extras: Value) -> Value {
+fn page_context(ctx: &ReqCtx, _state: &AppState, extras: Value) -> Value {
     // This branch serves the portal in English. Ignore any legacy language
     // cookie so an existing browser session cannot switch the interface back
     // to Chinese.
@@ -155,9 +141,8 @@ fn page_context(ctx: &ReqCtx, state: &AppState, extras: Value) -> Value {
         "locale": locale, "html_lang": "en",
         "i18n_catalog": serde_json::from_str::<Value>(include_str!("../config/translations.json")).unwrap_or(json!({})).get(&locale).cloned().unwrap_or(json!({})),
         "current_user": ctx.user.as_ref().map(auth::public_user),
-        "is_admin": ctx.is_admin(state), "is_top_admin": ctx.is_top_admin(state),
-        "is_organization_admin": ctx.is_organization_admin(state),
-        "config": {"ZIMBRA_ENABLED": true},
+        "permissions": rbac::CATALOG.iter().map(|p| (p.id, ctx.can(p.id))).collect::<std::collections::BTreeMap<_,_>>(),
+        "is_superadmin": ctx.is_superadmin(),
         "request": request_context(ctx)
     });
     if let (Some(dst), Some(src)) = (base.as_object_mut(), extras.as_object()) {
@@ -173,70 +158,102 @@ pub fn render(state: &AppState, ctx: &ReqCtx, name: &str, extras: Value) -> Resp
 }
 
 fn guard(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
-    let public = matches!(
-        ctx.path.as_str(),
-        "/login"
-            | "/login/2fa"
-            | "/login/2fa/cancel"
-            | "/login/local"
-            | "/logout"
-            | "/en"
-            | "/zh"
-            | "/cn"
-    ) || ctx.path.starts_with("/locale/")
-        || ctx.path.starts_with("/image/");
-    if public {
+    if !matches!(ctx.method, Method::GET | Method::HEAD | Method::OPTIONS) {
+        let origin = ctx.headers.get("origin").and_then(|v| v.to_str().ok());
+        let host = ctx.headers.get("host").and_then(|v| v.to_str().ok());
+        let expected = format!(
+            "{}://{}",
+            if state.cfg.cookie_secure {
+                "https"
+            } else {
+                "http"
+            },
+            host.unwrap_or("")
+        );
+        if origin.is_some_and(|value| value != expected)
+            || ctx
+                .headers
+                .get("sec-fetch-site")
+                .is_some_and(|v| v == "cross-site")
+        {
+            return Some(view::error(
+                StatusCode::FORBIDDEN,
+                "Same-origin request required.",
+            ));
+        }
+        if ctx.is_api() && !ctx.body.is_empty() {
+            let content = ctx
+                .headers
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            let upload = matches!(
+                ctx.path.as_str(),
+                "/api/reports"
+                    | "/api/subscriptions/vendor-product-import"
+                    | "/api/reviews/vendor-product-import"
+            );
+            if !(content.starts_with("application/json")
+                || upload && content.starts_with("multipart/form-data;"))
+            {
+                return Some(view::error(
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    "Use application/json or a supported upload.",
+                ));
+            }
+        }
+    }
+    if matches!(
+        (ctx.method.as_str(), ctx.path.as_str()),
+        ("GET" | "POST", "/login")
+    ) || (ctx.method == Method::GET && ctx.path.starts_with("/image/"))
+    {
         return None;
     }
     if ctx.user.is_none() {
         return Some(if ctx.is_api() {
             view::error(StatusCode::UNAUTHORIZED, "Authentication required")
         } else {
-            let target = format!("/login?next={}", urlencoding::encode(&ctx.path));
-            view::redirect(&target)
+            view::redirect(&format!("/login?next={}", urlencoding::encode(&ctx.path)))
         });
+    }
+    if matches!(
+        (ctx.method.as_str(), ctx.path.as_str()),
+        ("POST", "/logout") | ("GET", "/settings") | ("POST", "/api/auth/password")
+    ) {
+        return None;
     }
     if ctx
         .user
         .as_ref()
         .is_some_and(|u| db::bool_field(u, "must_change_password"))
-        && !matches!(
-            ctx.path.as_str(),
-            "/settings" | "/api/auth/password" | "/logout"
-        )
     {
         return Some(if ctx.is_api() {
-            view::json_response(
+            view::error(
                 StatusCode::FORBIDDEN,
-                json!({"error":"Password change required.","code":"password_change_required"}),
+                "Change your temporary password first.",
             )
         } else {
             view::redirect("/settings")
         });
     }
-    let admin = ctx.path.starts_with("/api/reviews")
-        || ctx.path.starts_with("/reviews")
-        || ctx.path.starts_with("/api/reports")
-        || ctx.path.starts_with("/reports")
-        || ctx.path.starts_with("/api/operations")
-        || ctx.path.starts_with("/generated-newsletters/");
-    let top = matches!(
-        ctx.path.as_str(),
-        "/admin/sub-admins" | "/operations" | "/set-news"
-    ) || (ctx.path.starts_with("/api/admin/")
-        && !ctx.path.starts_with("/api/admin/account-users"))
-        || ctx.path.starts_with("/api/reports/evidence-cache/")
-        || ctx.path.starts_with("/api/reports/search-cache/")
-        || ctx.path.starts_with("/api/operations/newsletter-")
-        || ctx.path == "/api/operations/source-list";
-    if top && !ctx.is_top_admin(state) || admin && !ctx.is_admin(state) {
-        return Some(if ctx.is_api() {
-            view::error(StatusCode::FORBIDDEN, "Administrator access required.")
+    let allowed = match (ctx.method.as_str(), ctx.path.as_str()) {
+        ("GET", "/") => true,
+        ("PUT", "/api/auth/profile") => true,
+        ("GET", "/management") => ["users.view", "roles.view", "organizations.view"]
+            .iter()
+            .any(|p| ctx.can(p)),
+        _ => rbac::required(&ctx.method, &ctx.path).is_some_and(|p| ctx.can(p)),
+    };
+    if allowed {
+        None
+    } else {
+        Some(if ctx.is_api() {
+            view::error(StatusCode::FORBIDDEN, "Permission denied.")
         } else {
             render(state, ctx, "errors/403.html", json!({})).with_status(StatusCode::FORBIDDEN)
-        });
+        })
     }
-    None
 }
 
 trait ResponseStatus {
@@ -249,7 +266,15 @@ impl ResponseStatus for Response {
     }
 }
 
-async fn dispatch(State(state): State<AppState>, request: Request<Body>) -> Response {
+async fn dispatch(state: State<AppState>, request: Request<Body>) -> Response {
+    let mut response = dispatch_request(state, request).await;
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        "no-store".parse().unwrap(),
+    );
+    response
+}
+async fn dispatch_request(State(state): State<AppState>, request: Request<Body>) -> Response {
     let (parts, body) = request.into_parts();
     let path = parts.uri.path().to_owned();
     let query =
@@ -276,9 +301,25 @@ async fn dispatch(State(state): State<AppState>, request: Request<Body>) -> Resp
         return response;
     }
     if ctx.path == "/" {
-        return view::redirect("/subscriptions");
+        return view::redirect(if ctx.can("subscriptions.view") {
+            "/subscriptions"
+        } else if ["users.view", "roles.view", "organizations.view"]
+            .iter()
+            .any(|p| ctx.can(p))
+        {
+            "/management"
+        } else if ctx.can("reviews.view") {
+            "/reviews"
+        } else if ctx.can("reports.view") {
+            "/reports"
+        } else {
+            "/settings"
+        });
     }
     if let Some(response) = auth::handle(&state, &ctx).await {
+        return response;
+    }
+    if let Some(response) = management::handle(&state, &ctx).await {
         return response;
     }
     if let Some(response) = subscriptions::handle(&state, &ctx).await {
@@ -294,25 +335,6 @@ async fn dispatch(State(state): State<AppState>, request: Request<Body>) -> Resp
         return response;
     }
     if let Some(response) = newsletters::handle(&state, &ctx).await {
-        return response;
-    }
-    if ctx.path.strip_prefix("/locale/").is_some() {
-        // Keep the old endpoint working for bookmarks, but always select the
-        // only supported portal language.
-        let locale = "en";
-        let next = ctx.arg("next");
-        let next = if next.starts_with('/') && !next.starts_with("//") {
-            next
-        } else {
-            "/subscriptions".into()
-        };
-        let mut response = view::redirect(&next);
-        response.headers_mut().insert(
-            axum::http::header::SET_COOKIE,
-            format!("lang={locale}; Max-Age=31536000; Path=/; SameSite=Lax")
-                .parse()
-                .unwrap(),
-        );
         return response;
     }
     if let Some(filename) = ctx.path.strip_prefix("/image/") {
@@ -342,6 +364,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|_| "webserver_rust=info,tower_http=info".into()),
         )
         .init();
+    if env::args().nth(1).as_deref() == Some("--local-password-hash") {
+        let mut password = String::new();
+        std::io::stdin().read_line(&mut password)?;
+        while password.ends_with(['\n', '\r']) {
+            password.pop();
+        }
+        println!("{}", auth::password_hash(password).await?);
+        return Ok(());
+    }
     let root = env::var("WEBSERVER_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
@@ -355,9 +386,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg,
     };
     auth::ensure_bootstrap(&state).await?;
-    if let Err(error) = subscriptions::ensure_zimbra_subscriptions(&state).await {
-        tracing::warn!(%error, "Unable to backfill Zimbra subscriptions");
-    }
     if env::var("RUST_SCHEDULER_ENABLED")
         .ok()
         .is_some_and(|value| matches!(value.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
@@ -376,64 +404,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::{collections::HashMap, path::Path};
+mod rbac_tests;
 
-    #[test]
-    fn zimbra_login_renders_query_next() {
-        let ctx = ReqCtx {
-            method: Method::GET,
-            path: "/login".into(),
-            query: vec![("next".into(), "/subscriptions".into())],
-            headers: HeaderMap::new(),
-            body: vec![],
-            json: Value::Null,
-            form: HashMap::new(),
-            user: None,
-        };
-        let request = request_context(&ctx);
-        assert_eq!(request["args"]["next"], "/subscriptions");
-
-        let env = view::environment(Path::new(env!("CARGO_MANIFEST_DIR")));
-        let html = env
-            .get_template("auth/login.html")
-            .unwrap()
-            .render(json!({
-                "locale": "en",
-                "html_lang": "en",
-                "i18n_catalog": {},
-                "config": {"ZIMBRA_ENABLED": true},
-                "request": request,
-                "local_login": false,
-            }))
-            .unwrap();
-        assert!(html.contains("name=\"next\""));
-        assert!(html.contains("subscriptions"));
-    }
-
-    #[test]
-    fn zimbra_two_factor_page_contains_only_the_code_form() {
-        let env = view::environment(Path::new(env!("CARGO_MANIFEST_DIR")));
-        let html = env
-            .get_template("auth/login.html")
-            .unwrap()
-            .render(json!({
-                "locale": "en",
-                "html_lang": "en",
-                "i18n_catalog": {},
-                "config": {"ZIMBRA_ENABLED": true},
-                "request": {"args": {}},
-                "local_login": false,
-                "two_factor_required": true,
-                "masked_email": "s***@example.com",
-            }))
-            .unwrap();
-        assert!(html.contains("action=\"/login/2fa\""));
-        assert!(html.contains("name=\"two_factor_code\""));
-        assert!(html.contains("formaction=\"/login/2fa/cancel\""));
-        assert!(!html.contains("name=\"password\""));
-        assert!(!html.contains("sunshine.wong@example.com"));
-        assert!(!html.contains("temporary-token"));
-    }
-}
+#[cfg(test)]
+mod rbac_integration_tests;

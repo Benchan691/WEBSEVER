@@ -235,8 +235,8 @@
     'exportUrl': url_for('review.export_review_documents'),
     'searchUrl': url_for('review.search_review_documents'),
     'autoSelectUrl': url_for('review.auto_select_review_documents'),
-    'vendorProductImportUrl': url_for('subscription.import_vendor_products'),
-    'vendorProductTemplateUrl': url_for('subscription.vendor_product_template'),
+    'vendorProductImportUrl': url_for('review.import_vendor_products'),
+    'vendorProductTemplateUrl': url_for('review.vendor_product_template'),
 }|tojson }}</script>
 <script src="{{ url_for('static', filename='js/reviews/email-preview.js', v='20260921-2') }}"></script>
 <script src="{{ url_for('static', filename='js/reviews/index.js', v='20260922-1') }}"></script>

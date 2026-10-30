@@ -300,13 +300,12 @@ pub fn validate(filter: &Value) -> Result<(), String> {
         if !row.is_object() {
             return Err(format!("Row {} must be an object.", i + 2));
         }
-        if let Some(number) = row.get("row_number") {
-            if !number
+        if let Some(number) = row.get("row_number")
+            && !number
                 .as_u64()
                 .is_some_and(|n| (2..=1_048_577).contains(&n))
-            {
-                return Err(format!("Row {} row_number is invalid.", i + 2));
-            }
+        {
+            return Err(format!("Row {} row_number is invalid.", i + 2));
         }
         for field in ["vendor", "product"] {
             let s = row[field]

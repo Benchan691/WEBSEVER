@@ -1,0 +1,48 @@
+{% extends 'layouts/base.html' %}
+{% block title %}Accounts, roles and organizations{% endblock %}
+{% block content %}
+<div class="container">
+  <h2>Accounts, roles and organizations</h2>
+  <p class="text-muted">Permissions apply within one organization. The reserved superadmin alone manages organizations and appoints organization administrators.</p>
+  <div id="management-message" class="alert d-none" role="alert"></div>
+  <div id="temporary-credential" class="alert alert-warning d-none" role="status">
+    <strong>Temporary local password — shown once</strong><pre id="temporary-password" class="my-2"></pre>
+    <p>Expires in 24 hours. Deliver securely; the user must choose a new local password at first login. Do not reuse an external service password.</p>
+    <button id="dismiss-credential" class="btn btn-sm btn-outline-dark" type="button">Clear password</button>
+  </div>
+  <div class="card card-body mb-4">
+    <label class="form-label" for="management-organization">Organization</label>
+    <select id="management-organization" class="form-select"></select>
+    <small id="organization-id" class="text-muted mt-2"></small>
+    {% if permissions['organizations.manage'] %}
+    <form id="organization-form" class="d-flex gap-2 mt-3"><input id="organization-name" aria-label="Organization name" class="form-control" maxlength="100" placeholder="New organization name" required><button class="btn btn-primary text-nowrap">Create organization</button></form>
+    <div class="d-flex gap-2 mt-2"><button id="rename-organization" class="btn btn-outline-secondary" type="button">Rename selected</button><button id="toggle-organization" class="btn btn-outline-danger" type="button">Disable / enable selected</button></div>
+    {% endif %}
+  </div>
+  {% if permissions['users.view'] or permissions['users.create'] %}
+  <section class="card card-body mb-4"><h3 class="h5">Local accounts</h3>
+    {% if permissions['users.create'] %}
+    <form id="user-form" class="row g-2 mb-3"><div class="col-md-3"><label for="new-username" class="form-label">Username</label><input id="new-username" class="form-control" maxlength="100" required autocomplete="off"></div><div class="col-md-3"><label for="new-email" class="form-label">Email (optional)</label><input id="new-email" type="email" class="form-control"></div><div class="col-md-4"><label for="new-user-role" class="form-label">Custom role</label><select id="new-user-role" class="form-select"></select></div><div class="col-md-2 d-flex align-items-end"><button class="btn btn-primary">Provision account</button></div></form>
+    {% endif %}
+    <div class="table-responsive"><table class="table align-middle"><thead><tr><th>Username</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead><tbody id="user-rows"></tbody></table></div>
+    <small class="text-muted">Your own account and the break-glass account cannot be changed here. Retiring an account preserves subscriptions and history.</small>
+  </section>
+  {% endif %}
+  {% if permissions['roles.view'] or permissions['roles.create'] %}
+  <section class="card card-body mb-4"><h3 class="h5">Roles</h3>
+    <div class="table-responsive"><table class="table"><thead><tr><th>Name</th><th>Type</th><th>Actions</th></tr></thead><tbody id="role-rows"></tbody></table></div>
+    {% if permissions['roles.create'] or permissions['roles.edit'] %}
+    <form id="role-form"><h4 id="role-form-title" class="h6">Create custom role</h4><label for="role-name" class="form-label">Role name</label><input id="role-name" class="form-control mb-3" maxlength="100" required>
+      <p class="small text-muted">Select only permissions you currently hold. Global permissions are reserved for superadmin. Editing your own role or a delegation ancestor is forbidden.</p>
+      <div id="permission-checkboxes" class="row g-3 mb-3"></div>
+      <button class="btn btn-primary">Save role</button><button id="cancel-role-edit" type="button" class="btn btn-outline-secondary ms-2">New role / cancel edit</button>
+    </form>
+    {% endif %}
+  </section>
+  {% endif %}
+</div>
+{% endblock %}
+{% block script %}
+<script id="management-config" type="application/json">{{ {'user':current_user,'permissions':permissions,'catalog':permission_catalog,'superadmin':is_superadmin}|tojson }}</script>
+<script src="{{ url_for('static', filename='js/auth/management.js', v='local-rbac-1') }}"></script>
+{% endblock %}

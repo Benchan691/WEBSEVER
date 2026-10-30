@@ -1,4 +1,6 @@
 (function () {
+    const organizationSelect=document.getElementById('report-organization-id');
+    if(organizationSelect) fetch('/api/organizations').then(response=>response.json()).then(body=>(body.data||[]).filter(org=>!org.disabled).forEach(org=>{const option=document.createElement('option');option.value=org.id;option.textContent=org.name;organizationSelect.append(option);}));
     const {
         jobsUrl,
         purgeEvidenceCacheUrl,
@@ -408,6 +410,7 @@
         if (file) {
             const form = new FormData();
             form.append('generation_mode', mode);
+            const org = document.getElementById('report-organization-id'); if (org) form.append('organization_id',org.value);
             form.append('json_file', file);
             if (mode === 'enriched_weekly' && searchPrompt.trim()) {
                 form.append('search_prompt', searchPrompt.trim());
@@ -418,6 +421,7 @@
                 generation_mode: mode,
                 selections: selected
             };
+            const org = document.getElementById('report-organization-id'); if (org) payload.organization_id=org.value;
             if (mode === 'enriched_weekly' && searchPrompt.trim()) {
                 payload.search_prompt = searchPrompt.trim();
             }

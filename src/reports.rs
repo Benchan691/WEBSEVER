@@ -1,4 +1,4 @@
-use crate::{AppState, ReqCtx, db, render, reviews, view};
+use crate::{AppState, ReqCtx, db, rbac, render, reviews, view};
 use axum::{
     body::Bytes,
     http::{Method, StatusCode, header},
@@ -33,12 +33,8 @@ fn job_public(document: &Document) -> Value {
     }
     job
 }
-fn job_filter(state: &AppState, ctx: &ReqCtx, id: ObjectId) -> Document {
-    if ctx.is_top_admin(state) {
-        doc! {"_id":id}
-    } else {
-        doc! {"_id":id,"managed_by_user_id":ctx.user_id()}
-    }
+fn job_filter(_state: &AppState, ctx: &ReqCtx, id: ObjectId) -> Document {
+    doc! {"$and":[rbac::scope(ctx.user.as_ref()),{"_id":id}]}
 }
 async fn job(state: &AppState, ctx: &ReqCtx, id: &str) -> Option<Document> {
     let id = db::object_id(id)?;
@@ -82,17 +78,16 @@ async fn fields(ctx: &ReqCtx) -> Result<(Value, Option<Vec<u8>>), String> {
 fn first_text(value: &Value, fields: &[&str]) -> String {
     for key in fields {
         if let Some(v) = value.get(*key) {
-            if let Some(s) = v.as_str() {
-                if !s.trim().is_empty() {
-                    return s.trim().to_owned();
-                }
+            if let Some(s) = v.as_str()
+                && !s.trim().is_empty()
+            {
+                return s.trim().to_owned();
             }
-            if let Some(a) = v.as_array() {
-                if let Some(s) = a.iter().find_map(Value::as_str) {
-                    if !s.trim().is_empty() {
-                        return s.trim().to_owned();
-                    }
-                }
+            if let Some(a) = v.as_array()
+                && let Some(s) = a.iter().find_map(Value::as_str)
+                && !s.trim().is_empty()
+            {
+                return s.trim().to_owned();
             }
         }
     }
@@ -511,7 +506,7 @@ async fn report_html(
         let translation = db::find_one(
             &state.web,
             "report_jobs",
-            doc! {"translated_from_job_id":id,"report_language":&language,"status":"completed"},
+            doc! {"translated_from_job_id":id,"organization_id":document.get("organization_id").cloned().unwrap_or(bson::Bson::Null),"report_language":&language,"status":"completed"},
         )
         .await
         .ok()
@@ -584,6 +579,44 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             Ok(v) => v,
             Err(e) => return Some(view::error(StatusCode::BAD_REQUEST, &e)),
         };
+        let actor = ctx.user.as_ref().unwrap();
+        let org = if ctx.is_superadmin() {
+            data.get("organization_id")
+                .and_then(Value::as_str)
+                .and_then(db::object_id)
+        } else {
+            rbac::organization(actor)
+        };
+        let Some(org) = org.filter(|id| rbac::within_scope(actor, *id)) else {
+            return Some(view::error(
+                StatusCode::FORBIDDEN,
+                "Select an organization in your permitted scope.",
+            ));
+        };
+        if data
+            .get("organization_id")
+            .is_some_and(|v| v.as_str().and_then(db::object_id) != Some(org))
+        {
+            return Some(view::error(
+                StatusCode::FORBIDDEN,
+                "Organization scope mismatch.",
+            ));
+        }
+        if db::find_one(
+            &state.web,
+            "organizations",
+            doc! {"_id":org,"disabled":{"$ne":true}},
+        )
+        .await
+        .ok()
+        .flatten()
+        .is_none()
+        {
+            return Some(view::error(
+                StatusCode::FORBIDDEN,
+                "Active organization not found.",
+            ));
+        }
         let mode = first_text(&data, &["generation_mode"]);
         let mode = if mode.is_empty() {
             if upload.is_some() {
@@ -693,6 +726,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         if let Some(owner) = ctx.user_id() {
             document.insert("managed_by_user_id", owner);
         }
+        document.insert("organization_id", org);
         let inserted = match db::collection(&state.web, "report_jobs")
             .insert_one(document)
             .await
@@ -823,6 +857,14 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             if let Ok(owner) = document.get_object_id("managed_by_user_id") {
                 translation.insert("managed_by_user_id", owner);
             }
+            if let Ok(org) = document.get_object_id("organization_id") {
+                translation.insert("organization_id", org);
+            } else if !ctx.is_superadmin() {
+                return Some(view::error(
+                    StatusCode::FORBIDDEN,
+                    "Legacy report requires explicit migration.",
+                ));
+            }
             let inserted = match db::collection(&state.web, "report_jobs")
                 .insert_one(translation)
                 .await
@@ -849,9 +891,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         }
     }
     if let Some(rest) = ctx.path.strip_prefix("/reports/") {
-        let Some((id, action)) = rest.split_once('/') else {
-            return None;
-        };
+        let (id, action) = rest.split_once('/')?;
         if matches!(action, "preview" | "download") && ctx.method == Method::GET {
             let Some(document) = job(state, ctx, id).await else {
                 return Some(view::error(

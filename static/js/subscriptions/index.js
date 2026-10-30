@@ -6,22 +6,19 @@
         reviewsUrl,
         vendorProductImportUrl,
         vendorProductTemplateUrl,
-        isAdmin,
-        accountHubEnabled,
-        organizationDashboard,
-        selfManagement,
         currentUsername,
         currentEmail,
-        currentAccountHubEmail,
-        accountHubUser,
         currentOrganization,
+        currentOrganizationId,
+        isSuperadmin,
     } = JSON.parse(document.getElementById('page-config').textContent);
+    const can = id => Boolean(window.PORTAL_PERMISSIONS[id]);
     const modalElement = document.getElementById('subscription-modal');
     const modal = new bootstrap.Modal(modalElement);
     const newsletterCollections = new CollectionPicker('newsletter', {emptySelectionMeansAll: false});
     const rows = document.getElementById('rows');
     const message = document.getElementById('message');
-    let collections = [], subscriptions = [], editingId = null, recipientLocked = false, editorLocalSubscription = false;
+    let collections = [], subscriptions = [], editingId = null, recipientLocked = false;
     let editorDirty = false, saving = false;
     let newsletterVendorProductFilter = emptyVendorProductFilter();
     let reportVendorProductFilter = emptyVendorProductFilter();
@@ -143,7 +140,7 @@
         const list = recipientList(kind);
         list.replaceChildren();
         const values = Array.isArray(emails) && emails.length ? emails : [''];
-        const canEditRecipients = kind !== 'to' || isAdmin || editorLocalSubscription || accountHubUser;
+        const canEditRecipients = can('subscriptions.create') || can('subscriptions.edit');
         values.forEach(function (email) {
             const row = document.createElement('div');
             row.className = 'input-group';
@@ -642,36 +639,18 @@
     function openEditor(subscription) {
         editorDirty = false;
         saving = false;
-        const defaultEmail = accountHubUser ? currentAccountHubEmail : currentEmail;
-        if (!subscription && accountHubUser) {
-            subscription = {
-                local_subscription: true,
-                username: '',
-                email: '',
-                emails: [''],
-                organization: currentOrganization || ''
-            };
-        } else if (!subscription && selfManagement) {
-            subscription = {
-                username: currentUsername || '',
-                email: defaultEmail || '',
-                emails: defaultEmail ? [defaultEmail] : [],
-                organization: currentOrganization || ''
-            };
-        }
+        if (!subscription) subscription = {username:currentUsername || '',email:currentEmail || '',emails:currentEmail ? [currentEmail] : [''],organization:currentOrganization || '',organization_id:currentOrganizationId || ''};
         vendorProductImportRequestId += 1;
         setVendorProductImportBusy(false);
         showModalMessage('', '');
         editingId = subscription && subscription.id ? subscription.id : null;
-        editorLocalSubscription = Boolean(subscription && subscription.local_subscription)
-            || (isAdmin && !subscription);
         document.getElementById('modal-title').textContent = editingId
             ? t('Edit Subscription')
             : t('Add Subscription');
         const username = document.getElementById('username');
         username.value = subscription ? (subscription.username || '') : '';
-        username.readOnly = !(isAdmin || editorLocalSubscription);
-        recipientLocked = !editorLocalSubscription && !isAdmin && !accountHubUser;
+        username.readOnly = Boolean(editingId);
+        recipientLocked = false;
         renderRecipientInputs(subscription ? (subscription.emails || (subscription.email ? [subscription.email] : [''])) : [''], recipientLocked);
         renderRecipientInputs(subscription && subscription.cc || [], false, 'cc');
         renderRecipientInputs(subscription && subscription.bcc || [], false, 'bcc');
@@ -686,9 +665,12 @@
         if (addRecipientButton) addRecipientButton.classList.toggle('d-none', recipientLocked);
         const organization = document.getElementById('organization');
         if (organization) {
-            organization.value = subscription ? (subscription.organization || currentOrganization || (isAdmin ? 'local' : '')) : (currentOrganization || (isAdmin ? 'local' : ''));
-            organization.readOnly = organizationDashboard || (selfManagement && !accountHubUser);
+            organization.value = subscription.organization || currentOrganization || '';
+            organization.readOnly = true;
+
         }
+        const orgSelect = document.getElementById('subscription-organization-id');
+        if (orgSelect) { orgSelect.value = subscription.organization_id || ''; orgSelect.disabled = Boolean(editingId); }
         const newsletter = subscription && subscription.newsletter_profile ? subscription.newsletter_profile : {enabled:false,filters:{}};
         const report = subscription && subscription.report_profile ? subscription.report_profile : {enabled:false,filters:{},generation_mode:'template',report_language:'en'};
         document.getElementById('newsletter-enabled').checked = newsletter.enabled; setFilters('newsletter', newsletter.filters);
@@ -791,8 +773,9 @@
             }
             const actions = document.createElement('div'); actions.className = 'd-flex flex-wrap gap-1';
             actions.innerHTML = '<button class="btn btn-outline-primary btn-sm edit" type="button">' + t('Edit') + '</button>';
+            actions.querySelector('.edit').disabled = !can('subscriptions.edit');
             actions.querySelector('.edit').onclick = function () { openEditor(item); };
-            if (selfManagement && !item.auto_provisioned) {
+            if (can('subscriptions.delete')) {
                 const remove = document.createElement('button');
                 remove.className = 'btn btn-outline-danger btn-sm';
                 remove.type = 'button';
@@ -815,105 +798,7 @@
             tr.children[3].append(actions); rows.append(tr);
         });
     }
-    function profileStatus(profile, kind) {
-        if (!profile || !profile.enabled) return t('Disabled');
-        if (kind === 'newsletter') {
-            const filters = profile.filters || {};
-            const collections = Array.isArray(filters.collections) ? filters.collections : [];
-            return collections.length
-                ? t('Enabled · {count} source(s): {sources}', {count: collections.length, sources: collections.join(', ')})
-                : filters.collections_mode !== 'selected'
-                    ? t('Enabled · all source(s)')
-                    : t('Enabled · no sources');
-        }
-        return profile.schedule_enabled
-            ? t('Enabled · cron {expression} HKT', {expression: profile.cron_expression || '0 9 * * 1'})
-            : t('Enabled');
-    }
-    function renderOrganizationRows() {
-        rows.replaceChildren(); document.getElementById('empty').classList.toggle('d-none', subscriptions.length !== 0);
-        subscriptions.forEach(function (item) {
-            const tr = document.createElement('tr');
-            tr.innerHTML = '<td><strong></strong><div class="text-muted small email"></div><div class="text-muted small role"></div></td><td></td><td></td><td></td><td></td>';
-            const subscription = item.subscription && item.subscription.id ? item.subscription : null;
-            const localSubscription = item.local_subscription === true;
-            tr.children[0].querySelector('strong').textContent = item.username || t('Unnamed user');
-            const localEmails = subscription && Array.isArray(subscription.emails)
-                ? subscription.emails.filter(Boolean).join(', ')
-                : '';
-            tr.children[0].querySelector('.email').textContent = localEmails
-                || item.zimbra_email || t('Zimbra email unavailable');
-            tr.children[0].querySelector('.role').textContent = localSubscription
-                ? t('Local subscription')
-                : (item.organization_admin ? t('Organization administrator') : t('Organization member'));
-            const status = document.createElement('span');
-            status.className = localSubscription
-                ? 'badge text-bg-info'
-                : (item.disabled ? 'badge text-bg-secondary' : 'badge text-bg-success');
-            status.textContent = localSubscription
-                ? t('Local subscription')
-                : (item.disabled ? t('Disabled') : t('Active'));
-            tr.children[1].append(status);
-            tr.children[2].textContent = subscription ? profileStatus(subscription.newsletter_profile, 'newsletter') : t('No subscription');
-            tr.children[3].textContent = subscription ? profileStatus(subscription.report_profile, 'report') : t('No subscription');
-            const actions = document.createElement('div'); actions.className = 'd-flex flex-wrap gap-1';
-            if (subscription && localSubscription) {
-                const edit = document.createElement('button'); edit.className = 'btn btn-outline-primary btn-sm'; edit.type = 'button'; edit.textContent = t('Edit');
-                edit.onclick = function () {
-                    openEditor(Object.assign({}, subscription, {
-                        local_subscription: true,
-                        recipientLocked: false
-                    }));
-                };
-                const remove = document.createElement('button'); remove.className = 'btn btn-outline-danger btn-sm'; remove.type = 'button'; remove.textContent = t('Delete');
-                remove.onclick = function () {
-                    const username = item.username || subscription.username || '';
-                    if (!window.confirm(t('Delete subscription for {username}?', {username: username}))) return;
-                    remove.disabled = true;
-                    requestJson(apiUrl(subscription.id), {method: 'DELETE'})
-                        .then(function () {
-                            showMessage(t('Subscription deleted.'), 'success');
-                            return load();
-                        })
-                        .catch(function (error) {
-                            remove.disabled = false;
-                            showMessage(error.message, 'danger');
-                        });
-                };
-                actions.append(edit, remove);
-            } else if (subscription) {
-                const edit = document.createElement('button'); edit.className = 'btn btn-outline-primary btn-sm'; edit.type = 'button'; edit.textContent = t('Edit');
-                edit.onclick = function () {
-                    openEditor(Object.assign({}, subscription, {
-                        username: item.username || subscription.username,
-                        email: subscription.email || item.zimbra_email,
-                        emails: subscription.emails && subscription.emails.length
-                            ? subscription.emails
-                            : (subscription.email ? [subscription.email] : (item.zimbra_email ? [item.zimbra_email] : [])),
-                        zimbra_email: item.zimbra_email || subscription.zimbra_email || '',
-                        recipientLocked: true
-                    }));
-                };
-                edit.disabled = !item.zimbra_email;
-                if (edit.disabled) edit.title = t('Zimbra email unavailable');
-                actions.append(edit);
-            } else {
-                const add = document.createElement('button'); add.className = 'btn btn-outline-primary btn-sm'; add.type = 'button'; add.textContent = t('Add Subscription');
-                add.disabled = !item.zimbra_email;
-                if (add.disabled) add.title = t('Zimbra email unavailable');
-                add.onclick = function () { openEditor({username:item.username, email:item.zimbra_email || '', emails:item.zimbra_email ? [item.zimbra_email] : [], organization:item.organization || '', zimbra_email:item.zimbra_email || '', recipientLocked:true}); };
-                actions.append(add);
-            }
-            tr.children[4].append(actions); rows.append(tr);
-        });
-    }
-    function renderRows() {
-        if (organizationDashboard) {
-            renderOrganizationRows();
-        } else {
-            renderSubscriptionRows();
-        }
-    }
+    function renderRows() { renderSubscriptionRows(); }
     function load() { return requestJson(subscriptionsUrl).then(function(body){subscriptions=body.data || [];renderRows();}).catch(function(e){showMessage(e.message,'danger');}).finally(function(){document.getElementById('loading').classList.add('d-none');}); }
     const subscriptionForm = document.getElementById('subscription-form');
     subscriptionForm.addEventListener('input', markEditorDirty);
@@ -1000,7 +885,6 @@
             return;
         }
         showModalMessage('', '');
-        const password = '';
         const organization = document.getElementById('organization');
         const payload = {
             newsletter_profile:{
@@ -1012,14 +896,16 @@
         if (organization) payload.organization = organization.value;
         payload.cc = recipientValues('cc');
         payload.bcc = recipientValues('bcc');
-        if (editorLocalSubscription) payload.local_subscription = true;
-        if (isAdmin || organizationDashboard || (selfManagement && (!editingId || editorLocalSubscription))) {
-            payload.username = document.getElementById('username').value;
-        }
-        if (isAdmin || organizationDashboard || accountHubUser || editorLocalSubscription || (selfManagement && !editingId)) {
-            payload.emails = recipientValues();
-        }
+        payload.username = document.getElementById('username').value;
+        payload.emails = recipientValues();
+        const orgSelect = document.getElementById('subscription-organization-id');
+        if (orgSelect && orgSelect.value) payload.organization_id = orgSelect.value;
         requestJson(editingId ? apiUrl(editingId) : manageSubscriptionsUrl, {method:editingId?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(){editorDirty=false;saving=true;modal.hide();showMessage(t('Subscription saved.'),'success');return load();}).catch(function(e){saving=false;showModalMessage(e.message,'danger');});
     };
+    if (isSuperadmin) requestJson('/api/organizations').then(body => {
+        const select = document.getElementById('subscription-organization-id');
+        const placeholder=document.createElement('option');placeholder.value='';placeholder.textContent='Select organization';select.append(placeholder);
+        body.data.filter(org=>!org.disabled).forEach(org=>{const option=document.createElement('option');option.value=org.id;option.textContent=org.name;select.append(option);});
+    }).catch(error=>showMessage(error.message,'danger'));
     requestJson(reviewsUrl).then(function(body){collections=body.data.map(function(item){return item.name;});return load();}).catch(function(e){showMessage(e.message,'danger');});
 })();

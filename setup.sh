@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 umask 077
 
-TARGET_BRANCH=redesign/unified-news-collection
+TARGET_BRANCH=feature/local-rbac-organization-management
 DEFAULT_REPOSITORY=https://github.com/Benchan691/WEBSEVER.git
 INSTALL_ROOT=/opt/webserver-rust-setup
 BACKUP_ROOT=/var/backups/webserver-rust-setup
@@ -71,7 +71,6 @@ retry_command() {
 # secret values out of shell arguments, command output, and process listings.
 config_helper() {
     python3 - "$@" <<'PY_SETUP'
-import base64
 import copy
 import getpass
 import json
@@ -82,7 +81,6 @@ import secrets
 import socket
 import sys
 import tempfile
-from urllib.parse import urlsplit
 
 ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
 
@@ -167,6 +165,8 @@ def update_env(path, updates):
     lines = []
     for line in text.splitlines():
         match = ASSIGNMENT.match(line)
+        if match and match.group(1).startswith(('ZIMBRA_', 'ACCOUNT_HUB_', 'ACCOUNTHUB_')):
+            continue  # Original settings remain in the installer's private backup.
         if not match or match.group(1) not in updates:
             lines.append(line)
     lines.append('')
@@ -221,25 +221,8 @@ def require_choice(value, choices):
 def require_mongo(value):
     if not value.startswith(('mongodb://', 'mongodb+srv://')) or any(ch.isspace() for ch in value):
         raise ValueError('MongoDB URI must start with mongodb:// or mongodb+srv:// and contain no unescaped whitespace')
-    if not re.split(r'[/?]', value.split('://', 1)[1], 1)[0]:
+    if not re.split(r'[/?]', value.split('://', 1)[1], maxsplit=1)[0]:
         raise ValueError('MongoDB URI requires a host')
-    return value
-
-def require_zimbra_url(value):
-    try:
-        url = urlsplit(value)
-        valid = url.scheme == 'https' and url.hostname and not url.username and not url.password
-        valid = valid and not any(ch.isspace() for ch in value) and (url.port is None or 1 <= url.port <= 65535)
-    except ValueError:
-        valid = False
-    if not valid:
-        raise ValueError('Use a valid HTTPS Zimbra URL without embedded credentials')
-    return value
-
-def require_key(value):
-    value = value.strip()
-    if not valid_key(value):
-        raise ValueError('The encryption key must be base64 encoding of exactly 32 bytes')
     return value
 
 def require_newsletter_path(value, repo):
@@ -253,12 +236,6 @@ def require_newsletter_path(value, repo):
     except OSError:
         raise ValueError('The directory path cannot be resolved') from None
     return path
-
-def valid_key(value):
-    try:
-        return len(base64.b64decode(value, validate=True)) == 32
-    except (ValueError, TypeError):
-        return False
 
 def is_placeholder(value):
     return not value or value in ('change-me', 'replace-with-a-long-random-secret', 'replace-with-a-strong-password')
@@ -293,6 +270,8 @@ def configure(repo, backup, mode, reuse_current=False):
     if not isinstance(defaults, dict) or not isinstance(previous, dict):
         raise ValueError('config/config.json must be a JSON object')
     config = merge_settings(defaults, previous)
+    for obsolete in ('zimbra', 'account_hub', 'accounthub'):
+        config.pop(obsolete, None)
     mongo = validated(lambda: hidden('MongoDB URI (hidden; default mongodb://127.0.0.1:27017/)', env.get('MONGO_URI') or env.get('LOCAL_MONGO_URI', ''), 'mongodb://127.0.0.1:27017/'), require_mongo)
     if mode == 'docker':
         rewritten = docker_mongo_uri(mongo)
@@ -308,11 +287,11 @@ def configure(repo, backup, mode, reuse_current=False):
     if is_placeholder(old_password):
         old_password = ''
     while True:
-        password = hidden('Local administrator password (8+ characters, at most 72 UTF-8 bytes)', old_password)
+        password = hidden('Initial superadmin password (12+ characters, at most 72 UTF-8 bytes; does not reset an existing account)', old_password)
         if password == old_password and old_password and len(password.encode()) <= 72:
             break
-        if len(password) < 8 or len(password.encode()) > 72:
-            print('Choose at least 8 characters and at most 72 UTF-8 bytes.')
+        if len(password) < 12 or len(password.encode()) > 72:
+            print('Choose at least 12 characters and at most 72 UTF-8 bytes.')
         elif hidden('Confirm administrator password') == password:
             break
         else:
@@ -321,30 +300,6 @@ def configure(repo, backup, mode, reuse_current=False):
     if is_placeholder(session_key):
         session_key = secrets.token_hex(32)
         print('Generated a new session signing key.')
-    zimbra = config.get('zimbra', {})
-    zimbra_url = validated(lambda: prompt('Zimbra HTTPS URL', env.get('ZIMBRA_BASE_URL') or zimbra.get('base_url', 'https://zmailbox.citictel-cpc.com')), require_zimbra_url)
-    zimbra_folder = prompt('Zimbra news folder', env.get('ZIMBRA_FOLDER_NAME') or zimbra.get('folder_name', 'news'))
-    encryption_key = env.get('ZIMBRA_CREDENTIAL_KEY', '').strip()
-    if encryption_key:
-        if not valid_key(encryption_key):
-            print('The saved Zimbra encryption key is invalid. Enter the original shared key to preserve encrypted credentials.')
-            encryption_key = validated(lambda: hidden('Correct shared Zimbra encryption key (hidden)'), require_key)
-        else:
-            print('Keeping the existing Zimbra encryption key.')
-    else:
-        print('If another server uses this accounts collection, paste its SAME encryption key.')
-        while True:
-            encryption_key = hidden('Shared Zimbra encryption key (hidden; Enter only for a NEW accounts collection)')
-            if encryption_key == ':cancel':
-                raise EOFError('Configuration cancelled')
-            if not encryption_key:
-                if prompt('Type NEW to generate a key, or Enter to return to key entry') != 'NEW':
-                    print('No key generated. Enter the shared key or confirm NEW for a new collection.')
-                    continue
-                encryption_key = base64.b64encode(secrets.token_bytes(32)).decode()
-            if valid_key(encryption_key):
-                break
-            print('Invalid encryption key. Paste a key that decodes to exactly 32 bytes.')
     port = validated(lambda: prompt('Public HTTP port', env.get('PORT', '9100')), require_port)
     updates = {
         'LOCAL_MONGO_URI': mongo, 'MONGO_URI': mongo,
@@ -352,9 +307,7 @@ def configure(repo, backup, mode, reuse_current=False):
         'VULNERABILITIES_COLLECTION': 'news', 'ACCOUNT_COLLECTION': 'accounts',
         'FLASK_SECRET_KEY': session_key, 'WEB_AUTH_BOOTSTRAP_USERNAME': username,
         'WEB_AUTH_BOOTSTRAP_PASSWORD': password,
-        'ZIMBRA_BASE_URL': zimbra_url.rstrip('/'), 'ZIMBRA_FOLDER_NAME': zimbra_folder,
-        'ZIMBRA_TIMEOUT_SECONDS': env.get('ZIMBRA_TIMEOUT_SECONDS', '10'),
-        'ZIMBRA_VERIFY_TLS': 'true', 'ZIMBRA_CREDENTIAL_KEY': encryption_key,
+        'WEB_AUTH_COOKIE_SECURE': env.get('WEB_AUTH_COOKIE_SECURE', 'true'),
         'PORT': port, 'RUST_SCHEDULER_ENABLED': 'false',
     }
     smtp_choice = validated(lambda: prompt('Configure SMTP now? (otherwise existing values are kept)', 'yes'), lambda value: require_choice(value, ('yes', 'y', 'no', 'n')))
@@ -543,7 +496,7 @@ switch_branch() {
         retry_command 'Check out deployment branch' g switch --create "$TARGET_BRANCH" --track "origin/$TARGET_BRANCH"
     fi
     g branch --set-upstream-to="origin/$TARGET_BRANCH" "$TARGET_BRANCH"
-    [[ -f "$REPO_DIR/src/zimbra.rs" ]] || die 'Selected branch does not contain the Zimbra implementation.'
+    [[ -f "$REPO_DIR/src/rbac.rs" ]] || die 'Selected branch does not contain local RBAC.'
 }
 
 restore_source() {
@@ -647,9 +600,7 @@ probe_login() {
     for attempt in $(seq 1 40); do
         if curl --noproxy '*' --connect-timeout 1 --max-time 2 --fail --silent \
             "http://127.0.0.1:$port/login" > "$BACKUP_DIR/login-check.html"; then
-            if grep -q 'Zimbra email address' "$BACKUP_DIR/login-check.html" && \
-                curl --noproxy '*' --max-time 2 --fail --silent \
-                    "http://127.0.0.1:$port/login/local" > /dev/null; then return 0; fi
+            if grep -q 'Local password' "$BACKUP_DIR/login-check.html"; then return 0; fi
         fi
         if [[ -n "$CANDIDATE_PID" ]] && ! kill -0 "$CANDIDATE_PID" 2>/dev/null; then break; fi
         if [[ -n "$CANDIDATE_CONTAINER" ]] && \
@@ -899,7 +850,7 @@ Usage: sudo bash setup.sh [--repo /root/WEBSEVER]
        bash setup.sh --help
        bash setup.sh --check
 
-Interactive Linux installation/update of redesign/unified-news-collection.
+Interactive Linux installation/update of feature/local-rbac-organization-management.
 Modes: native Rust + systemd, Docker Compose, or configuration only.
 Backs up local files/configuration, stashes edits, preserves divergent commits,
 and tests the new application before stopping a selected old deployment.
@@ -977,8 +928,8 @@ main() {
     [[ "$(id -u)" == 0 ]] || die 'Run sudo bash setup.sh (root is required for deployment and private backups).'
     exec 3<> /dev/tty
     say 'Interactive security newsletter portal installation'
-    say 'This branch uses Zimbra login, web.accounts, and unified news documents.'
-    say 'AccountHub identities/subscription ownership are not migrated. Existing settings and keys will be preserved.'
+    say 'This branch uses local login, organization-scoped RBAC, web.accounts, and unified news documents.'
+    say 'Legacy account records and ownership are not migrated. Back up and restore-test MongoDB before using this installer.'
     say 'Invalid entries can be retyped; type :cancel to stop. Failed steps offer retry choices.'
     choose_installation_mode
     ensure_tools
@@ -1016,8 +967,8 @@ main() {
         say 'Configuration prepared. No service was started or restarted.'
     fi
     if [[ "$MODE" != prepare ]]; then
-        say 'Both Zimbra and local-administrator login pages passed the HTTP checks.'
-        say 'Test an actual Zimbra login, subscription ownership, and SMTP delivery in the browser.'
+        say 'The local login page passed the HTTP check.'
+        say 'Test local first login, RBAC isolation, subscription ownership, and SMTP delivery in the browser.'
         say 'For a shared database, run scheduled delivery on only one server.'
         if confirm 'Enable scheduled email delivery on THIS instance now?' n; then
             retry_command 'Enable scheduled delivery' config_helper scheduler true "$REPO_DIR/.env" "$RELEASE_DIR/.env"
@@ -1032,7 +983,7 @@ main() {
     printf 'Rerun installer: bash %q --repo %q\n' "$INSTALL_ROOT/setup.sh" "$REPO_DIR"
     if [[ -n "$STASH_SHA" ]]; then say "Original local changes are preserved in Git stash commit $STASH_SHA."; fi
     if [[ "$MODE" != prepare ]]; then
-        say "Open http://SERVER_IP:$PUBLIC_PORT/login or /login/local. Runtime .env: $RELEASE_DIR/.env"
+        say "Local login is /login; configure HTTPS before use. Runtime .env: $RELEASE_DIR/.env"
         if [[ "$MODE" == native ]]; then say "Service: $UNIT_NAME (journalctl -u $UNIT_NAME)";
         else say "Compose: docker compose -p $COMPOSE_PROJECT -f $INSTALL_ROOT/compose.json logs --tail=100 web"; fi
     fi

@@ -7,15 +7,10 @@
   },
   "newsletter_root": "newsletters",
   "web_auth": {
-    "bootstrap_username": "admin"
+    "bootstrap_username": "admin",
+    "cookie_secure": true
   },
   "account_collection": "accounts",
-  "zimbra": {
-    "base_url": "https://zmailbox.citictel-cpc.com",
-    "folder_name": "news",
-    "timeout_seconds": 10,
-    "verify_tls": true
-  },
   "tavily": {
     "search_depth": "advanced",
     "max_results": 8,

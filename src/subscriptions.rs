@@ -1,5 +1,6 @@
 use crate::{
-    AppState, ReqCtx, auth, db, mail, newsletter_statistics, render, reviews, vendor_matcher, view,
+    AppState, ReqCtx, auth, db, mail, newsletter_statistics, rbac, render, reviews, vendor_matcher,
+    view,
 };
 use axum::{
     body::Bytes,
@@ -9,7 +10,7 @@ use axum::{
 use futures::{TryStreamExt, stream};
 use mongodb::bson::{self, Bson, Document, doc};
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 fn default_filters() -> Value {
     json!({"collections":[],"collections_mode":"selected","sources":[],"search":"","code":"","title":"","impact":"","affected":"","status":[],"severity_threshold":"","include_unknown":false,"source":"","keywords":[],"vendor_product_filter":{"enabled":false,"schema_version":1,"include_possible_matches":false,"rows":[]},"time_window":"all","start":"","end":"","source_timestamp":{},"report_scope":{}})
@@ -132,11 +133,12 @@ fn report_filters(profile: &Value, physical_collection: &str) -> Value {
 fn merge(into: &mut Value, from: &Value) {
     if let (Some(dst), Some(src)) = (into.as_object_mut(), from.as_object()) {
         for (k, v) in src {
-            if let Some(existing) = dst.get_mut(k) {
-                if existing.is_object() && v.is_object() {
-                    merge(existing, v);
-                    continue;
-                }
+            if let Some(existing) = dst.get_mut(k)
+                && existing.is_object()
+                && v.is_object()
+            {
+                merge(existing, v);
+                continue;
             }
             dst.insert(k.clone(), v.clone());
         }
@@ -309,20 +311,15 @@ fn public(document: &Document) -> Value {
             }
         }
         obj.remove("team");
-        for key in [
-            "owner_user_id",
-            "managed_by_user_id",
-            "organization_id",
-            "password",
-            "password_hash",
-            "zimbra_password",
-            "schedule_claim_until",
-            "schedule_claim_owner",
-            "statistic_schedule_claim_until",
-            "statistic_schedule_claim_owner",
-        ] {
-            obj.remove(key);
-        }
+        obj.insert(
+            "organization_id".into(),
+            json!(
+                document
+                    .get_object_id("organization_id")
+                    .ok()
+                    .map(|id| id.to_hex())
+            ),
+        );
         if let Some(profile) = obj
             .get_mut("report_profile")
             .filter(|profile| profile.is_object())
@@ -354,547 +351,38 @@ fn public(document: &Document) -> Value {
     {
         obj.remove("cve_delivery_cutoff");
     }
-    value
-}
-fn subscription_organization(value: &Value) -> &str {
-    value
-        .get("organization")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            value
-                .get("team")
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-        })
-        .unwrap_or("")
-}
-
-fn organization_name(user: &Document) -> String {
-    db::string(user, "zimbra_organization").trim().to_owned()
-}
-
-fn local_subscription_scope(ctx: &ReqCtx) -> Option<Document> {
-    let manager_id = ctx.user_id()?;
-    Some(doc! {
-        "local_subscription": true,
-        "managed_by_user_id": manager_id,
-    })
-}
-async fn organization_members(state: &AppState, ctx: &ReqCtx) -> Option<Vec<Document>> {
-    let manager = ctx.user.as_ref()?;
-    let mut filter = crate::auth::organization_filter(manager)?;
-    filter.insert("auth_source", "zimbra");
-    db::find_sorted(
-        &state.web,
-        &state.cfg.account_collection,
-        filter,
-        doc! {"username_key":1},
-        5000,
-    )
-    .await
-    .ok()
-}
-
-async fn organization_member_ids(
-    state: &AppState,
-    ctx: &ReqCtx,
-) -> Option<Vec<mongodb::bson::oid::ObjectId>> {
-    Some(
-        organization_members(state, ctx)
-            .await?
-            .iter()
-            .filter_map(|user| user.get_object_id("_id").ok())
-            .collect(),
-    )
-}
-
-fn can_manage_subscriptions(state: &AppState, ctx: &ReqCtx) -> bool {
-    ctx.is_admin(state) || ctx.is_organization_admin(state)
-}
-
-fn is_zimbra_user(ctx: &ReqCtx) -> bool {
-    ctx.user
-        .as_ref()
-        .is_some_and(|user| db::string(user, "auth_source") == "zimbra")
-}
-
-fn can_create_local_subscription(state: &AppState, ctx: &ReqCtx) -> bool {
-    ctx.is_top_admin(state) || ctx.is_organization_admin(state) || is_zimbra_user(ctx)
-}
-
-fn owns_local_subscription(ctx: &ReqCtx, subscription: &Document) -> bool {
-    ctx.user_id().is_some_and(|user_id| {
-        subscription.get_object_id("managed_by_user_id").ok() == Some(user_id)
-    })
-}
-
-fn is_self_manager(state: &AppState, ctx: &ReqCtx) -> bool {
-    ctx.user.is_some() && !can_manage_subscriptions(state, ctx)
-}
-
-fn same_username(left: &str, right: &str) -> bool {
-    !left.trim().is_empty() && left.trim().eq_ignore_ascii_case(right.trim())
-}
-
-fn same_email(left: &str, right: &str) -> bool {
-    !left.trim().is_empty() && left.trim().eq_ignore_ascii_case(right.trim())
-}
-
-fn zimbra_recipient(user: &Document) -> Result<Option<String>, String> {
-    if db::string(user, "auth_source") != "zimbra" {
-        return Ok(None);
-    }
-    let email = {
-        let value = db::string(user, "email");
-        if value.is_empty() {
-            db::string(user, "zimbra_email")
-        } else {
-            value
-        }
-    }
-    .trim()
-    .to_lowercase();
-    if email.is_empty() || !auth::valid_email(&email) {
-        return Err("Zimbra email is unavailable. Ask the user to sign in again.".into());
-    }
-    Ok(Some(email))
-}
-
-fn default_zimbra_subscription_document(
-    user: &Document,
-    owner_id: bson::oid::ObjectId,
-    email: &str,
-    now: bson::DateTime,
-) -> Document {
-    doc! {
-        "owner_user_id": owner_id,
-        "managed_by_user_id": owner_id,
-        "username": db::string(user, "username"),
-        "emails": [email],
-        "cc": [],
-        "bcc": [],
-        "email": email,
-        "zimbra_email": email,
-        "organization": db::string(user, "organization"),
-        "delivery_mode": "individual",
-        "local_subscription": false,
-        "auto_provisioned": true,
-        "newsletter_profile": db::json_doc(&default_profile("newsletter")).unwrap_or_default(),
-        "report_profile": db::json_doc(&default_profile("report")).unwrap_or_default(),
-        "created_at": now,
-        "updated_at": now,
-    }
-}
-
-fn subscription_emails(document: &Document) -> Vec<String> {
-    let mut emails = document
-        .get_array("emails")
-        .ok()
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(Bson::as_str)
-                .map(|value| value.trim().to_lowercase())
-                .filter(|value| !value.is_empty())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    if emails.is_empty() {
-        let email = db::string(document, "email").trim().to_lowercase();
-        if !email.is_empty() {
-            emails.push(email);
-        }
-    }
-    emails.sort();
-    emails
-}
-
-fn same_subscription_identity(left: &Document, right: &Document) -> bool {
-    let left_organization = db::string(left, "organization");
-    let right_organization = db::string(right, "organization");
-    same_username(
-        &db::string(left, "username"),
-        &db::string(right, "username"),
-    ) && subscription_emails(left) == subscription_emails(right)
-        && left_organization
-            .trim()
-            .eq_ignore_ascii_case(right_organization.trim())
-        && left.get("newsletter_profile") == right.get("newsletter_profile")
-        && left.get("report_profile") == right.get("report_profile")
-        && copy_recipients(&db::bson_json(left)).ok() == copy_recipients(&db::bson_json(right)).ok()
-}
-
-fn is_default_zimbra_subscription(document: &Document) -> bool {
-    if ["cc", "bcc"].iter().any(|key| {
-        document
-            .get_array(*key)
-            .is_ok_and(|items| !items.is_empty())
-    }) {
-        return false;
-    }
-    let newsletter = db::json_doc(&default_profile("newsletter")).ok();
-    let report = db::json_doc(&default_profile("report")).ok();
-    newsletter.is_some_and(|expected| {
-        document
-            .get_document("newsletter_profile")
-            .ok()
-            .is_some_and(|actual| actual == &expected)
-    }) && report.is_some_and(|expected| {
-        document
-            .get_document("report_profile")
-            .ok()
-            .is_some_and(|actual| actual == &expected)
-    })
-}
-
-fn is_legacy_subscription(document: &Document) -> bool {
-    matches!(document.get("auto_provisioned"), None | Some(Bson::Null))
-}
-
-fn subscription_object_id(document: &Document) -> Option<bson::oid::ObjectId> {
-    document.get_object_id("_id").ok()
-}
-
-/// Ensure that every Zimbra account has one owner-scoped subscription record.
-/// The record is deliberately created with both delivery profiles disabled so
-/// logging in never starts mail delivery without the user's action.
-pub async fn ensure_zimbra_subscription(state: &AppState, user: &Document) -> Result<(), String> {
-    if db::string(user, "auth_source") != "zimbra" {
-        return Ok(());
-    }
-    let owner_id = user
-        .get_object_id("_id")
-        .map_err(|_| "Zimbra account has no valid owner id.".to_owned())?;
-    let Some(email) = zimbra_recipient(user)? else {
-        return Err("Zimbra email is unavailable. Ask the user to sign in again.".into());
-    };
-    let now = bson::DateTime::now();
-    let coll = db::collection(&state.web, "sub_account");
-    let identity = doc! {
-        "owner_user_id": owner_id,
-        "managed_by_user_id": owner_id,
-        "username": db::string(user, "username"),
-        "zimbra_email": &email,
-        "organization": db::string(user, "organization"),
-        "delivery_mode": "individual",
-        "updated_at": now,
-    };
-    let owner_filter = doc! {
-        "owner_user_id": owner_id,
-        "local_subscription": {"$ne": true},
-    };
-    let mut owner_rows = db::find_sorted(
-        &state.web,
-        "sub_account",
-        owner_filter.clone(),
-        doc! {"auto_provisioned": -1, "created_at": 1, "_id": 1},
-        5000,
-    )
-    .await
-    .map_err(|_| "Unable to load the Zimbra subscriptions.".to_owned())?;
-
-    // A deployment before auto_provisioned was introduced may have left the
-    // user's default disabled subscription without the marker. Reuse it as
-    // the canonical automatic row instead of creating a second row.
-    let mut canonical_id = owner_rows
-        .iter()
-        .find(|row| db::bool_field(row, "auto_provisioned"))
-        .and_then(subscription_object_id);
-    if canonical_id.is_none()
-        && let Some(legacy) = owner_rows
-            .iter()
-            .find(|row| is_legacy_subscription(row) && is_default_zimbra_subscription(row))
-    {
-        canonical_id = subscription_object_id(legacy);
-        if let Some(id) = canonical_id {
-            let mut set = identity.clone();
-            set.insert("auto_provisioned", true);
-            set.insert("local_subscription", false);
-            coll.update_one(doc! {"_id": id}, doc! {"$set": set})
-                .await
-                .map_err(|_| "Unable to migrate the Zimbra subscription.".to_owned())?;
-        }
-    }
-
-    // Adopt a prior Rust subscription created before owner_user_id was set,
-    // but do not take over a local subscription or a configured manual row.
-    if canonical_id.is_none() && owner_rows.is_empty() {
-        let zimbra_pattern = format!("^{}$", regex::escape(&email));
-        if let Some(existing) = coll
-            .find_one(doc! {
-                "local_subscription": {"$ne": true},
-                "$or": [{"owner_user_id": {"$exists": false}}, {"owner_user_id": Bson::Null}],
-                "zimbra_email": {"$regex": zimbra_pattern, "$options": "i"},
-            })
-            .await
-            .map_err(|_| "Unable to inspect existing Zimbra subscriptions.".to_owned())?
-        {
-            let id = existing
-                .get_object_id("_id")
-                .map_err(|_| "Zimbra subscription has no valid id.".to_owned())?;
-            let mut set = identity.clone();
-            let default_row = is_default_zimbra_subscription(&existing);
-            set.insert("auto_provisioned", default_row);
-            set.insert("local_subscription", false);
-            coll.update_one(doc! {"_id": id}, doc! {"$set": set})
-                .await
-                .map_err(|_| "Unable to claim the Zimbra subscription.".to_owned())?;
-            if default_row {
-                canonical_id = Some(id);
-            }
-            owner_rows = db::find_sorted(
-                &state.web,
-                "sub_account",
-                owner_filter.clone(),
-                doc! {"auto_provisioned": -1, "created_at": 1, "_id": 1},
-                5000,
+    // Public data is an allowlist; preserved legacy tokens and future private
+    // fields must never leak after an explicitly approved scope migration.
+    if let Some(obj) = value.as_object_mut() {
+        obj.retain(|key, _| {
+            matches!(
+                key.as_str(),
+                "id" | "username"
+                    | "email"
+                    | "emails"
+                    | "cc"
+                    | "bcc"
+                    | "organization"
+                    | "organization_id"
+                    | "delivery_mode"
+                    | "newsletter_profile"
+                    | "report_profile"
+                    | "auto_provisioned"
+                    | "created_at"
+                    | "updated_at"
             )
-            .await
-            .map_err(|_| "Unable to reload the Zimbra subscriptions.".to_owned())?;
-        }
-    }
-
-    if canonical_id.is_none() {
-        let document = default_zimbra_subscription_document(user, owner_id, &email, now);
-        canonical_id = match coll.insert_one(document).await {
-            Ok(result) => result.inserted_id.as_object_id(),
-            Err(_) => {
-                // A concurrent login may have created the record. Re-check
-                // the owner before reporting a failure to the caller.
-                coll.find_one(doc! {"owner_user_id": owner_id, "auto_provisioned": true})
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|existing| existing.get_object_id("_id").ok())
-            }
-        };
-        if canonical_id.is_none() {
-            return Err("Zimbra subscription has no valid id.".into());
-        }
-    }
-
-    let canonical_id = canonical_id.expect("canonical id set above");
-    let mut canonical_set = identity;
-    canonical_set.insert("auto_provisioned", true);
-    canonical_set.insert("local_subscription", false);
-    coll.update_one(doc! {"_id": canonical_id}, doc! {"$set": canonical_set})
-        .await
-        .map_err(|_| "Unable to update the Zimbra subscription.".to_owned())?;
-
-    let Some(canonical) = coll
-        .find_one(doc! {"_id": canonical_id})
-        .await
-        .ok()
-        .flatten()
-    else {
-        return Err("Unable to reload the Zimbra subscription.".into());
-    };
-    // Remove exact copies of the automatic disabled row. A manually submitted
-    // copy with the same identity and default profiles has no independent
-    // meaning, while manual rows with different profiles remain available to
-    // the owner.
-    let rows = if owner_rows.is_empty() {
-        db::find_sorted(
-            &state.web,
-            "sub_account",
-            owner_filter,
-            doc! {"created_at": 1, "_id": 1},
-            5000,
-        )
-        .await
-        .map_err(|_| "Unable to inspect duplicate Zimbra subscriptions.".to_owned())?
-    } else {
-        owner_rows
-    };
-    for row in rows {
-        let Some(id) = subscription_object_id(&row) else {
-            continue;
-        };
-        if id == canonical_id {
-            continue;
-        }
-        let duplicate_auto = db::bool_field(&row, "auto_provisioned");
-        let duplicate_default = !db::bool_field(&row, "auto_provisioned")
-            && same_subscription_identity(&row, &canonical)
-            && is_default_zimbra_subscription(&row);
-        if duplicate_auto || duplicate_default {
-            if let Err(error) = coll.delete_one(doc! {"_id": id}).await {
-                tracing::warn!(%error, subscription_id = %id, "Unable to remove duplicate Zimbra subscription");
-            }
-        } else if is_legacy_subscription(&row) {
-            let _ = coll
-                .update_one(doc! {"_id": id}, doc! {"$set": {"auto_provisioned": false}})
-                .await;
-        }
-    }
-    Ok(())
-}
-
-/// Backfill active Zimbra accounts when the service starts. This keeps users
-/// created by an earlier deployment on the same self-management path.
-pub async fn ensure_zimbra_subscriptions(state: &AppState) -> Result<(), String> {
-    let users = db::find_many(
-        &state.web,
-        &state.cfg.account_collection,
-        doc! {"auth_source": "zimbra", "disabled": {"$ne": true}},
-        5000,
-    )
-    .await
-    .map_err(|_| "Unable to load Zimbra accounts for subscription setup.".to_owned())?;
-    for user in users {
-        if let Err(error) = ensure_zimbra_subscription(state, &user).await {
-            tracing::warn!(username = %db::string(&user, "username"), %error, "Unable to initialize Zimbra subscription");
-        }
-    }
-    Ok(())
-}
-
-fn self_recipient(user: &Document) -> Result<String, String> {
-    if let Some(email) = zimbra_recipient(user)? {
-        return Ok(email);
-    }
-    let email = db::string(user, "email").trim().to_lowercase();
-    if email.is_empty() || !auth::valid_email(&email) {
-        return Err("A valid profile email is required for this subscription.".into());
-    }
-    Ok(email)
-}
-
-fn self_subscription_owner_filter(ctx: &ReqCtx) -> Option<Document> {
-    let owner_id = ctx.user_id()?;
-    Some(doc! {"owner_user_id":owner_id})
-}
-
-async fn subscription_filter(state: &AppState, ctx: &ReqCtx, id: Option<&str>) -> Option<Document> {
-    let owner = if ctx.is_top_admin(state) {
-        doc! {}
-    } else if ctx.is_organization_admin(state) {
-        let ids = organization_member_ids(state, ctx).await?;
-        let mut scopes = vec![Bson::Document(doc! {"owner_user_id":{"$in":ids}})];
-        if let Some(local_scope) = local_subscription_scope(ctx) {
-            scopes.push(Bson::Document(local_scope));
-        }
-        doc! {"$or":scopes}
-    } else if ctx.is_admin(state) {
-        doc! {"managed_by_user_id":ctx.user_id()?}
-    } else {
-        let owner_filter = self_subscription_owner_filter(ctx)?;
-        if is_zimbra_user(ctx) {
-            let mut scopes = vec![Bson::Document(owner_filter)];
-            if let Some(local_scope) = local_subscription_scope(ctx) {
-                scopes.push(Bson::Document(local_scope));
-            }
-            doc! {"$or":scopes}
-        } else {
-            owner_filter
-        }
-    };
-    if let Some(id) = id {
-        if id.is_empty() {
-            return None;
-        }
-        let identifier = if let Some(oid) = db::object_id(id) {
-            doc! {"_id":oid}
-        } else {
-            doc! {"$or":[{"email":id.to_lowercase()},{"emails":id.to_lowercase()}]}
-        };
-        if owner.is_empty() {
-            Some(identifier)
-        } else {
-            Some(doc! {"$and":[identifier,owner]})
-        }
-    } else {
-        Some(owner)
-    }
-}
-
-fn public_organization_member(user: &Document, subscription: Option<&Document>) -> Value {
-    let mut value = auth::public_user(user);
-    if let Some(object) = value.as_object_mut() {
-        object.insert(
-            "account_status".into(),
-            json!(if db::bool_field(user, "disabled") {
-                "disabled"
-            } else {
-                "active"
-            }),
-        );
-        object.insert("has_subscription".into(), json!(subscription.is_some()));
-        object.insert(
-            "subscription".into(),
-            subscription.map(public).unwrap_or(Value::Null),
-        );
+        });
     }
     value
 }
-
-fn public_local_subscription(subscription: &Document) -> Value {
-    let value = public(subscription);
-    let emails = value.get("emails").cloned().unwrap_or_else(|| json!([]));
-    json!({
-        "id": value.get("id").cloned().unwrap_or(Value::Null),
-        "username": value.get("username").cloned().unwrap_or(json!("")),
-        "email": value.get("email").cloned().unwrap_or(json!("")),
-        "emails": emails,
-        "organization": value.get("organization").cloned().unwrap_or(json!("")),
-        "organization_admin": false,
-        "account_status": "local",
-        "disabled": false,
-        "auth_source": "local",
-        "local_subscription": true,
-        "has_subscription": true,
-        "subscription": value,
-    })
+fn subscription_filter(ctx: &ReqCtx, id: Option<&str>) -> Option<Document> {
+    let scope = rbac::scope(Some(ctx.user.as_ref()?));
+    match id {
+        Some(id) => Some(doc! {"$and":[scope,{"_id":db::object_id(id)?}]}),
+        None => Some(scope),
+    }
 }
 
-async fn organization_subscription_rows(
-    state: &AppState,
-    ctx: &ReqCtx,
-) -> Result<Vec<Value>, String> {
-    let members = organization_members(state, ctx)
-        .await
-        .ok_or_else(|| "Your Account Hub organization is not available.".to_owned())?;
-    let ids: Vec<Bson> = members
-        .iter()
-        .filter_map(|user| user.get_object_id("_id").ok().map(Bson::ObjectId))
-        .collect();
-    let subscriptions = if ids.is_empty() {
-        Vec::new()
-    } else {
-        db::find_many(
-            &state.web,
-            "sub_account",
-            doc! {"owner_user_id":{"$in":ids}},
-            5000,
-        )
-        .await
-        .map_err(|_| "Unable to load subscriptions.".to_owned())?
-    };
-    let mut by_owner = HashMap::new();
-    for subscription in subscriptions {
-        if let Ok(owner_id) = subscription.get_object_id("owner_user_id") {
-            by_owner.insert(owner_id, subscription);
-        }
-    }
-    let mut rows: Vec<Value> = members
-        .iter()
-        .map(|member| {
-            let subscription = member
-                .get_object_id("_id")
-                .ok()
-                .and_then(|owner_id| by_owner.get(&owner_id));
-            public_organization_member(member, subscription)
-        })
-        .collect();
-    if let Some(local_scope) = local_subscription_scope(ctx) {
-        let local_subscriptions = db::find_many(&state.web, "sub_account", local_scope, 5000)
-            .await
-            .map_err(|_| "Unable to load subscriptions.".to_owned())?;
-        rows.extend(local_subscriptions.iter().map(public_local_subscription));
-    }
-    Ok(rows)
-}
 pub(crate) fn recipients(data: &Value) -> Result<Vec<String>, String> {
     let raw = if let Some(items) = data.get("emails") {
         items.clone()
@@ -975,9 +463,9 @@ async fn notify(
     kind: &str,
     username: &str,
     organization: &str,
-    newsletter: &Value,
-    report: &Value,
+    profiles: (&Value, &Value),
 ) -> Result<(), String> {
+    let (newsletter, report) = profiles;
     let (kind, subject, heading, badge, intro) = match kind {
         "created" => (
             "created",
@@ -1078,16 +566,6 @@ async fn notify(
     Ok(())
 }
 
-fn notification_delivery_error(action: &str, error: &str) -> Response {
-    tracing::error!(action, error, "Subscription notification delivery failed");
-    view::error(
-        StatusCode::SERVICE_UNAVAILABLE,
-        &format!(
-            "Subscription was {action}, but the notification email could not be sent: {error}"
-        ),
-    )
-}
-
 fn notification_profile_card(name: &str, profile: &Value, newsletter: bool) -> Value {
     let enabled = profile["enabled"].as_bool().unwrap_or(false);
     let mut summary_lines = Vec::new();
@@ -1097,9 +575,11 @@ fn notification_profile_card(name: &str, profile: &Value, newsletter: bool) -> V
         .map(|value| escape_html(value))
         .collect::<Vec<_>>()
         .join(", ");
-    let collections = (!collections.is_empty())
-        .then_some(collections)
-        .unwrap_or_else(|| "No sources selected".to_owned());
+    let collections = if !collections.is_empty() {
+        collections
+    } else {
+        "No sources selected".to_owned()
+    };
     summary_lines.push(format!("Sources: {collections}"));
 
     if newsletter {
@@ -1647,10 +1127,19 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
     if ctx.path == "/subscriptions" && ctx.method == Method::GET {
         return Some(render(state, ctx, "subscriptions/index.html", json!({})));
     }
-    if ctx.path == "/api/subscriptions/vendor-product-template.csv" && ctx.method == Method::GET {
+    if matches!(
+        ctx.path.as_str(),
+        "/api/subscriptions/vendor-product-template.csv"
+            | "/api/reviews/vendor-product-template.csv"
+    ) && ctx.method == Method::GET
+    {
         return Some(view::attachment("text/csv; charset=utf-8","vendor_product_filter_template.csv","vendor,product,vendor_aliases,product_aliases\nRed Hat,Enterprise Linux,\"Red Hat, Inc.|RedHat\",RHEL|Red Hat Enterprise Linux\nMicrosoft,Windows Server,Microsoft Corporation,Windows Server 2019|Windows Server 2022\nApache Software Foundation,HTTP Server,Apache|ASF,Apache HTTPD|httpd\n".into()));
     }
-    if ctx.path == "/api/subscriptions/vendor-product-import" && ctx.method == Method::POST {
+    if matches!(
+        ctx.path.as_str(),
+        "/api/subscriptions/vendor-product-import" | "/api/reviews/vendor-product-import"
+    ) && ctx.method == Method::POST
+    {
         return Some(vendor_import(ctx).await);
     }
     if ctx.path == "/api/subscriptions/collections" && ctx.method == Method::GET {
@@ -1673,20 +1162,8 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             json!({"schema_version":1,"subscription":{"fields":["username","emails","cc","bcc","organization"],"delivery_mode":"individual"},"profile_types":["newsletter","report"],"source_providers":names.clone(),"review_collections":names,"filters":{"defaults":default_filters()},"profiles":{"newsletter":{"defaults":default_profile("newsletter")},"report":{"defaults":default_profile("report")}},"vendor_product_filter":{"schema_version":1,"defaults":{"enabled":false,"schema_version":1,"include_possible_matches":false,"rows":[]}},"allowed_values":{"severity":["Critical","High","Medium","Low"],"time_window":["all","daily","week","custom"],"generation_mode":["template","enriched_weekly"],"report_language":["en","zh","ch"]},"limits":{"report_scope_max_count":500,"email_recipients_max_count":50}}),
         ));
     }
-    if ctx.path == "/api/organization/subscriptions" && ctx.method == Method::GET {
-        if !ctx.is_organization_admin(state) {
-            return json_error(
-                StatusCode::FORBIDDEN,
-                "Organization administrator access required.",
-            );
-        }
-        return Some(match organization_subscription_rows(state, ctx).await {
-            Ok(rows) => view::json_response(StatusCode::OK, json!({"data":rows})),
-            Err(error) => view::error(StatusCode::SERVICE_UNAVAILABLE, &error),
-        });
-    }
     if ctx.path == "/api/subscriptions" && ctx.method == Method::GET {
-        let Some(filter) = subscription_filter(state, ctx, None).await else {
+        let Some(filter) = subscription_filter(ctx, None) else {
             return json_error(StatusCode::FORBIDDEN, "Access denied.");
         };
         return Some(
@@ -1701,7 +1178,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             {
                 Ok(rows) => view::json_response(
                     StatusCode::OK,
-                    json!({"data":rows.iter().map(|row| public(row)).collect::<Vec<_>>()}),
+                    json!({"data":rows.iter().map(public).collect::<Vec<_>>()}),
                 ),
                 Err(_) => view::error(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -1718,10 +1195,6 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 "Preview mode must be create or update.",
             );
         }
-        if mode == "create" && !can_manage_subscriptions(state, ctx) && !is_self_manager(state, ctx)
-        {
-            return json_error(StatusCode::FORBIDDEN, "Access denied.");
-        }
         let mut data = ctx.json.clone();
         let mut identifier = String::new();
         if mode == "update" {
@@ -1732,7 +1205,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             if identifier.is_empty() {
                 identifier = ctx.field("email")
             }
-            let Some(filter) = subscription_filter(state, ctx, Some(&identifier)).await else {
+            let Some(filter) = subscription_filter(ctx, Some(&identifier)) else {
                 return json_error(StatusCode::FORBIDDEN, "Access denied.");
             };
             let Some(existing) = db::find_one(&state.web, "sub_account", filter)
@@ -1777,350 +1250,11 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         ));
     }
     if ctx.path == "/api/subscriptions" && ctx.method == Method::POST {
-        let local_subscription = ctx
-            .json
-            .get("local_subscription")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let self_only = is_self_manager(state, ctx) && !local_subscription;
-        if local_subscription && !can_create_local_subscription(state, ctx) {
-            return json_error(
-                StatusCode::FORBIDDEN,
-                "Only an administrator or Zimbra user can create local subscriptions.",
-            );
-        }
-        if !can_manage_subscriptions(state, ctx) && !self_only && !local_subscription {
-            return json_error(
-                StatusCode::FORBIDDEN,
-                "You can only manage your own subscription.",
-            );
-        }
-        if ctx
-            .user
-            .as_ref()
-            .is_some_and(|u| db::string(u, "auth_source") == "zimbra")
-            && ctx
-                .json
-                .get("password")
-                .is_some_and(|v| v.as_str().is_some_and(|s| !s.is_empty()))
-        {
-            return json_error(
-                StatusCode::BAD_REQUEST,
-                "Zimbra users do not use local passwords.",
-            );
-        }
-        let self_email = if self_only {
-            let Some(user) = ctx.user.as_ref() else {
-                return json_error(StatusCode::UNAUTHORIZED, "Authentication required.");
-            };
-            Some(match self_recipient(user) {
-                Ok(email) => email,
-                Err(error) => return json_error(StatusCode::BAD_REQUEST, &error),
-            })
-        } else {
-            None
-        };
-        let submitted_emails = match recipients(&ctx.json) {
-            Ok(v) => v,
-            Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
-        };
-        let copies = match copy_recipients(&ctx.json) {
-            Ok(value) => value,
-            Err(error) => return json_error(StatusCode::BAD_REQUEST, &error),
-        };
-        let submitted_username = ctx.field("username");
-        let mut username = if local_subscription {
-            submitted_username
-        } else if submitted_username.trim().is_empty() {
-            ctx.field("email")
-        } else {
-            submitted_username
-        };
-        let emails = if self_only {
-            let Some(user) = ctx.user.as_ref() else {
-                return json_error(StatusCode::UNAUTHORIZED, "Authentication required.");
-            };
-            let current_username = db::string(user, "username");
-            if !same_username(&username, &current_username) {
-                return json_error(
-                    StatusCode::FORBIDDEN,
-                    "You can only manage your own subscription.",
-                );
-            }
-            let current_email = self_email.as_deref().unwrap_or("");
-            if !is_zimbra_user(ctx)
-                && (current_email.is_empty()
-                    || submitted_emails.len() != 1
-                    || !same_email(&submitted_emails[0], current_email))
-            {
-                return json_error(
-                    StatusCode::FORBIDDEN,
-                    "You can only manage your own subscription.",
-                );
-            }
-            username = current_username;
-            submitted_emails
-        } else {
-            submitted_emails
-        };
-        let submitted_organization = {
-            let value = ctx.field("organization");
-            if value.trim().is_empty() {
-                ctx.field("team")
-            } else {
-                value
-            }
-        };
-        let organization = if self_only && submitted_organization.trim().is_empty() {
-            ctx.user
-                .as_ref()
-                .map(|user| db::string(user, "zimbra_organization"))
-                .unwrap_or_default()
-        } else {
-            submitted_organization
-        };
-        if username.trim().is_empty()
-            || (!self_only && !local_subscription && organization.trim().is_empty())
-        {
-            return json_error(
-                StatusCode::BAD_REQUEST,
-                "Username, email, and organization are required.",
-            );
-        }
-        let mode = "individual";
-        let newsletter = match profile(state, "newsletter", &ctx.json["newsletter_profile"]).await {
-            Ok(v) => v,
-            Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
-        };
-        let report = match profile(state, "report", &ctx.json["report_profile"]).await {
-            Ok(v) => v,
-            Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
-        };
-        if self_only {
-            let Some(owner_id) = ctx.user_id() else {
-                return json_error(StatusCode::UNAUTHORIZED, "Authentication required.");
-            };
-            let duplicate_filter = doc! {
-                "owner_user_id": owner_id,
-                "local_subscription": {"$ne": true},
-                "emails": emails.clone(),
-                "newsletter_profile": db::json_doc(&newsletter).unwrap_or_default(),
-                "report_profile": db::json_doc(&report).unwrap_or_default(),
-            };
-            match db::collection(&state.web, "sub_account")
-                .find_one(duplicate_filter)
-                .await
-            {
-                Ok(Some(_)) => {
-                    return json_error(
-                        StatusCode::CONFLICT,
-                        "An identical subscription already exists. Edit the existing subscription instead.",
-                    );
-                }
-                Ok(None) => {}
-                Err(_) => {
-                    return json_error(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "Unable to check existing subscriptions.",
-                    );
-                }
-            }
-        }
-        if local_subscription {
-            let Some(manager) = ctx.user.as_ref() else {
-                return json_error(StatusCode::UNAUTHORIZED, "Authentication required.");
-            };
-            // Local subscriptions are owned by the account that creates them.
-            // Keep the organization as optional display metadata only; it is
-            // not used to authorize or scope the subscription.
-            let local_organization = if organization.trim().is_empty() {
-                let value = organization_name(manager);
-                if value.is_empty() {
-                    "local".to_owned()
-                } else {
-                    value
-                }
-            } else {
-                organization.trim().to_owned()
-            };
-            let existing = db::find_one(
-                &state.web,
-                "sub_account",
-                doc! {
-                    "username": {
-                        "$regex": format!("^{}$", regex::escape(username.trim())),
-                        "$options": "i"
-                    }
-                },
-            )
-            .await
-            .ok()
-            .flatten();
-            if existing.is_some() {
-                return json_error(
-                    StatusCode::CONFLICT,
-                    "A subscription already exists for this username.",
-                );
-            }
-            let now = bson::DateTime::now();
-            let document = doc! {
-                "managed_by_user_id": ctx.user_id().unwrap(),
-                "local_subscription": true,
-                "username": username.trim(),
-                "emails": emails.clone(),
-                "email": &emails[0],
-                "cc": copies.cc.clone(),
-                "bcc": copies.bcc.clone(),
-                "organization": &local_organization,
-                "delivery_mode": "individual",
-                "auto_provisioned": false,
-                "newsletter_profile": db::json_doc(&newsletter).unwrap(),
-                "report_profile": db::json_doc(&report).unwrap(),
-                "created_at": now,
-                "updated_at": now,
-            };
-            return Some(
-                match db::collection(&state.web, "sub_account")
-                    .insert_one(document)
-                    .await
-                {
-                    Ok(v) => {
-                        if let Err(error) = notify(
-                            state,
-                            &emails,
-                            &copies,
-                            "created",
-                            username.trim(),
-                            &local_organization,
-                            &newsletter,
-                            &report,
-                        )
-                        .await
-                        {
-                            notification_delivery_error("saved", &error)
-                        } else {
-                            view::json_response(
-                                StatusCode::CREATED,
-                                json!({"success":true,"id":v.inserted_id.as_object_id().map(|id|id.to_hex()).unwrap_or_default()}),
-                            )
-                        }
-                    }
-                    Err(_) => view::error(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "Unable to add subscription.",
-                    ),
-                },
-            );
-        }
-        let users = db::collection(&state.web, &state.cfg.account_collection);
-        let owner = users
-            .find_one(doc! {"username_key":username.trim().to_lowercase()})
-            .await
-            .ok()
-            .flatten();
-        if self_only && owner.is_none() {
-            return json_error(
-                StatusCode::FORBIDDEN,
-                "You can only manage your own subscription.",
-            );
-        }
-        if ctx.is_organization_admin(state) {
-            let Some(member) = owner.as_ref() else {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    "Zimbra user must be approved before creating a subscription.",
-                );
-            };
-            if db::string(member, "auth_source") != "zimbra"
-                || !ctx
-                    .user
-                    .as_ref()
-                    .is_some_and(|manager| crate::auth::same_organization(manager, member))
-            {
-                return json_error(
-                    StatusCode::FORBIDDEN,
-                    "You can only manage members of your organization.",
-                );
-            }
-        }
-        if let Some(owner) = owner.as_ref() {
-            if let Err(error) = zimbra_recipient(owner) {
-                return json_error(StatusCode::BAD_REQUEST, &error);
-            }
-        }
-        let existing=db::find_one(&state.web,"sub_account",doc!{"username":{"$regex":format!("^{}$",regex::escape(username.trim())),"$options":"i"}}).await.ok().flatten();
-        if existing.is_some() && !self_only {
-            return json_error(
-                StatusCode::CONFLICT,
-                "A subscription already exists for this username.",
-            );
-        }
-        let owner_zimbra_email = owner.as_ref().and_then(auth::zimbra_email);
-        let owner_id = if let Some(owner) = owner {
-            if self_only && ctx.user_id() != owner.get_object_id("_id").ok() {
-                return json_error(
-                    StatusCode::FORBIDDEN,
-                    "You can only manage your own subscription.",
-                );
-            }
-            let zimbra_member =
-                ctx.is_organization_admin(state) && db::string(&owner, "auth_source") == "zimbra";
-            if db::string(&owner, "role") != "user" && !zimbra_member {
-                return json_error(
-                    StatusCode::CONFLICT,
-                    "Username is already used by the administrator.",
-                );
-            }
-            owner.get_object_id("_id").unwrap()
-        } else {
-            return json_error(
-                StatusCode::BAD_REQUEST,
-                "The recipient must first sign in with Zimbra.",
-            );
-        };
-        let now = bson::DateTime::now();
-        let mut document = doc! {"owner_user_id":owner_id,"managed_by_user_id":ctx.user_id().unwrap(),"username":username.trim(),"emails":emails.clone(),"email":&emails[0],"organization":organization.trim(),"delivery_mode":mode,"auto_provisioned":false,"newsletter_profile":db::json_doc(&newsletter).unwrap(),"report_profile":db::json_doc(&report).unwrap(),"created_at":now,"updated_at":now};
-        document.insert("cc", copies.cc.clone());
-        document.insert("bcc", copies.bcc.clone());
-        if let Some(email) = owner_zimbra_email {
-            document.insert("zimbra_email", email);
-        }
-        return Some(
-            match db::collection(&state.web, "sub_account")
-                .insert_one(document)
-                .await
-            {
-                Ok(v) => {
-                    if let Err(error) = notify(
-                        state,
-                        &emails,
-                        &copies,
-                        "created",
-                        &username,
-                        &organization,
-                        &newsletter,
-                        &report,
-                    )
-                    .await
-                    {
-                        notification_delivery_error("saved", &error)
-                    } else {
-                        view::json_response(
-                            StatusCode::CREATED,
-                            json!({"success":true,"id":v.inserted_id.as_object_id().map(|id|id.to_hex()).unwrap_or_default()}),
-                        )
-                    }
-                }
-                Err(_) => view::error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Unable to add subscription.",
-                ),
-            },
-        );
+        return Some(save_subscription(state, ctx, None).await);
     }
     if let Some(tail) = ctx.path.strip_prefix("/api/subscriptions/") {
         let (identifier, action) = tail.split_once('/').unwrap_or((tail, ""));
-        let Some(filter) = subscription_filter(state, ctx, Some(identifier)).await else {
+        let Some(filter) = subscription_filter(ctx, Some(identifier)) else {
             return json_error(StatusCode::FORBIDDEN, "Access denied.");
         };
         let coll = db::collection(&state.web, "sub_account");
@@ -2201,327 +1335,181 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 },
             );
         }
-        if action.is_empty() && ctx.method == Method::DELETE {
-            if is_self_manager(state, ctx) && db::bool_field(&existing, "auto_provisioned") {
-                return json_error(
-                    StatusCode::FORBIDDEN,
-                    "The automatic Zimbra subscription cannot be deleted.",
-                );
-            }
-            if ctx.is_organization_admin(state) && !db::bool_field(&existing, "local_subscription")
-            {
-                return json_error(
-                    StatusCode::FORBIDDEN,
-                    "Zimbra subscriptions cannot be deleted by an organization administrator.",
-                );
-            }
-            let old = db::bson_json(&existing);
-            let emails = recipients(&old).unwrap_or_default();
-            let copies = match copy_recipients(&old) {
-                Ok(value) => value,
-                Err(error) => return json_error(StatusCode::BAD_REQUEST, &error),
-            };
-            let username = old["username"].as_str().unwrap_or("");
-            let organization = subscription_organization(&old);
-            return Some(match coll.delete_one(doc! {"_id":id}).await {
-                Ok(_) => {
-                    if let Err(error) = notify(
-                        state,
-                        &emails,
-                        &copies,
-                        "cancelled",
-                        username,
-                        organization,
-                        &old["newsletter_profile"],
-                        &old["report_profile"],
-                    )
-                    .await
-                    {
-                        notification_delivery_error("cancelled", &error)
-                    } else {
-                        view::json_response(StatusCode::OK, json!({"success":true}))
-                    }
-                }
-                Err(_) => view::error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Unable to remove subscription.",
-                ),
-            });
+        if action.is_empty() && ctx.method == Method::GET {
+            return Some(view::json_response(StatusCode::OK, public(&existing)));
         }
-        if action.is_empty() && ctx.method == Method::PUT {
-            let local_subscription = db::bool_field(&existing, "local_subscription");
-            if ctx
-                .json
-                .get("local_subscription")
-                .and_then(Value::as_bool)
-                .is_some_and(|value| value)
-                && !local_subscription
-            {
-                return json_error(
-                    StatusCode::FORBIDDEN,
-                    "Zimbra subscriptions cannot be converted to local subscriptions.",
-                );
-            }
-            if local_subscription
-                && !ctx.is_top_admin(state)
-                && !owns_local_subscription(ctx, &existing)
-            {
-                return json_error(
-                    StatusCode::FORBIDDEN,
-                    "Only the administrator or Zimbra user who created this subscription can edit it.",
-                );
-            }
-            if !can_manage_subscriptions(state, ctx)
-                && !local_subscription
-                && (["username", "password"]
-                    .iter()
-                    .any(|key| ctx.json.get(*key).is_some())
-                    || (!is_zimbra_user(ctx)
-                        && ["emails", "email"]
-                            .iter()
-                            .any(|key| ctx.json.get(*key).is_some())))
-            {
-                return json_error(
-                    StatusCode::FORBIDDEN,
-                    "Only an administrator can edit subscription identity fields.",
-                );
-            }
-            let owner = if local_subscription {
-                None
-            } else if let Ok(owner_id) = existing.get_object_id("owner_user_id") {
-                db::find_one(
-                    &state.web,
-                    &state.cfg.account_collection,
-                    doc! {"_id":owner_id},
-                )
-                .await
-                .ok()
-                .flatten()
-            } else if is_self_manager(state, ctx) {
-                ctx.user.clone()
-            } else {
-                let username = db::string(&existing, "username");
-                if username.trim().is_empty() {
-                    None
-                } else {
-                    db::find_one(
-                        &state.web,
-                        &state.cfg.account_collection,
-                        doc! {"username_key":username.trim().to_lowercase()},
-                    )
-                    .await
-                    .ok()
-                    .flatten()
-                }
-            };
-            let mut data = db::bson_json(&existing);
-            merge(&mut data, &ctx.json);
-            if ctx.json.get("emails").is_none()
-                && let Some(email) = ctx.json.get("email").and_then(Value::as_str)
-            {
-                data["emails"] = json!([email]);
-            }
-            if ctx.json.get("organization").is_none()
-                && let Some(organization) = ctx.json.get("team").and_then(Value::as_str)
-            {
-                data["organization"] = json!(organization);
-            }
-            if data
-                .get("organization")
-                .and_then(Value::as_str)
-                .is_none_or(|value| value.trim().is_empty())
-                && let Some(organization) = data.get("team").and_then(Value::as_str)
-            {
-                data["organization"] = json!(organization);
-            }
-            let emails = match recipients(&data) {
-                Ok(v) => v,
-                Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
-            };
-            let copies = match copy_recipients(&data) {
-                Ok(value) => value,
-                Err(error) => return json_error(StatusCode::BAD_REQUEST, &error),
-            };
-            let newsletter = match profile(state, "newsletter", &data["newsletter_profile"]).await {
-                Ok(v) => v,
-                Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
-            };
-            let report = match profile(state, "report", &data["report_profile"]).await {
-                Ok(v) => v,
-                Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
-            };
-            let username = data["username"].as_str().unwrap_or("").trim();
-            let organization = data["organization"].as_str().unwrap_or("").trim();
-            if username.is_empty()
-                || (!local_subscription && !is_self_manager(state, ctx) && organization.is_empty())
-            {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    "Username and organization are required.",
-                );
-            }
-            let mode = "individual";
-            let identity_change = !local_subscription
-                && ctx.is_organization_admin(state)
-                && ctx.json.get("username").is_some();
-            let current_owner_hub_email = if identity_change {
-                None
-            } else if let Some(owner) = owner.as_ref() {
-                match zimbra_recipient(owner) {
-                    Ok(email) => email,
-                    Err(error) => return json_error(StatusCode::BAD_REQUEST, &error),
-                }
-            } else {
-                None
-            };
-            if is_self_manager(state, ctx) && !local_subscription {
-                let Some(owner_id) = ctx.user_id() else {
-                    return json_error(StatusCode::UNAUTHORIZED, "Authentication required.");
-                };
-                let duplicate_filter = doc! {
-                    "owner_user_id": owner_id,
-                    "_id": {"$ne": id},
-                    "local_subscription": {"$ne": true},
-                    "emails": emails.clone(),
-                    "newsletter_profile": db::json_doc(&newsletter).unwrap_or_default(),
-                    "report_profile": db::json_doc(&report).unwrap_or_default(),
-                };
-                match coll.find_one(duplicate_filter).await {
-                    Ok(Some(_)) => {
-                        return json_error(
-                            StatusCode::CONFLICT,
-                            "An identical subscription already exists. Edit the existing subscription instead.",
-                        );
-                    }
-                    Ok(None) => {}
-                    Err(_) => {
-                        return json_error(
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "Unable to check existing subscriptions.",
-                        );
-                    }
-                }
-            }
-            let mut update = doc! {"username":username,"email":&emails[0],"emails":emails.clone(),"organization":organization,"delivery_mode":mode,"newsletter_profile":db::json_doc(&newsletter).unwrap(),"report_profile":db::json_doc(&report).unwrap(),"updated_at":bson::DateTime::now()};
-            update.insert("cc", copies.cc.clone());
-            update.insert("bcc", copies.bcc.clone());
-            if let Some(zimbra_email) = current_owner_hub_email.as_ref() {
-                update.insert("zimbra_email", zimbra_email.clone());
-            }
-            if identity_change {
-                let Some(manager) = ctx.user.as_ref() else {
-                    return json_error(StatusCode::UNAUTHORIZED, "Authentication required.");
-                };
-                let Some(member) = db::find_one(
-                    &state.web,
-                    &state.cfg.account_collection,
-                    doc! {"username_key":username.to_lowercase()},
-                )
-                .await
-                .ok()
-                .flatten() else {
-                    return json_error(
-                        StatusCode::FORBIDDEN,
-                        "You can only manage members of your organization.",
-                    );
-                };
-                let Some(member_id) = member.get_object_id("_id").ok() else {
-                    return json_error(StatusCode::FORBIDDEN, "Subscription owner is invalid.");
-                };
-                if db::string(&member, "auth_source") != "zimbra"
-                    || !crate::auth::same_organization(manager, &member)
-                {
-                    return json_error(
-                        StatusCode::FORBIDDEN,
-                        "You can only manage members of your organization.",
-                    );
-                }
-                let current_owner = existing.get_object_id("owner_user_id").ok();
-                if current_owner != Some(member_id)
-                    && coll
-                        .find_one(doc! {"owner_user_id":member_id})
-                        .await
-                        .ok()
-                        .flatten()
-                        .is_some()
-                {
-                    return json_error(
-                        StatusCode::CONFLICT,
-                        "A subscription already exists for this username.",
-                    );
-                }
-                let zimbra_email = match zimbra_recipient(&member) {
-                    Ok(email) => email,
-                    Err(error) => return json_error(StatusCode::BAD_REQUEST, &error),
-                };
-                let Some(zimbra_email) = zimbra_email else {
-                    return json_error(
-                        StatusCode::BAD_REQUEST,
-                        "Zimbra email is unavailable. Ask the user to sign in again.",
-                    );
-                };
-                update.insert("owner_user_id", member_id);
-                update.insert("username", db::string(&member, "username"));
-                update.insert("zimbra_email", zimbra_email);
-            }
-            let mut unset = doc! {"team":""};
-            if local_subscription {
-                update.insert("local_subscription", true);
-                update.insert("managed_by_user_id", ctx.user_id().unwrap());
-                // Ownership is the creator account. An organization value is
-                // optional display metadata and must never restrict access.
-                unset.insert("organization_id", "");
-                unset.insert("owner_user_id", "");
-                unset.insert("zimbra_email", "");
-            } else if current_owner_hub_email.is_none() && !identity_change {
-                unset.insert("zimbra_email", "");
-            }
+        if action.is_empty() && ctx.method == Method::DELETE {
             return Some(
                 match coll
-                    .update_one(doc! {"_id":id}, doc! {"$set":update,"$unset":unset})
+                    .delete_one(subscription_filter(ctx, Some(identifier)).unwrap())
                     .await
                 {
-                    Ok(_) => {
-                        let changed = ctx.json.get("username").is_some()
-                            || ctx.json.get("email").is_some()
-                            || ctx.json.get("newsletter_profile").is_some()
-                            || ctx.json.get("report_profile").is_some()
-                            || ctx.json.get("emails").is_some()
-                            || ctx.json.get("cc").is_some()
-                            || ctx.json.get("bcc").is_some()
-                            || ctx.json.get("organization").is_some()
-                            || ctx.json.get("team").is_some();
-                        let notification_error = if changed {
-                            notify(
-                                state,
-                                &emails,
-                                &copies,
-                                "updated",
-                                username,
-                                organization,
-                                &newsletter,
-                                &report,
-                            )
-                            .await
-                            .err()
-                        } else {
-                            None
-                        };
-                        if let Some(error) = notification_error {
-                            notification_delivery_error("updated", &error)
-                        } else {
-                            view::json_response(StatusCode::OK, json!({"success":true}))
-                        }
-                    }
+                    Ok(_) => view::json_response(StatusCode::OK, json!({"success":true})),
                     Err(_) => view::error(
                         StatusCode::SERVICE_UNAVAILABLE,
-                        "Unable to update subscription.",
+                        "Unable to delete subscription.",
                     ),
                 },
             );
         }
+        if action.is_empty() && ctx.method == Method::PUT {
+            return Some(save_subscription(state, ctx, Some(&existing)).await);
+        }
     }
+
     None
+}
+
+fn valid_subscription_fields(data: &Value) -> bool {
+    data.as_object().is_some_and(|o| {
+        o.keys().all(|k| {
+            matches!(
+                k.as_str(),
+                "username"
+                    | "organization_id"
+                    | "organization"
+                    | "email"
+                    | "emails"
+                    | "cc"
+                    | "bcc"
+                    | "newsletter_profile"
+                    | "report_profile"
+                    | "delivery_mode"
+            )
+        })
+    })
+}
+async fn save_subscription(
+    state: &AppState,
+    ctx: &ReqCtx,
+    existing: Option<&Document>,
+) -> Response {
+    if !valid_subscription_fields(&ctx.json) {
+        return view::error(
+            StatusCode::BAD_REQUEST,
+            "Unknown subscription field; credentials and scope/ownership changes are not accepted.",
+        );
+    }
+    let actor = ctx.user.as_ref().unwrap();
+    let org = if let Some(old) = existing {
+        old.get_object_id("organization_id").ok()
+    } else if ctx.is_superadmin() {
+        db::object_id(&ctx.field("organization_id"))
+    } else {
+        rbac::organization(actor)
+    };
+    let Some(org) = org.filter(|id| rbac::within_scope(actor, *id)) else {
+        return view::error(
+            StatusCode::FORBIDDEN,
+            "Select an organization within your permitted scope.",
+        );
+    };
+    if ctx.json.get("organization_id").is_some()
+        && db::object_id(&ctx.field("organization_id")) != Some(org)
+    {
+        return view::error(
+            StatusCode::FORBIDDEN,
+            "Organization membership is immutable.",
+        );
+    }
+    let Some(organization) = db::find_one(
+        &state.web,
+        "organizations",
+        doc! {"_id":org,"disabled":{"$ne":true}},
+    )
+    .await
+    .ok()
+    .flatten() else {
+        return view::error(StatusCode::BAD_REQUEST, "Active organization not found.");
+    };
+    let mut data = existing.map(db::bson_json).unwrap_or(json!({}));
+    merge(&mut data, &ctx.json);
+    let username = data["username"].as_str().unwrap_or("").trim();
+    let Some(owner)=auth::accounts(state).find_one(doc!{"organization_id":org,"username_key":auth::key(username),"auth_source":"local","rbac_schema":1,"disabled":false,"deleted_at":{"$exists":false}}).await.ok().flatten() else {return view::error(StatusCode::BAD_REQUEST,"The owner must be an active local user in this organization.");};
+    let owner_id = owner.get_object_id("_id").unwrap();
+    if existing.is_some_and(|old| old.get_object_id("owner_user_id").ok() != Some(owner_id)) {
+        return view::error(
+            StatusCode::FORBIDDEN,
+            "Subscription ownership is immutable. Create a new subscription for a different owner.",
+        );
+    }
+    let emails = match recipients(&data) {
+        Ok(values) => values,
+        Err(error) => return view::error(StatusCode::BAD_REQUEST, &error),
+    };
+    let copies = match copy_recipients(&data) {
+        Ok(values) => values,
+        Err(error) => return view::error(StatusCode::BAD_REQUEST, &error),
+    };
+    let newsletter = match profile(state, "newsletter", &data["newsletter_profile"]).await {
+        Ok(value) => value,
+        Err(error) => return view::error(StatusCode::BAD_REQUEST, &error),
+    };
+    let report = match profile(state, "report", &data["report_profile"]).await {
+        Ok(value) => value,
+        Err(error) => return view::error(StatusCode::BAD_REQUEST, &error),
+    };
+    if (newsletter["enabled"] == true || report["schedule_enabled"] == true)
+        && !ctx.can("subscriptions.send")
+    {
+        return view::error(
+            StatusCode::FORBIDDEN,
+            "Scheduled delivery requires subscriptions.send.",
+        );
+    }
+    if report["schedule_enabled"] == true && !ctx.can("reports.create") {
+        return view::error(
+            StatusCode::FORBIDDEN,
+            "Scheduled reports require reports.create.",
+        );
+    }
+    let mut values = doc! {"username":db::string(&owner,"username"),"organization_id":org,"organization":db::string(&organization,"name"),"owner_user_id":owner_id,"email":&emails[0],"emails":emails.clone(),"cc":copies.cc.clone(),"bcc":copies.bcc.clone(),"delivery_mode":"individual","newsletter_profile":db::json_doc(&newsletter).unwrap(),"report_profile":db::json_doc(&report).unwrap(),"updated_at":bson::DateTime::now()};
+    let coll = db::collection(&state.web, "sub_account");
+    let result = if let Some(old) = existing {
+        coll.update_one(
+            subscription_filter(ctx, Some(&db::id_string(old))).unwrap(),
+            doc! {"$set":values},
+        )
+        .await
+        .map(|_| old.get_object_id("_id").unwrap())
+    } else {
+        values.insert("managed_by_user_id", ctx.user_id().unwrap());
+        values.insert("created_at", bson::DateTime::now());
+        coll.insert_one(values)
+            .await
+            .map(|result| result.inserted_id.as_object_id().unwrap())
+    };
+    match result {
+        Ok(id) => {
+            let warning = if ctx.can("subscriptions.send") {
+                notify(
+                    state,
+                    &emails,
+                    &copies,
+                    if existing.is_some() {
+                        "updated"
+                    } else {
+                        "created"
+                    },
+                    username,
+                    &db::string(&organization, "name"),
+                    (&newsletter, &report),
+                )
+                .await
+                .err()
+            } else {
+                None
+            };
+            view::json_response(
+                StatusCode::OK,
+                json!({"success":true,"id":id.to_hex(),"notification_warning":warning}),
+            )
+        }
+        Err(_) => view::error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Unable to save subscription.",
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -2579,22 +1567,6 @@ mod tests {
     }
 
     #[test]
-    fn configured_copy_recipients_prevent_default_subscription_cleanup() {
-        let owner = ObjectId::new();
-        let mut row = default_zimbra_subscription_document(
-            &doc! {"username":"owner"},
-            owner,
-            "owner@example.com",
-            bson::DateTime::now(),
-        );
-        assert!(is_default_zimbra_subscription(&row));
-        let default = row.clone();
-        row.insert("cc", vec!["copy@example.com"]);
-        assert!(!is_default_zimbra_subscription(&row));
-        assert!(!same_subscription_identity(&row, &default));
-    }
-
-    #[test]
     fn inventory_csv_preserves_quotes_unicode_aliases_and_profile_scope() {
         let data = json!({
             "newsletter_profile":{"filters":{"vendor_product_filter":{"rows":[{"vendor":"Newsletter vendor","product":"Other","vendor_aliases":[],"product_aliases":[]}]}}},
@@ -2626,7 +1598,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires SUBSCRIPTION_TEST_MONGO_URI for a disposable database"]
-    async fn inventory_download_is_scoped_to_subscription_owner() {
+    async fn inventory_download_is_scoped_to_organization() {
         use std::{path::PathBuf, sync::Arc};
         let uri = std::env::var("SUBSCRIPTION_TEST_MONGO_URI").unwrap();
         let client = mongodb::Client::with_uri_str(&uri).await.unwrap();
@@ -2645,11 +1617,7 @@ mod tests {
             secret: "test".into(),
             bootstrap_username: "test-admin".into(),
             bootstrap_password: String::new(),
-            zimbra_base_url: String::new(),
-            zimbra_folder_name: "news".into(),
-            zimbra_timeout_seconds: 1,
-            zimbra_verify_tls: true,
-            zimbra_credential_key: String::new(),
+            cookie_secure: false,
             account_collection: "accounts".into(),
             newsletter_root: root.join("newsletters"),
             port: 0,
@@ -2663,9 +1631,10 @@ mod tests {
         };
         let owner = ObjectId::new();
         let stranger = ObjectId::new();
+        let organization = ObjectId::new();
         let id = ObjectId::new();
         db::collection(&database,"sub_account").insert_one(doc!{
-            "_id":id, "owner_user_id":owner, "emails":["owner@example.com"],
+            "_id":id, "organization_id":organization,"owner_user_id":owner, "emails":["owner@example.com"],
             "report_profile":{"filters":{"vendor_product_filter":{"rows":[{"vendor":"Owner vendor","product":"Private product"}]}}}
         }).await.unwrap();
         let mut ctx = ReqCtx {
@@ -2676,7 +1645,9 @@ mod tests {
             body: vec![],
             json: Value::Null,
             form: Default::default(),
-            user: Some(doc! {"_id":owner,"username":"owner","auth_source":"zimbra","role":"user"}),
+            user: Some(
+                doc! {"_id":owner,"username":"owner","auth_source":"local","rbac_schema":1,"role":"user","organization_id":organization},
+            ),
         };
         let response = handle(&state, &ctx).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -2699,8 +1670,9 @@ mod tests {
                 .unwrap()
                 .contains("Private product")
         );
-        ctx.user =
-            Some(doc! {"_id":stranger,"username":"stranger","auth_source":"zimbra","role":"user"});
+        ctx.user = Some(
+            doc! {"_id":stranger,"username":"stranger","auth_source":"local","rbac_schema":1,"role":"user","organization_id":ObjectId::new()},
+        );
         assert_eq!(
             handle(&state, &ctx).await.unwrap().status(),
             StatusCode::NOT_FOUND
@@ -2718,156 +1690,6 @@ mod tests {
         let filters = default_filters();
         assert_eq!(filters["collections"], json!([]));
         assert_eq!(filters["collections_mode"], "selected");
-    }
-
-    #[tokio::test]
-    #[ignore = "requires SUBSCRIPTION_TEST_MONGO_URI and no SMTP_HOST"]
-    async fn zimbra_owner_can_change_delivery_recipients_and_login_preserves_them() {
-        use std::{path::PathBuf, sync::Arc};
-        // Subscription writes still report notification errors. Keep this test
-        // offline for SMTP, and inspect the saved data after that expected error.
-        assert!(std::env::var_os("SMTP_HOST").is_none());
-        let uri = std::env::var("SUBSCRIPTION_TEST_MONGO_URI").unwrap();
-        let client = mongodb::Client::with_uri_str(&uri).await.unwrap();
-        let database = client.database(&format!(
-            "zimbra_recipients_test_{}",
-            ObjectId::new().to_hex()
-        ));
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let cfg = crate::config::Config {
-            root: root.clone(),
-            file: json!({}),
-            mongo_uri: uri,
-            web_database: database.name().into(),
-            vulnerabilities_database: database.name().into(),
-            vulnerabilities_collection: "test_news".into(),
-            secret: "test".into(),
-            bootstrap_username: "test-admin".into(),
-            bootstrap_password: String::new(),
-            zimbra_base_url: String::new(),
-            zimbra_folder_name: "news".into(),
-            zimbra_timeout_seconds: 1,
-            zimbra_verify_tls: true,
-            zimbra_credential_key: String::new(),
-            account_collection: "accounts".into(),
-            newsletter_root: root.join("newsletters"),
-            port: 0,
-        };
-        let state = AppState {
-            cfg,
-            web: database.clone(),
-            vuln: database.clone(),
-            templates: Arc::new(crate::view::environment(&root)),
-            http: reqwest::Client::new(),
-        };
-        let owner = ObjectId::new();
-        let user = doc! {"_id":owner,"username":"owner","username_key":"owner","email":"owner@example.test","zimbra_email":"owner@example.test","auth_source":"zimbra","role":"user","organization":"Team"};
-        db::collection(&database, "accounts")
-            .insert_one(user.clone())
-            .await
-            .unwrap();
-        db::collection(&database, "source_catalog")
-            .insert_one(doc! {"_id":"active","providers":["cve"]})
-            .await
-            .unwrap();
-        ensure_zimbra_subscription(&state, &user).await.unwrap();
-        let subscriptions = db::collection(&database, "sub_account");
-        let automatic = subscriptions
-            .find_one(doc! {"owner_user_id":owner,"auto_provisioned":true})
-            .await
-            .unwrap()
-            .unwrap();
-        let id = automatic.get_object_id("_id").unwrap();
-        let mut ctx = ReqCtx {
-            method: Method::PUT,
-            path: format!("/api/subscriptions/{}", id.to_hex()),
-            query: vec![],
-            headers: Default::default(),
-            body: vec![],
-            form: Default::default(),
-            user: Some(user.clone()),
-            json: json!({"emails":["External@Example.test","team@example.test"],"cc":["copy@example.test"],"bcc":["hidden@example.test"]}),
-        };
-        let response = handle(&state, &ctx).await.unwrap();
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let response_body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
-        assert!(
-            String::from_utf8(response_body.to_vec())
-                .unwrap()
-                .contains("SMTP_HOST is required")
-        );
-        ensure_zimbra_subscription(&state, &user).await.unwrap();
-        ensure_zimbra_subscriptions(&state).await.unwrap();
-        let saved = subscriptions
-            .find_one(doc! {"_id":id})
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            recipients(&db::bson_json(&saved)).unwrap(),
-            ["external@example.test", "team@example.test"]
-        );
-        assert_eq!(saved.get_str("zimbra_email").unwrap(), "owner@example.test");
-        assert_eq!(saved.get_object_id("owner_user_id").unwrap(), owner);
-        assert_eq!(
-            copy_recipients(&db::bson_json(&saved)).unwrap().bcc,
-            ["hidden@example.test"]
-        );
-
-        ctx.json = json!({"emails":[]});
-        assert_eq!(
-            handle(&state, &ctx).await.unwrap().status(),
-            StatusCode::BAD_REQUEST
-        );
-        ctx.json = json!({"username":"different-owner","emails":["other@example.test"]});
-        assert_eq!(
-            handle(&state, &ctx).await.unwrap().status(),
-            StatusCode::FORBIDDEN
-        );
-        ctx.json = json!({"email":"replacement@example.test"});
-        assert_eq!(
-            handle(&state, &ctx).await.unwrap().status(),
-            StatusCode::SERVICE_UNAVAILABLE
-        );
-        let saved = subscriptions
-            .find_one(doc! {"_id":id})
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            recipients(&db::bson_json(&saved)).unwrap(),
-            ["replacement@example.test"]
-        );
-
-        ctx.user = Some(
-            doc! {"_id":ObjectId::new(),"username":"stranger","auth_source":"zimbra","role":"user"},
-        );
-        ctx.json = json!({"emails":["stranger@example.test"]});
-        assert_eq!(
-            handle(&state, &ctx).await.unwrap().status(),
-            StatusCode::NOT_FOUND
-        );
-        ctx.user = Some(user.clone());
-        ctx.method = Method::POST;
-        ctx.path = "/api/subscriptions".into();
-        ctx.json = json!({"username":"owner","emails":["new.external@example.test"],"newsletter_profile":default_profile("newsletter"),"report_profile":default_profile("report")});
-        assert_eq!(
-            handle(&state, &ctx).await.unwrap().status(),
-            StatusCode::SERVICE_UNAVAILABLE
-        );
-        ensure_zimbra_subscription(&state, &user).await.unwrap();
-        assert_eq!(
-            subscriptions
-                .count_documents(
-                    doc! {"owner_user_id":owner,"emails":["new.external@example.test"]}
-                )
-                .await
-                .unwrap(),
-            1
-        );
-        database.drop().await.unwrap();
     }
 
     #[test]
@@ -2976,11 +1798,7 @@ mod tests {
             secret: "test".into(),
             bootstrap_username: "test".into(),
             bootstrap_password: String::new(),
-            zimbra_base_url: String::new(),
-            zimbra_folder_name: "news".into(),
-            zimbra_timeout_seconds: 1,
-            zimbra_verify_tls: true,
-            zimbra_credential_key: String::new(),
+            cookie_secure: false,
             account_collection: "accounts".into(),
             newsletter_root: root.join("newsletters"),
             port: 0,
@@ -3068,42 +1886,6 @@ mod tests {
     }
 
     #[test]
-    fn organization_member_rows_include_account_status_and_subscription() {
-        let owner_id = ObjectId::new();
-        let user = doc! {
-            "_id": owner_id,
-            "username": "member",
-            "email": "member@example.com",
-            "zimbra_email": "hub@example.com",
-            "role": "user",
-            "auth_source": "zimbra",
-            "zimbra_organization": "SW-ENG",
-            "zimbra_organization_id": "1",
-            "zimbra_is_organization_admin": false,
-            "disabled": false,
-        };
-        let subscription = doc! {
-            "_id": ObjectId::new(),
-            "owner_user_id": owner_id,
-            "username": "member",
-            "email": "member@example.com",
-            "emails": ["member@example.com"],
-            "zimbra_email": "hub@example.com",
-            "organization": "SW-ENG",
-            "newsletter_profile": {"enabled": true},
-            "report_profile": {"enabled": false},
-        };
-        let row = public_organization_member(&user, Some(&subscription));
-        assert_eq!(row["username"], "member");
-        assert_eq!(row["account_status"], "active");
-        assert_eq!(row["has_subscription"], true);
-        assert!(row["subscription"]["id"].as_str().is_some());
-        assert_eq!(row["subscription"]["organization"], "SW-ENG");
-        assert_eq!(row["subscription"]["zimbra_email"], "hub@example.com");
-        assert!(row["subscription"].get("team").is_none());
-    }
-
-    #[test]
     fn legacy_team_subscription_is_publicized_as_organization() {
         let subscription = doc! {
             "_id": ObjectId::new(),
@@ -3116,196 +1898,6 @@ mod tests {
         assert_eq!(value["organization"], "SW-ENG");
         assert_eq!(value["delivery_mode"], "individual");
         assert!(value.get("team").is_none());
-    }
-
-    #[test]
-    fn organization_member_rows_keep_disabled_members_without_subscription() {
-        let user = doc! {
-            "_id": ObjectId::new(),
-            "username": "disabled-member",
-            "email": "disabled@example.com",
-            "role": "user",
-            "auth_source": "zimbra",
-            "zimbra_organization": "SW-ENG",
-            "zimbra_organization_id": "1",
-            "disabled": true,
-        };
-        let row = public_organization_member(&user, None);
-        assert_eq!(row["account_status"], "disabled");
-        assert_eq!(row["has_subscription"], false);
-        assert!(row["subscription"].is_null());
-    }
-
-    #[test]
-    fn local_subscription_rows_keep_manual_recipients_and_scope_marker() {
-        let subscription = doc! {
-            "_id": ObjectId::new(),
-            "local_subscription": true,
-            "username": "local-report",
-            "email": "one@example.com",
-            "emails": ["one@example.com", "two@example.com"],
-            "organization": "SW-ENG",
-            "newsletter_profile": {"enabled": false},
-            "report_profile": {"enabled": true},
-        };
-        let row = public_local_subscription(&subscription);
-        assert_eq!(row["local_subscription"], true);
-        assert_eq!(row["account_status"], "local");
-        assert_eq!(row["organization"], "SW-ENG");
-        assert_eq!(row["emails"][1], "two@example.com");
-        assert_eq!(row["subscription"]["local_subscription"], true);
-        assert_eq!(row["subscription"]["emails"][0], "one@example.com");
-        assert!(row["subscription"].get("managed_by_user_id").is_none());
-    }
-
-    #[test]
-    fn self_subscription_filter_uses_only_the_new_account_owner() {
-        let owner_id = ObjectId::new();
-        let ctx = ReqCtx {
-            method: Method::GET,
-            path: "/api/subscriptions".into(),
-            query: Vec::new(),
-            headers: axum::http::HeaderMap::new(),
-            body: Vec::new(),
-            json: Value::Null,
-            form: std::collections::HashMap::new(),
-            user: Some(doc! {
-                "_id": owner_id,
-                "username": "member",
-                "email": "member@example.com",
-            }),
-        };
-        let filter = self_subscription_owner_filter(&ctx).unwrap();
-        assert_eq!(filter.get_object_id("owner_user_id").unwrap(), owner_id);
-    }
-
-    #[test]
-    fn local_subscriptions_scope_only_to_their_creator() {
-        let manager_id = ObjectId::new();
-        let ctx = ReqCtx {
-            method: Method::GET,
-            path: "/api/subscriptions".into(),
-            query: Vec::new(),
-            headers: axum::http::HeaderMap::new(),
-            body: Vec::new(),
-            json: Value::Null,
-            form: std::collections::HashMap::new(),
-            user: Some(doc! {
-                "_id": manager_id,
-                "username": "member@example.com",
-                "auth_source": "zimbra",
-                "zimbra_organization": "SW-ENG",
-                "zimbra_organization_id": "organization-a",
-            }),
-        };
-        assert!(is_zimbra_user(&ctx));
-        let scope = local_subscription_scope(&ctx).expect("manager scope");
-        assert_eq!(scope.get_bool("local_subscription"), Ok(true));
-        assert_eq!(scope.get_object_id("managed_by_user_id"), Ok(manager_id));
-        assert!(scope.get("organization").is_none());
-        assert!(scope.get("organization_id").is_none());
-        assert!(owns_local_subscription(
-            &ctx,
-            &doc! {"managed_by_user_id": manager_id}
-        ));
-        assert!(!owns_local_subscription(
-            &ctx,
-            &doc! {"managed_by_user_id": ObjectId::new()}
-        ));
-    }
-
-    #[test]
-    fn zimbra_recipient_requires_the_synced_email() {
-        let user = doc! {
-            "auth_source": "zimbra",
-            "zimbra_email": "Hub@Example.com",
-        };
-        assert_eq!(
-            zimbra_recipient(&user).unwrap(),
-            Some("hub@example.com".into())
-        );
-        let missing = doc! {"auth_source":"zimbra"};
-        assert!(zimbra_recipient(&missing).is_err());
-        let local = doc! {"auth_source":"local","email":"local@example.com"};
-        assert_eq!(zimbra_recipient(&local).unwrap(), None);
-    }
-
-    #[test]
-    fn new_zimbra_subscription_starts_with_both_profiles_disabled() {
-        let owner_id = ObjectId::new();
-        let user = doc! {
-            "_id": owner_id,
-            "username": "user@example.com",
-            "auth_source": "zimbra",
-            "organization": "",
-        };
-        let document = default_zimbra_subscription_document(
-            &user,
-            owner_id,
-            "user@example.com",
-            bson::DateTime::now(),
-        );
-        assert_eq!(document.get_object_id("owner_user_id").unwrap(), owner_id);
-        assert_eq!(
-            document.get_object_id("managed_by_user_id").unwrap(),
-            owner_id
-        );
-        assert_eq!(document["email"], "user@example.com".into());
-        assert_eq!(document["emails"].as_array().unwrap().len(), 1);
-        assert_eq!(document["newsletter_profile"]["enabled"], false.into());
-        assert_eq!(document["report_profile"]["enabled"], false.into());
-        assert_eq!(document["local_subscription"], false.into());
-    }
-
-    #[test]
-    fn legacy_default_subscription_is_identified_for_migration() {
-        let owner_id = ObjectId::new();
-        let user = doc! {
-            "_id": owner_id,
-            "username": "user@example.com",
-            "auth_source": "zimbra",
-            "organization": "SW-ENG",
-        };
-        let mut legacy = default_zimbra_subscription_document(
-            &user,
-            owner_id,
-            "user@example.com",
-            bson::DateTime::now(),
-        );
-        legacy.remove("auto_provisioned");
-        let current = default_zimbra_subscription_document(
-            &user,
-            owner_id,
-            "user@example.com",
-            bson::DateTime::now(),
-        );
-        assert!(is_legacy_subscription(&legacy));
-        assert!(is_default_zimbra_subscription(&legacy));
-        assert!(same_subscription_identity(&legacy, &current));
-    }
-
-    #[test]
-    fn configured_manual_subscription_is_not_treated_as_automatic() {
-        let owner_id = ObjectId::new();
-        let user = doc! {
-            "_id": owner_id,
-            "username": "user@example.com",
-            "auth_source": "zimbra",
-            "organization": "SW-ENG",
-        };
-        let mut manual = default_zimbra_subscription_document(
-            &user,
-            owner_id,
-            "user@example.com",
-            bson::DateTime::now(),
-        );
-        manual.remove("auto_provisioned");
-        manual
-            .get_document_mut("newsletter_profile")
-            .unwrap()
-            .insert("enabled", true);
-        assert!(is_legacy_subscription(&manual));
-        assert!(!is_default_zimbra_subscription(&manual));
     }
 
     #[test]
@@ -3379,5 +1971,35 @@ mod tests {
             json!(["cve", "hkcert", "zimbra"])
         );
         assert!(!value.to_string().contains("_review"));
+    }
+    #[test]
+    fn subscription_scope_and_public_projection_do_not_trust_legacy_fields() {
+        let organization = bson::oid::ObjectId::new();
+        let id = bson::oid::ObjectId::new();
+        let ctx = ReqCtx {
+            method: Method::GET,
+            path: "/api/subscriptions".into(),
+            query: vec![],
+            headers: Default::default(),
+            body: vec![],
+            json: Value::Null,
+            form: Default::default(),
+            user: Some(
+                doc! {"_id":bson::oid::ObjectId::new(),"organization_id":organization,"rbac_schema":1,"auth_source":"local"},
+            ),
+        };
+        assert_eq!(
+            subscription_filter(&ctx, None).unwrap(),
+            doc! {"organization_id":organization}
+        );
+        assert_eq!(
+            subscription_filter(&ctx, Some(&id.to_hex())).unwrap(),
+            doc! {"$and":[{"organization_id":organization},{"_id":id}]}
+        );
+        let row = public(
+            &doc! {"_id":id,"organization_id":organization,"username":"member","email":"member@example.test","password":"private","legacy_access_token":"private","private_future_field":"private"},
+        );
+        assert_eq!(row["organization_id"], organization.to_hex());
+        assert!(!row.to_string().contains("private"));
     }
 }

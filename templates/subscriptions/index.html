@@ -6,21 +6,21 @@
 <div class="container">
     <div class="d-flex justify-content-between align-items-center mb-4">
         <div>
-            <h2 class="mb-1"><i class="bi bi-people me-2"></i>{{ t('Organization Subscription Dashboard') if is_organization_admin else t('Subscription Management' if is_admin else 'My Subscription') }}</h2>
-            <p class="text-muted mb-0">{{ t('Manage subscriptions for members in your organization.') if is_organization_admin else t('Manage independent newsletter feeds and report profiles.' if is_admin else 'Manage your subscriptions.') }}</p>
+            <h2 class="mb-1"><i class="bi bi-people me-2"></i>Organization subscriptions</h2>
+            <p class="text-muted mb-0">Manage newsletter feeds and report profiles within your organization.</p>
         </div>
-        <button id="add-btn" class="btn btn-primary"><i class="bi bi-plus-lg me-1"></i>{{ t('Add Subscription') }}</button>
+        <button id="add-btn" class="btn btn-primary"{% if not permissions['subscriptions.create'] %} disabled{% endif %}><i class="bi bi-plus-lg me-1"></i>{{ t('Add Subscription') }}</button>
     </div>
     <div id="message" class="alert d-none"></div>
     <div class="card shadow-sm border-0 overflow-hidden">
         <div class="table-responsive">
             <table class="table table-hover align-middle mb-0">
-                <thead class="table-dark"><tr>{% if is_organization_admin %}<th>{{ t('Member') }}</th><th>{{ t('Account status') }}</th><th>{{ t('Newsletter') }}</th><th>{{ t('Report') }}</th><th>{{ t('Actions') }}</th>{% else %}<th>{{ t('Subscriber') }}</th><th>{{ t('Newsletter') }}</th><th>{{ t('Report') }}</th><th>{{ t('Actions') }}</th>{% endif %}</tr></thead>
+                <thead class="table-dark"><tr><th>Subscriber</th><th>Newsletter</th><th>Report</th><th>Actions</th></tr></thead>
                 <tbody id="rows"></tbody>
             </table>
         </div>
         <div id="loading" class="text-center text-muted py-5">{{ t('Loading subscriptions...') }}</div>
-        <div id="empty" class="text-center text-muted py-5 d-none">{{ t('No organization members yet.') if is_organization_admin else t('No personal subscription yet. Add your subscription to get started.') if not is_admin else t('No subscriptions yet.') }}</div>
+        <div id="empty" class="text-center text-muted py-5 d-none">No subscriptions yet.</div>
     </div>
 </div>
 
@@ -31,13 +31,14 @@
             <div class="modal-body">
                 <div id="subscription-modal-message" class="alert d-none" role="alert" aria-live="assertive"></div>
                 <div class="row g-3 mb-4">
-                    <div class="col-md-4"><label class="form-label" for="username">{{ t('Username') }}</label><input id="username" type="text" class="form-control" autocomplete="username" required{% if not is_admin and not is_organization_admin %} readonly{% endif %}></div>
-                    <div class="col-md-4"><label class="form-label" for="organization">{{ t('Organization') }}</label><input id="organization" class="form-control"{% if is_admin or is_organization_admin %} required{% elif current_user.auth_source != 'zimbra' %} readonly{% endif %}></div>
+                    <div class="col-md-4"><label class="form-label" for="username">{{ t('Username') }}</label><input id="username" type="text" class="form-control" autocomplete="username" required></div>
+                    <div class="col-md-4"><label class="form-label" for="organization">{{ t('Organization') }}</label><input id="organization" class="form-control" readonly></div>
+                    {% if is_superadmin %}<div class="col-md-4"><label class="form-label" for="subscription-organization-id">Organization</label><select id="subscription-organization-id" class="form-select" required></select></div>{% endif %}
                     <div class="col-12">
                         <label class="form-label" for="recipient-list">{{ t('Email recipients') }}</label>
                         <div class="form-text mb-1">{{ t('To') }}</div>
                         <div id="recipient-list" class="vstack gap-2"></div>
-                        {% if is_admin or is_organization_admin or (current_user and current_user.auth_source == 'zimbra') %}<button id="add-recipient-btn" class="btn btn-outline-secondary btn-sm mt-2" type="button"><i class="bi bi-plus-lg me-1"></i>{{ t('Add email recipient') }}</button>{% endif %}
+                        <button id="add-recipient-btn" class="btn btn-outline-secondary btn-sm mt-2" type="button"><i class="bi bi-plus-lg me-1"></i>{{ t('Add email recipient') }}</button>
                         <div class="form-text">{{ t('All notification emails are delivered through SMTP.') }}</div>
                     </div>
                     <div class="col-md-6">
@@ -106,22 +107,18 @@
 {% endblock %}
 {% block script %}
 <script id="page-config" type="application/json">{{ {
-    'subscriptionsUrl': url_for('subscription.get_organization_subscriptions') if is_organization_admin else url_for('subscription.get_subscriptions'),
+    'subscriptionsUrl': url_for('subscription.get_subscriptions'),
     'manageSubscriptionsUrl': url_for('subscription.get_subscriptions'),
     'previewUrl': url_for('subscription.preview_subscription_report'),
     'reviewsUrl': url_for('subscription.get_subscription_collections'),
     'vendorProductImportUrl': url_for('subscription.import_vendor_products'),
     'vendorProductTemplateUrl': url_for('subscription.vendor_product_template'),
-    'isAdmin': is_admin or is_organization_admin,
-    'organizationDashboard': is_organization_admin,
-    'selfManagement': not is_admin and not is_organization_admin,
     'currentUsername': current_user.username if current_user else '',
     'currentEmail': current_user.email if current_user else '',
-    'currentAccountHubEmail': current_user.email if current_user and current_user.auth_source == 'zimbra' else (current_user.account_hub_email if current_user else ''),
-    'accountHubUser': current_user.auth_source == 'zimbra' if current_user else false,
     'currentOrganization': current_user.organization if current_user else '',
-    'accountHubEnabled': true,
+    'currentOrganizationId': current_user.organization_id if current_user else '',
+    'isSuperadmin': is_superadmin,
 }|tojson }}</script>
 <script src="{{ url_for('static', filename='js/shared/collection-picker.js', v='20260921-1') }}"></script>
-<script src="{{ url_for('static', filename='js/subscriptions/index.js', v='20261030-1') }}"></script>
+<script src="{{ url_for('static', filename='js/subscriptions/index.js', v='local-rbac-1') }}"></script>
 {% endblock %}

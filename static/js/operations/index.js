@@ -72,7 +72,7 @@
         const alive = Boolean(scheduler && scheduler.alive);
         banner.className = 'alert mb-4 ' + (alive ? 'alert-success' : 'alert-warning');
         const retention = (scheduler && scheduler.retention) || {};
-        const zimbra = (scheduler && scheduler.zimbra) || {};
+        const delivery = (scheduler && scheduler.delivery) || {};
         const retentionResult = retention.last_result
             ? JSON.stringify(retention.last_result)
             : '—';
@@ -87,7 +87,7 @@
             ' · ' + t('Retention last run:') + ' ' + formatTime(retention.last_run_at) +
             ' · ' + t('Retention result:') + ' ' + escapeHtml(retentionResult) +
             '</div><div class="small mt-1">' +
-            t('Email delivery:') + ' ' + escapeHtml(zimbra.smtp_delivery ? 'SMTP' : t('Disabled')) +
+            t('Email delivery:') + ' ' + escapeHtml(delivery.smtp_delivery ? 'SMTP' : t('Disabled')) +
             '</div>';
     }
 

@@ -13,6 +13,7 @@
         <div class="card-body">
             <h5 class="card-title">{{ t('Generate Report') }}</h5>
             <form id="generate-form">
+                {% if is_superadmin %}<label for="report-organization-id" class="form-label">Report organization</label><select id="report-organization-id" class="form-select mb-3" required><option value="">Select organization</option></select>{% endif %}
                 <div class="row g-3">
                     <div class="col-md-3">
                         <label for="generation-mode" class="form-label">{{ t('Generation Mode') }}</label>
@@ -41,7 +42,7 @@
                         <button id="purge-evidence-cache-btn" type="button" class="btn btn-outline-danger btn-sm d-none">
                             <i class="bi bi-trash me-1"></i>{{ t('Purge Evidence Cache') }}
                         </button>
-                        <button id="generate-btn" class="btn btn-primary" type="submit">
+                        <button id="generate-btn" {% if not permissions['reports.create'] %}disabled{% endif %} class="btn btn-primary" type="submit">
                             <i class="bi bi-stars me-1"></i>{{ t('Generate HTML') }}
                         </button>
                     </div>

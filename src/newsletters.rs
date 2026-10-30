@@ -105,18 +105,15 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             ),
         });
     }
-    if let Some(rest) = ctx.path.strip_prefix("/generated-newsletters/") {
-        if ctx.method == Method::GET {
-            if let Some((source, tail)) = rest.split_once('/') {
-                if let Some(id) = tail.strip_suffix("/preview") {
-                    let decoded_source = urlencoding::decode(source)
-                        .unwrap_or_else(|_| std::borrow::Cow::Borrowed(source));
-                    let decoded =
-                        urlencoding::decode(id).unwrap_or_else(|_| std::borrow::Cow::Borrowed(id));
-                    return Some(preview(state, ctx, &decoded_source, &decoded, None).await);
-                }
-            }
-        }
+    if let Some(rest) = ctx.path.strip_prefix("/generated-newsletters/")
+        && ctx.method == Method::GET
+        && let Some((source, tail)) = rest.split_once('/')
+        && let Some(id) = tail.strip_suffix("/preview")
+    {
+        let decoded_source =
+            urlencoding::decode(source).unwrap_or(std::borrow::Cow::Borrowed(source));
+        let decoded = urlencoding::decode(id).unwrap_or(std::borrow::Cow::Borrowed(id));
+        return Some(preview(state, ctx, &decoded_source, &decoded, None).await);
     }
     None
 }

@@ -324,10 +324,10 @@ pub(crate) fn cve_id(document: &Document) -> String {
     let value = db::bson_json(document);
     let re = Regex::new(r"(?i)\b(?:CVE-)?(\d{4}-\d{4,})\b").unwrap();
     for key in ["code", "_id", "title", "cve", "cve_ids"] {
-        if let Some(v) = value.get(key) {
-            if let Some(caps) = re.captures(&flatten(v)) {
-                return format!("CVE-{}", caps.get(1).unwrap().as_str().to_uppercase());
-            }
+        if let Some(v) = value.get(key)
+            && let Some(caps) = re.captures(&flatten(v))
+        {
+            return format!("CVE-{}", caps.get(1).unwrap().as_str().to_uppercase());
         }
     }
     for key in ["id", "cveId", "cve_id", "cve_ids", "cveCode"] {
@@ -518,15 +518,15 @@ fn normalized_document(document: &Document) -> Value {
             object.insert("severity".into(), Value::String(values.join(", ")));
         }
     }
-    if is_blank(object.get("vendor")) {
-        if let Some(vendor) = unique_join(vendors) {
-            object.insert("vendor".into(), Value::String(vendor));
-        }
+    if is_blank(object.get("vendor"))
+        && let Some(vendor) = unique_join(vendors)
+    {
+        object.insert("vendor".into(), Value::String(vendor));
     }
-    if is_blank(object.get("product")) {
-        if let Some(product) = unique_join(products) {
-            object.insert("product".into(), Value::String(product));
-        }
+    if is_blank(object.get("product"))
+        && let Some(product) = unique_join(products)
+    {
+        object.insert("product".into(), Value::String(product));
     }
     if is_blank(object.get("affected")) {
         if affected.is_empty() {
@@ -643,17 +643,17 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
     if ctx.path == "/reviews" && ctx.method == Method::GET {
         return Some(render(state, ctx, "reviews/index.html", json!({})));
     }
-    if let Some(name) = ctx.path.strip_prefix("/reviews/") {
-        if ctx.method == Method::GET {
-            let exists = canonical_name(state, name)
-                .is_some_and(|canonical| state.cfg.vulnerabilities_collection == canonical);
-            return Some(render(
-                state,
-                ctx,
-                "reviews/collection.html",
-                json!({"collection_name":canonical_name(state, name).unwrap_or_else(|| name.to_owned()),"initial_error":if exists {Value::Null}else{json!("News collection not found.")}}),
-            ));
-        }
+    if let Some(name) = ctx.path.strip_prefix("/reviews/")
+        && ctx.method == Method::GET
+    {
+        let exists = canonical_name(state, name)
+            .is_some_and(|canonical| state.cfg.vulnerabilities_collection == canonical);
+        return Some(render(
+            state,
+            ctx,
+            "reviews/collection.html",
+            json!({"collection_name":canonical_name(state, name).unwrap_or_else(|| name.to_owned()),"initial_error":if exists {Value::Null}else{json!("News collection not found.")}}),
+        ));
     }
     if ctx.path == "/api/reviews" && ctx.method == Method::GET {
         let names = match views(state).await {
@@ -715,7 +715,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             .collect();
         return Some(view::json_response(
             StatusCode::OK,
-            json!({"data":data,"page":page,"page_size":size,"total":total,"pages":((total+size-1)/size).max(1)}),
+            json!({"data":data,"page":page,"page_size":size,"total":total,"pages":total.div_ceil(size).max(1)}),
         ));
     }
     if ctx.path == "/api/reviews/auto-select" && ctx.method == Method::POST {
@@ -776,10 +776,10 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             .collect();
         let mut summary = HashMap::from([("Critical", 0), ("High", 0), ("Medium", 0), ("Low", 0)]);
         for row in &selected {
-            if let Some(p) = row["patch_priority"].as_str() {
-                if let Some(v) = summary.get_mut(p) {
-                    *v += 1;
-                }
+            if let Some(p) = row["patch_priority"].as_str()
+                && let Some(v) = summary.get_mut(p)
+            {
+                *v += 1;
             }
         }
         return Some(view::json_response(
@@ -834,41 +834,41 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             serde_json::to_string_pretty(&documents).unwrap_or_default(),
         ));
     }
-    if let Some(name) = ctx.path.strip_prefix("/api/reviews/") {
-        if ctx.method == Method::GET {
-            if canonical_name(state, name).is_none() {
-                return Some(view::error(
-                    StatusCode::NOT_FOUND,
-                    "Review collection not found.",
-                ));
-            }
-            let filter = match filter(ctx) {
-                Ok(v) => v,
-                Err(e) => return Some(view::error(StatusCode::BAD_REQUEST, &e)),
-            };
-            let page = ctx.arg("page").parse::<u64>().unwrap_or(1).max(1);
-            let size = ctx
-                .arg("page_size")
-                .parse::<u64>()
-                .unwrap_or(25)
-                .clamp(1, 100);
-            return Some(
-                match query_rows(state, name, filter, (page - 1) * size, size as i64).await {
-                    Ok((total, documents)) => view::json_response(
-                        StatusCode::OK,
-                        json!({"data":documents.iter().map(|d| {
+    if let Some(name) = ctx.path.strip_prefix("/api/reviews/")
+        && ctx.method == Method::GET
+    {
+        if canonical_name(state, name).is_none() {
+            return Some(view::error(
+                StatusCode::NOT_FOUND,
+                "Review collection not found.",
+            ));
+        }
+        let filter = match filter(ctx) {
+            Ok(v) => v,
+            Err(e) => return Some(view::error(StatusCode::BAD_REQUEST, &e)),
+        };
+        let page = ctx.arg("page").parse::<u64>().unwrap_or(1).max(1);
+        let size = ctx
+            .arg("page_size")
+            .parse::<u64>()
+            .unwrap_or(25)
+            .clamp(1, 100);
+        return Some(
+            match query_rows(state, name, filter, (page - 1) * size, size as i64).await {
+                Ok((total, documents)) => view::json_response(
+                    StatusCode::OK,
+                    json!({"data":documents.iter().map(|d| {
                             let selection_id = db::id_string(d);
                             let provider = document_source(d);
                             json!({"collection":state.cfg.vulnerabilities_collection,"source":provider,"preview_url":preview_url(&provider, &selection_id),"selection_id":selection_id,"document":normalized_document(d)})
-                        }).collect::<Vec<_>>(),"page":page,"page_size":size,"total":total,"pages":((total+size-1)/size).max(1)}),
-                    ),
-                    Err(_) => view::error(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "Unable to query the vulnerabilities database.",
-                    ),
-                },
-            );
-        }
+                        }).collect::<Vec<_>>(),"page":page,"page_size":size,"total":total,"pages":total.div_ceil(size).max(1)}),
+                ),
+                Err(_) => view::error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Unable to query the vulnerabilities database.",
+                ),
+            },
+        );
     }
     None
 }

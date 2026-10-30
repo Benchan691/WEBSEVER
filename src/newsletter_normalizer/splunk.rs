@@ -199,10 +199,9 @@ pub(super) fn overview(details: &Value, description: &str) -> Vec<Value> {
     // description_tables wrapper. This is still structured source data.
     if let Some(table) = source_table(
         &json!({"headers": ["package", "remediation", "cve", "severity"], "rows": details["packages"]}),
-    ) {
-        if !pending.contains(&table) {
-            pending.insert(0, table);
-        }
+    ) && !pending.contains(&table)
+    {
+        pending.insert(0, table);
     }
     if pending.is_empty() {
         return Vec::new();

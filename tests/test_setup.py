@@ -3,7 +3,6 @@
 Run: python3 -m unittest discover -s tests -p 'test_setup.py' -v
 No SSH, root access, database, Docker daemon, or systemd service is needed.
 """
-import base64
 import contextlib
 import io
 import json
@@ -16,7 +15,7 @@ import unittest
 
 PROJECT = Path(__file__).resolve().parents[1]
 SCRIPT = PROJECT / "setup.sh"
-BRANCH = "redesign/unified-news-collection"
+BRANCH = "feature/local-rbac-organization-management"
 PYTHON_SOURCE = SCRIPT.read_text().split("<<'PY_SETUP'\n", 1)[1].split("\nPY_SETUP\n", 1)[0]
 HELPER = {"__name__": "installer_tests"}
 exec(compile(PYTHON_SOURCE, "setup.sh:python", "exec"), HELPER)
@@ -54,7 +53,7 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(rewrite(uri), uri)
         self.assertEqual(rewrite("mongodb://mongo.example/db?x=@localhost"), "mongodb://mongo.example/db?x=@localhost")
 
-    def test_configuration_keeps_encryption_key_custom_settings_and_hides_secrets(self):
+    def test_configuration_keeps_local_secrets_and_custom_settings(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             repo, backup = root / "repo", root / "backup"
@@ -62,12 +61,10 @@ class ConfigurationTests(unittest.TestCase):
             (backup / "config").mkdir(parents=True)
             (repo / "config/config.json").write_text(json.dumps({"mongodb": {}, "enriched": {"new_setting": 3}}))
             (backup / "config/config.json").write_text(json.dumps({"enriched": {"llm_model": "custom"}}))
-            key = base64.b64encode(bytes(range(32))).decode()
             original = {
                 "LOCAL_MONGO_URI": "mongodb://test-user:test-secret@mongo.example/",
                 "FLASK_SECRET_KEY": "existing-session-secret",
                 "WEB_AUTH_BOOTSTRAP_PASSWORD": "existing-admin-password",
-                "ZIMBRA_CREDENTIAL_KEY": key,
                 "SMTP_PASSWORD": "existing-smtp-secret",
                 "NEWSLETTER_ROOT": "saved-newsletters",
                 "ACCOUNT_COLLECTION": "auth",
@@ -85,7 +82,7 @@ class ConfigurationTests(unittest.TestCase):
             finally:
                 HELPER["prompt"], HELPER["hidden"] = original_prompt, original_hidden
             _, configured = HELPER["read_env"](repo / ".env")
-            for name in ("ZIMBRA_CREDENTIAL_KEY", "FLASK_SECRET_KEY", "WEB_AUTH_BOOTSTRAP_PASSWORD", "SMTP_PASSWORD"):
+            for name in ("FLASK_SECRET_KEY", "WEB_AUTH_BOOTSTRAP_PASSWORD", "SMTP_PASSWORD"):
                 self.assertEqual(configured[name], original[name])
                 self.assertNotIn(original[name], output.getvalue())
             self.assertEqual(configured["ACCOUNT_COLLECTION"], "accounts")
@@ -141,7 +138,7 @@ class RepositoryTests(unittest.TestCase):
         self.git("-C", str(self.seed), "remote", "add", "origin", str(self.remote))
         self.git("-C", str(self.seed), "push", "origin", "main")
         self.git("-C", str(self.seed), "switch", "-c", BRANCH)
-        (self.seed / "src/zimbra.rs").write_text("new Zimbra implementation\n")
+        (self.seed / "src/rbac.rs").write_text("new local RBAC implementation\n")
         (self.seed / "README.md").write_text("target version\n")
         self.git("-C", str(self.seed), "add", ".")
         self.git("-C", str(self.seed), "commit", "-m", "target")

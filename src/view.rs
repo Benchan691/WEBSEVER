@@ -49,22 +49,11 @@ pub fn environment(root: &Path) -> Environment<'static> {
                     urlencoding::encode(&get("next"))
                 ),
                 "auth.login" => "/login".into(),
-                "auth.local_login" => "/login/local".into(),
-                "auth.logout" => "/logout".into(),
                 "auth.settings" => "/settings".into(),
-                "auth.sub_admins" => "/admin/sub-admins".into(),
-                "auth.account_users" => "/admin/account-users".into(),
-                "auth.organization_members" => "/organization/members".into(),
-                "auth.get_sub_admins" => "/api/admin/sub-admins".into(),
-                "auth.get_account_users" => "/api/admin/account-users".into(),
-                "auth.get_organization_members" => "/api/organization/members".into(),
                 "auth.change_password" => "/api/auth/password".into(),
                 "auth.update_profile" => "/api/auth/profile".into(),
                 "subscription.subscriptions" => "/subscriptions".into(),
                 "subscription.get_subscriptions" => "/api/subscriptions".into(),
-                "subscription.get_organization_subscriptions" => {
-                    "/api/organization/subscriptions".into()
-                }
                 "subscription.get_subscription_collections" => {
                     "/api/subscriptions/collections".into()
                 }
@@ -78,6 +67,10 @@ pub fn environment(root: &Path) -> Environment<'static> {
                     "/api/subscriptions/report-preview".into()
                 }
                 "review.reviews" => "/reviews".into(),
+                "review.import_vendor_products" => "/api/reviews/vendor-product-import".into(),
+                "review.vendor_product_template" => {
+                    "/api/reviews/vendor-product-template.csv".into()
+                }
                 "review.get_review_documents" => format!("/api/reviews/{}", get("collection_name")),
                 "review.search_review_documents" => "/api/reviews/search".into(),
                 "review.auto_select_review_documents" => "/api/reviews/auto-select".into(),
@@ -183,14 +176,17 @@ pub fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
 mod tests {
     use super::*;
     #[test]
-    fn browser_pages_render_with_rust_template_functions() {
+    fn local_pages_render_and_management_uses_fixed_grouped_catalog() {
         let env = environment(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
-        let context = json!({"locale":"ch","html_lang":"zh-Hans","i18n_catalog":{},"current_user":{"username":"admin","role":"admin","auth_source":"local","email":"","organization":""},"is_admin":true,"is_top_admin":true,"is_organization_admin":false,"config":{"ACCOUNT_HUB_ENABLED":false},"request":{"path":"/reviews","full_path":"/reviews","blueprint":"review","endpoint":""},"collection_name":"cve_review","initial_error":null});
-        for name in [
+        let permissions = crate::rbac::CATALOG
+            .iter()
+            .map(|p| (p.id, true))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let context = json!({"locale":"en","html_lang":"en","i18n_catalog":{},"permissions":permissions,"permission_catalog":crate::rbac::CATALOG,"is_superadmin":true,"current_user":{"username":"admin","role":"superadmin","email":"admin@example.test","organization":"Test","organization_id":"012345678901234567890123","must_change_password":false},"request":{"path":"/","next":"/subscriptions","args":{},"blueprint":"auth","endpoint":""},"collection_name":"news"});
+        for template in [
             "auth/login.html",
             "auth/settings.html",
-            "auth/organization_members.html",
-            "auth/sub_admins_legacy.html",
+            "auth/management.html",
             "subscriptions/index.html",
             "reviews/index.html",
             "reviews/collection.html",
@@ -199,182 +195,29 @@ mod tests {
             "errors/403.html",
             "errors/404.html",
         ] {
-            env.get_template(name)
+            let html = env
+                .get_template(template)
                 .unwrap()
                 .render(context.clone())
-                .unwrap_or_else(|error| panic!("{name}: {error}"));
+                .unwrap_or_else(|error| panic!("{template}: {error}"));
+            assert!(!html.contains("Account Hub"));
+            assert!(!html.contains("Sign in with Zimbra"));
         }
-        let reviews_html = env
-            .get_template("reviews/index.html")
+        let settings = env
+            .get_template("auth/settings.html")
             .unwrap()
             .render(context.clone())
             .unwrap();
-        assert!(reviews_html.contains("href=\"&#x2f;reviews\""));
-        assert!(reviews_html.contains("filter-vendor-product-file"));
-        assert!(!reviews_html.contains("filter-search"));
-        assert!(reviews_html.contains("document-email-frame"));
-        assert!(!reviews_html.contains("document-json"));
-        let collection_html = env
-            .get_template("reviews/collection.html")
+        assert!(settings.contains("id=\"password-form\""));
+        assert!(settings.contains("id=\"profile-form\""));
+        let management = env
+            .get_template("auth/management.html")
             .unwrap()
-            .render(context.clone())
+            .render(context)
             .unwrap();
-        assert!(collection_html.contains("detail-email-frame"));
-        assert!(!collection_html.contains("detail-json"));
-        let translated = env
-            .render_str("{{ t('{n} per page', n=25) }}", json!({"locale":"en"}))
-            .unwrap();
-        assert_eq!(translated, "25 per page");
-    }
-
-    #[test]
-    fn account_hub_settings_hide_profile_email_editor() {
-        let env = environment(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
-        let html = env
-            .get_template("auth/settings.html")
-            .unwrap()
-            .render(json!({
-                "locale":"ch",
-                "html_lang":"zh-Hans",
-                "i18n_catalog":{},
-                "current_user":{
-                    "username":"s2487",
-                    "role":"user",
-                    "auth_source":"zimbra",
-                    "email":"hub@example.com",
-                    "organization":"SW-ENG",
-                    "must_change_password":false
-                },
-                "config":{"ZIMBRA_ENABLED":true},
-                "request":{"path":"/settings","full_path":"/settings","blueprint":"auth","endpoint":"auth.settings"}
-            }))
-            .unwrap();
-        assert!(html.contains("s2487"));
-        assert!(html.contains("组织"));
-        assert!(html.contains("Zimbra"));
-        assert!(html.contains("Zimbra"));
-        assert!(!html.contains("profile-form"));
-        assert!(!html.contains("profile-email"));
-        assert!(!html.contains("Save profile"));
-        assert!(!html.contains("/api/auth/profile"));
-    }
-
-    #[test]
-    fn local_settings_keep_profile_and_password_forms() {
-        let env = environment(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
-        let html = env
-            .get_template("auth/settings.html")
-            .unwrap()
-            .render(json!({
-                "locale":"en",
-                "html_lang":"en",
-                "i18n_catalog":{},
-                "current_user":{
-                    "username":"admin",
-                    "role":"admin",
-                    "auth_source":"local",
-                    "email":"admin@example.com",
-                    "must_change_password":false
-                },
-                "config":{"ACCOUNT_HUB_ENABLED":false},
-                "request":{"path":"/settings","full_path":"/settings","blueprint":"auth","endpoint":"auth.settings"}
-            }))
-            .unwrap();
-        assert!(html.contains("id=\"profile-form\""));
-        assert!(html.contains("id=\"profile-email\""));
-        assert!(html.contains("Save profile"));
-        assert!(html.contains("id=\"password-form\""));
-    }
-
-    #[test]
-    fn organization_member_editor_hides_optional_email_field() {
-        let env = environment(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
-        let html = env
-            .get_template("auth/organization_members.html")
-            .unwrap()
-            .render(json!({
-                "locale":"ch",
-                "html_lang":"zh-Hans",
-                "i18n_catalog":{},
-                "current_user":{
-                    "username":"s2487",
-                    "role":"user",
-                    "auth_source":"account_hub",
-                    "organization":"SW-ENG",
-                    "organization_admin":true
-                },
-                "is_admin":false,
-                "is_top_admin":false,
-                "is_organization_admin":true,
-                "config":{"ACCOUNT_HUB_ENABLED":true},
-                "request":{"path":"/organization/members","full_path":"/organization/members","blueprint":"auth","endpoint":"auth.organization_members"}
-            }))
-            .unwrap();
-        assert!(html.contains("organization-member-username"));
-        assert!(html.contains("organization-member-disabled"));
-        assert!(!html.contains("organization-member-email"));
-        assert!(!html.contains("邮箱（可选）"));
-    }
-
-    #[test]
-    fn organization_subscription_dashboard_renders() {
-        let env = environment(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
-        let html = env
-            .get_template("subscriptions/index.html")
-            .unwrap()
-            .render(json!({
-                "locale":"ch",
-                "html_lang":"zh-Hans",
-                "i18n_catalog":{},
-                "current_user":{"username":"manager","role":"user","auth_source":"account_hub","email":"manager@example.com","organization":"SW-ENG"},
-                "is_admin":false,
-                "is_top_admin":false,
-                "is_organization_admin":true,
-                "config":{"ACCOUNT_HUB_ENABLED":true},
-                "request":{"path":"/subscriptions","full_path":"/subscriptions","blueprint":"subscription","endpoint":""}
-            }))
-            .unwrap();
-        assert!(html.contains("组织订阅面板"));
-        assert!(html.contains("organization/subscriptions"));
-        assert!(html.contains("for=\"organization\""));
-        assert!(!html.contains("for=\"team\""));
-        assert!(!html.contains("团队"));
-        assert!(html.contains("add-recipient-btn"));
-        assert!(html.contains("organizationDashboard"));
-    }
-
-    #[test]
-    fn self_subscription_page_renders_self_management_controls() {
-        let env = environment(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
-        let html = env
-            .get_template("subscriptions/index.html")
-            .unwrap()
-            .render(json!({
-                "locale":"ch",
-                "html_lang":"zh-Hans",
-                "i18n_catalog":{},
-                "current_user":{"username":"member","email":"hub@example.com","organization":"SW-ENG","role":"user","auth_source":"zimbra"},
-                "is_admin":false,
-                "is_top_admin":false,
-                "is_organization_admin":false,
-                "config":{"ZIMBRA_ENABLED":true},
-                "request":{"path":"/subscriptions","full_path":"/subscriptions","blueprint":"subscription","endpoint":""}
-        }))
-        .unwrap();
-        assert!(html.contains("我的订阅"));
-        assert!(html.contains("管理您的订阅。"));
-        assert!(!html.contains("您只能管理自己的订阅。"));
-        assert!(html.contains("id=\"add-btn\""));
-        assert!(html.contains("添加订阅"));
-        assert!(!html.contains("添加本地订阅"));
-        assert!(html.contains("for=\"organization\""));
-        assert!(html.contains("<input id=\"organization\" class=\"form-control\">"));
-        assert!(!html.contains("团队"));
-        assert!(html.contains("\"selfManagement\":true"));
-        assert!(html.contains("\"currentUsername\":\"member\""));
-        assert!(html.contains("\"currentAccountHubEmail\":\"hub@example.com\""));
-        assert!(html.contains("\"currentOrganization\":\"SW-ENG\""));
-        assert!(!html.contains("id=\"delivery-mode\""));
+        assert!(management.contains("permission-checkboxes"));
+        assert!(management.contains("organizations.manage"));
+        assert!(management.contains("shown once"));
     }
 
     #[test]

@@ -119,18 +119,19 @@ async fn newsletter_success(state: &AppState, id: ObjectId, cursor: &str, delive
             .await;
     }
 }
-async fn manager_paused(state: &AppState, sub: &Document) -> bool {
-    let Ok(id) = sub.get_object_id("managed_by_user_id") else {
-        return false;
-    };
-    let manager = db::find_one(&state.web, &state.cfg.account_collection, doc! {"_id":id})
+async fn delivery_owner(state: &AppState, sub: &Document) -> Option<Document> {
+    let id = sub.get_object_id("owner_user_id").ok()?;
+    let user = db::find_one(&state.web, &state.cfg.account_collection, doc! {"_id":id})
         .await
-        .ok()
-        .flatten();
-    manager.is_some_and(|u| {
-        db::bool_field(&u, "disabled")
-            && db::bool_field(&u, "pause_managed_subscriptions_when_disabled")
-    })
+        .ok()??;
+    let user = crate::auth::principal(state, user).await?;
+    // Legacy and unscoped subscriptions remain quarantined, including those
+    // visible to superadmin. No startup conversion or automatic delivery.
+    let org = sub.get_object_id("organization_id").ok()?;
+    (crate::rbac::organization(&user) == Some(org)
+        && crate::rbac::has(&user, "subscriptions.send")
+        && !db::bool_field(&user, "must_change_password"))
+    .then_some(user)
 }
 async fn scheduled_report(state: &AppState, sub: &Document) {
     let id = match sub.get_object_id("_id") {
@@ -189,6 +190,9 @@ async fn scheduled_report(state: &AppState, sub: &Document) {
     let mut job = doc! {"generation_mode":mode,"effective_generation_mode":mode,"report_language":"en","effective_report_language":"en","search_prompt":text(profile,"search_prompt"),"input_source":"review_selections","source_count":count as i64,"processed_count":0,"current_position":0,"item_fallback_count":0,"status":"queued","created_at":now,"updated_at":now,"provider":if mode=="template"{"Fixed Template"}else{"Search API + llama-server"},"model":if mode=="template"{"Fixed Template"}else{"Enriched Weekly"},"progress_percent":0,"progress_current":0,"progress_total":count as i64,"pipeline_logs":[]};
     if let Ok(owner) = sub.get_object_id("managed_by_user_id") {
         job.insert("managed_by_user_id", owner);
+    }
+    if let Ok(org) = sub.get_object_id("organization_id") {
+        job.insert("organization_id", org);
     }
     let Ok(inserted) = db::collection(&state.web, "report_jobs")
         .insert_one(job)
@@ -427,10 +431,12 @@ async fn tick(state: &AppState) {
         .await
         .unwrap_or_default();
     for sub in subscriptions {
-        if manager_paused(state, &sub).await {
+        let Some(owner) = delivery_owner(state, &sub).await else {
             continue;
+        };
+        if crate::rbac::has(&owner, "reports.create") {
+            scheduled_report(state, &sub).await;
         }
-        scheduled_report(state, &sub).await;
         newsletters_tick(state, &sub).await;
         newsletter_statistics::scheduled_tick(state, &sub).await;
     }

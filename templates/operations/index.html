@@ -20,10 +20,10 @@
             <button class="nav-link active" id="health-tab" data-bs-toggle="tab" data-bs-target="#health-panel" type="button" role="tab" aria-controls="health-panel" aria-selected="true">{{ t('Scheduler Health') }}</button>
         </li>
         <li class="nav-item" role="presentation">
-            <button class="nav-link" id="templates-tab" data-bs-toggle="tab" data-bs-target="#templates-panel" type="button" role="tab" aria-controls="templates-panel" aria-selected="false">{{ t('Email Templates') }}</button>
+            <button class="nav-link" id="templates-tab" {% if not permissions['operations.configure'] %}hidden{% endif %} data-bs-toggle="tab" data-bs-target="#templates-panel" type="button" role="tab" aria-controls="templates-panel" aria-selected="false">{{ t('Email Templates') }}</button>
         </li>
         <li class="nav-item" role="presentation">
-            <button class="nav-link" id="source-list-tab" data-bs-toggle="tab" data-bs-target="#source-list-panel" type="button" role="tab" aria-controls="source-list-panel" aria-selected="false">{{ t('Source List') }}</button>
+            <button class="nav-link" id="source-list-tab" {% if not permissions['operations.configure'] %}hidden{% endif %} data-bs-toggle="tab" data-bs-target="#source-list-panel" type="button" role="tab" aria-controls="source-list-panel" aria-selected="false">{{ t('Source List') }}</button>
         </li>
     </ul>
 

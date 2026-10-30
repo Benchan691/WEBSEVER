@@ -89,12 +89,12 @@ async fn latest(state: &AppState) -> Vec<Value> {
         let Ok(document) = group.get_document("document") else {
             continue;
         };
-        let id = db::id_string(&document);
+        let id = db::id_string(document);
         let timestamp = document
             .get("observed_at")
             .map(|v| format!("{v:?}"))
             .unwrap_or_default();
-        let source_url = canonical_source_url(&document);
+        let source_url = canonical_source_url(document);
         rows.push(json!({"source_collection":source,"review_collections":[state.cfg.vulnerabilities_collection],"selection_id":id,"source_timestamp":timestamp,"source_url":source_url}));
     }
     rows
@@ -113,20 +113,11 @@ async fn health(state: &AppState, ctx: &ReqCtx) -> Value {
         .and_then(|v| v.get_datetime("last_tick_at").ok());
     let alive = last
         .is_some_and(|t| bson::DateTime::now().timestamp_millis() - t.timestamp_millis() < 120000);
-    let filter = if ctx.is_top_admin(state) {
-        doc! {}
-    } else {
-        doc! {"managed_by_user_id":ctx.user_id()}
-    };
+    let filter = ctx.owner_filter(state);
     let subs = db::find_many(&state.web, "sub_account", filter.clone(), 5000)
         .await
         .unwrap_or_default();
-    let zimbra_status = json!({
-        "base_url": state.cfg.zimbra_base_url,
-        "folder": state.cfg.zimbra_folder_name,
-        "direct_delivery": false,
-        "smtp_delivery": true
-    });
+    let delivery_status = json!({"smtp_delivery":true});
     let mut reports = Vec::new();
     let mut newsletters = Vec::new();
     for item in subs {
@@ -196,7 +187,7 @@ async fn health(state: &AppState, ctx: &ReqCtx) -> Value {
         reports.push(json!({"username":value["username"],"emails":emails,"email":email,"organization":organization,"enabled":report["enabled"],"schedule_enabled":report["schedule_enabled"],"cron_expression":crate::cron_schedule::expression(report),"generation_mode":report["generation_mode"],"report_language":report["report_language"],"next_run_at":report["next_run_at"],"due":false,"last_run_at":report["last_run_at"],"last_error":report["last_error"],"last_job_id":report["last_job_id"],"last_match_count":report["last_match_count"],"delivery":{}}));
         newsletters.push(json!({"username":value["username"],"emails":emails,"email":email,"organization":organization,"enabled":newsletter["enabled"],"delivery_cursor":newsletter["delivery_cursor"],"cve_delivery_cutoff":newsletter["cve_delivery_cutoff"],"last_error":newsletter["last_error"],"last_error_at":newsletter["last_error_at"],"last_success_at":newsletter["last_success_at"],"total_delivered":total_delivered,"by_collection":[],"latest_delivery":latest_delivery.unwrap_or(Value::Null)}));
     }
-    json!({"generated_at":chrono::Utc::now().to_rfc3339(),"scheduler":{"alive":alive,"last_tick_at":last.map(|v|v.to_string()).unwrap_or_default(),"hostname":heartbeat.as_ref().map(|v|db::string(v,"hostname")).unwrap_or_default(),"pid":heartbeat.as_ref().and_then(|v|v.get_i64("pid").ok()),"retention":heartbeat.as_ref().and_then(|v|v.get_document("retention").ok()).map(db::bson_json).unwrap_or(json!({})),"zimbra":zimbra_status},"reports":reports,"newsletters":newsletters})
+    json!({"generated_at":chrono::Utc::now().to_rfc3339(),"scheduler":{"alive":alive,"last_tick_at":last.map(|v|v.to_string()).unwrap_or_default(),"hostname":heartbeat.as_ref().map(|v|db::string(v,"hostname")).unwrap_or_default(),"pid":heartbeat.as_ref().and_then(|v|v.get_i64("pid").ok()),"retention":heartbeat.as_ref().and_then(|v|v.get_document("retention").ok()).map(db::bson_json).unwrap_or(json!({})),"delivery":delivery_status},"reports":reports,"newsletters":newsletters})
 }
 pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
     if ctx.path == "/operations" && ctx.method == Method::GET {

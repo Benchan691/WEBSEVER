@@ -6,3 +6,6 @@
 .DS_Store
 /tests/__pycache__/
 
+
+# Local Python validation caches
+__pycache__/
