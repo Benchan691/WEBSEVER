@@ -198,11 +198,17 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
     }
     if ctx.path == "/api/roles" {
         if ctx.method == Method::GET {
+            // Retired roles (disabled) are kept for delegation history and
+            // only list again when explicitly requested.
+            let mut scope = rbac::scope(Some(actor));
+            if ctx.arg("include_deleted").is_empty() {
+                scope.insert("disabled", doc! {"$ne": true});
+            }
             return Some(
                 match db::find_sorted(
                     &state.web,
                     "roles",
-                    rbac::scope(Some(actor)),
+                    scope,
                     doc! {"name_key":1},
                     5000,
                 )
@@ -259,11 +265,18 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
     }
     if ctx.path == "/api/users" {
         if ctx.method == Method::GET {
+            // Retired accounts (deleted_at set) keep their records for
+            // subscriptions and audit trails, but no longer list in the panel
+            // unless the caller asks for them.
+            let mut scope = rbac::scope(Some(actor));
+            if ctx.arg("include_deleted").is_empty() {
+                scope.insert("deleted_at", doc! {"$exists": false});
+            }
             return Some(
                 match db::find_sorted(
                     &state.web,
                     &state.cfg.account_collection,
-                    rbac::scope(Some(actor)),
+                    scope,
                     doc! {"username_key":1},
                     5000,
                 )
@@ -473,6 +486,87 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
             return Some(match auth::accounts(state).update_one(doc!{"_id":user_id,"organization_id":id,"reserved_bootstrap":{"$ne":true}},doc!{"$set":{"role_id":role_id,"role":"Organization administrator","session_version":auth::new_secret(),"updated_at":bson::DateTime::now()}}).await {Ok(_)=>response(json!({"success":true})),Err(_)=>unavailable()});
         }
     }
+    if let ["api", "roles", raw, "restore"] = parts.as_slice() {
+        if ctx.method == Method::POST {
+            let Some(id) = db::object_id(raw) else {
+                return Some(bad("Invalid role id."));
+            };
+            let Some(role) = db::find_one(&state.web, "roles", scoped_id(ctx, id))
+                .await
+                .ok()
+                .flatten()
+            else {
+                return Some(view::error(StatusCode::NOT_FOUND, "Role not found."));
+            };
+            // custom_permissions() refuses disabled roles, so authorization
+            // runs against the role as it will exist after the restore.
+            let mut check = role.clone();
+            check.insert("disabled", false);
+            if !rbac::may_edit_role(actor, &check) {
+                return Some(denied());
+            }
+            if !db::bool_field(&role, "disabled") {
+                return Some(bad("Role is not retired."));
+            }
+            return Some(
+                match db::collection(&state.web, "roles")
+                    .update_one(
+                        scoped_id(ctx, id),
+                        doc! {"$set":{"disabled":false,"updated_at":bson::DateTime::now()}},
+                    )
+                    .await
+                {
+                    Ok(_) => response(json!({"success":true})),
+                    Err(_) => unavailable(),
+                },
+            );
+        }
+    }
+    if let ["api", "roles", raw, "purge"] = parts.as_slice() {
+        if ctx.method == Method::DELETE {
+            let Some(id) = db::object_id(raw) else {
+                return Some(bad("Invalid role id."));
+            };
+            let Some(role) = db::find_one(&state.web, "roles", scoped_id(ctx, id))
+                .await
+                .ok()
+                .flatten()
+            else {
+                return Some(view::error(StatusCode::NOT_FOUND, "Role not found."));
+            };
+            // Same authorization as restore: the actor must hold every grant
+            // the role would confer, checked as if the role were active.
+            let mut check = role.clone();
+            check.insert("disabled", false);
+            if !rbac::may_edit_role(actor, &check) {
+                return Some(denied());
+            }
+            if !db::bool_field(&role, "disabled") {
+                return Some(bad("Role is not retired."));
+            }
+            return Some(
+                match db::collection(&state.web, "roles")
+                    .delete_one(scoped_id(ctx, id))
+                    .await
+                {
+                    Ok(result) if result.deleted_count == 1 => {
+                        // Accounts still assigned the purged role revert to the
+                        // default no-access state; best effort after the delete.
+                        if let Some(org) = rbac::organization(&role) {
+                            let _ = auth::accounts(state)
+                                .update_many(
+                                    doc! {"organization_id":org,"role_id":id},
+                                    doc! {"$set":{"role":"user"},"$unset":{"role_id":""}},
+                                )
+                                .await;
+                        }
+                        response(json!({"success":true}))
+                    }
+                    _ => unavailable(),
+                },
+            );
+        }
+    }
     if let ["api", "roles", raw] = parts.as_slice() {
         let Some(id) = db::object_id(raw) else {
             return Some(bad("Invalid role id."));
@@ -529,6 +623,73 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         let Some(id) = db::object_id(raw) else {
             return Some(bad("Invalid user id."));
         };
+        if *tail == ["restore"] && ctx.method == Method::POST {
+            // Retired accounts are rejected by principal(), so the raw record
+            // is loaded here instead of going through target_user().
+            let Some(target) = auth::accounts(state)
+                .find_one(scoped_id(ctx, id))
+                .await
+                .ok()
+                .flatten()
+            else {
+                return Some(view::error(
+                    StatusCode::NOT_FOUND,
+                    "Local account not found. Legacy accounts require explicit migration.",
+                ));
+            };
+            if db::bool_field(&target, "reserved_bootstrap") {
+                return Some(denied());
+            }
+            if !target.contains_key("deleted_at") {
+                return Some(bad("Account is not retired."));
+            }
+            // Restoring also clears the disabled flag set by the retire action
+            // and rotates the session version so stale sessions stay invalid.
+            return Some(
+                match auth::accounts(state)
+                    .update_one(
+                        doc! {"$and":[scoped_id(ctx,id),{"reserved_bootstrap":{"$ne":true}}]},
+                        doc! {"$set":{"disabled":false,"updated_at":bson::DateTime::now(),"session_version":auth::new_secret()},"$unset":{"deleted_at":""}},
+                    )
+                    .await
+                {
+                    Ok(result) if result.matched_count == 1 => response(json!({"success":true})),
+                    _ => unavailable(),
+                },
+            );
+        }
+        if *tail == ["purge"] && ctx.method == Method::DELETE {
+            // Retired accounts are rejected by principal(), so the raw record
+            // is loaded here instead of going through target_user().
+            let Some(target) = auth::accounts(state)
+                .find_one(scoped_id(ctx, id))
+                .await
+                .ok()
+                .flatten()
+            else {
+                return Some(view::error(
+                    StatusCode::NOT_FOUND,
+                    "Local account not found. Legacy accounts require explicit migration.",
+                ));
+            };
+            if db::bool_field(&target, "reserved_bootstrap") {
+                return Some(denied());
+            }
+            if !target.contains_key("deleted_at") {
+                return Some(bad("Account is not retired."));
+            }
+            // The deleted_at guard in the filter prevents a purge racing a
+            // concurrent restore.
+            return Some(
+                match auth::accounts(state)
+                    .delete_one(doc! {"$and":[scoped_id(ctx,id),{"deleted_at":{"$exists":true}}]})
+                    .await
+                {
+                    Ok(result) if result.deleted_count == 1 => response(json!({"success":true})),
+                    _ => unavailable(),
+                },
+            );
+        }
         let Some(target) = target_user(state, ctx, id).await else {
             return Some(view::error(
                 StatusCode::NOT_FOUND,

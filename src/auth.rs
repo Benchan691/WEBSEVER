@@ -64,6 +64,7 @@ pub fn public_user(user: &Document) -> Value {
         "role_id":user.get_object_id("role_id").ok().map(|id|id.to_hex()),
         "organization_id":rbac::organization(user).map(|id|id.to_hex()),
         "organization":db::string(user,"organization"),"disabled":db::bool_field(user,"disabled"),
+        "deleted":user.contains_key("deleted_at"),
         "reserved":db::bool_field(user,"reserved_bootstrap"),
         "must_change_password":db::bool_field(user,"must_change_password"),
         "migration_required":db::string(user,"auth_source")!="local" || user.get_i32("rbac_schema").ok()!=Some(1),

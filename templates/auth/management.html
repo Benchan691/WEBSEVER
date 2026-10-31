@@ -26,12 +26,14 @@
       <div class="col-12"><button class="btn btn-primary">Create account and email password</button></div>
     </form>
     {% endif %}
+    <div class="form-check mb-2"><input type="checkbox" class="form-check-input" id="show-deleted-users"><label class="form-check-label" for="show-deleted-users">Show deleted</label></div>
     <div class="table-responsive"><table class="table align-middle"><thead><tr><th>Username</th><th>Email</th><th>Organization</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead><tbody id="user-rows"></tbody></table></div>
-    <small class="text-muted">Your own account and the break-glass account cannot be changed here. Retiring an account preserves subscriptions and history.</small>
+    <small class="text-muted">Your own account and the break-glass account cannot be changed here. Retiring an account preserves subscriptions and history; tick “Show deleted” to see and restore retired accounts.</small>
   </section>
   {% endif %}
   {% if permissions['roles.view'] or permissions['roles.create'] %}
   <section class="card card-body mb-4"><h3 class="h5">Roles</h3>
+    <div class="form-check mb-2"><input type="checkbox" class="form-check-input" id="show-deleted-roles"><label class="form-check-label" for="show-deleted-roles">Show deleted</label></div>
     <div class="table-responsive"><table class="table"><thead><tr><th>Name</th><th>Type</th><th>Actions</th></tr></thead><tbody id="role-rows"></tbody></table></div>
     {% if permissions['roles.create'] or permissions['roles.edit'] %}
     <form id="role-form"><h4 id="role-form-title" class="h6">Create custom role</h4><label for="role-name" class="form-label">Role name</label><input id="role-name" class="form-control mb-3" maxlength="100" required>
@@ -47,5 +49,5 @@
 {% block script %}
 <script id="management-config" type="application/json">{{ {'user':current_user,'permissions':permissions,'catalog':permission_catalog,'superadmin':is_superadmin}|tojson }}</script>
 <script src="{{ url_for('static', filename='js/shared/api.js', v='local-rbac-2') }}"></script>
-<script src="{{ url_for('static', filename='js/auth/management.js', v='local-rbac-2') }}"></script>
+<script src="{{ url_for('static', filename='js/auth/management.js', v='local-rbac-4') }}"></script>
 {% endblock %}

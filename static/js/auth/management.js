@@ -4,6 +4,7 @@
     const can = id => Boolean(config.permissions[id]);
     const byId = id => document.getElementById(id);
     let organizations = [], users = [], roles = [], editingRole = null;
+    let showDeletedUsers = false, showDeletedRoles = false;
     const selection = byId('management-organization');
     const userOrganization = byId('new-user-organization');
     const orgId = () => selection.value;
@@ -46,9 +47,16 @@
                 row.insertCell().textContent = user.email || 'Email required before password reset';
                 row.insertCell().textContent = organizations.find(org => org.id === user.organization_id)?.name || user.organization || 'Global';
                 row.insertCell().textContent = user.role || 'No access role';
-                row.insertCell().textContent = user.migration_required ? 'Migration required (offline)' : user.reserved ? 'Reserved superadmin' : user.disabled ? 'Disabled' : 'Active';
+                row.insertCell().textContent = user.migration_required ? 'Migration required (offline)' : user.reserved ? 'Reserved superadmin' : user.deleted ? 'Deleted' : user.disabled ? 'Disabled' : 'Active';
                 const actions = row.insertCell();
                 if (user.reserved || user.id === config.user.id || user.migration_required) return;
+                if (user.deleted) {
+                    if (can('users.delete')) {
+                        actions.append(button('Restore', async () => { if (!confirm('Restore this account? It will become active again with its previous role.')) return; await request('/api/users/' + user.id + '/restore', 'POST', {}); await reload(); message('Account restored.'); }));
+                        actions.append(button('Delete forever', async () => { if (!confirm('Permanently delete this retired account? The login is removed forever and this cannot be undone.')) return; await request('/api/users/' + user.id + '/purge', 'DELETE'); await reload(); message('Account permanently deleted.'); }, true));
+                    }
+                    return;
+                }
                 if (can('users.edit')) {
                     actions.append(button(user.disabled ? 'Enable' : 'Disable', async () => { await request('/api/users/' + user.id, 'PUT', {disabled: !user.disabled}); await reload(); }));
                     actions.append(button('Edit email', async () => { const email = prompt('Account email address (required for temporary passwords)', user.email || ''); if (email !== null) { await request('/api/users/' + user.id, 'PUT', {email: email.trim()}); await reload(); message('Account email updated.'); } }));
@@ -71,8 +79,15 @@
         if (roleRows) {
             roleRows.replaceChildren();
             roles.filter(role => role.organization_id === orgId()).forEach(role => {
-                const row = roleRows.insertRow(); row.insertCell().textContent = role.name; row.insertCell().textContent = role.type + (role.disabled ? ' (retired)' : ''); const actions = row.insertCell();
-                if (role.type !== 'custom' || role.disabled) return;
+                const row = roleRows.insertRow(); row.insertCell().textContent = role.name; row.insertCell().textContent = role.type + (role.disabled ? ' (deleted)' : ''); const actions = row.insertCell();
+                if (role.type !== 'custom') return;
+                if (role.disabled) {
+                    if (can('roles.delete')) {
+                        actions.append(button('Restore', async () => { if (!confirm('Restore this role? Its permissions and delegations become active again.')) return; await request('/api/roles/' + role.id + '/restore', 'POST', {}); await reload(); message('Role restored.'); }));
+                        actions.append(button('Delete forever', async () => { if (!confirm('Permanently delete this retired role? Accounts assigned to it revert to the no-access default. This cannot be undone.')) return; await request('/api/roles/' + role.id + '/purge', 'DELETE'); await reload(); message('Role permanently deleted.'); }, true));
+                    }
+                    return;
+                }
                 if (can('roles.edit')) actions.append(button('Edit', () => { editingRole = role.id; byId('role-name').value = role.name; byId('role-form-title').textContent = 'Edit custom role'; document.querySelectorAll('[data-permission]').forEach(input => { input.checked = role.permissions.includes(input.value); }); byId('role-form').scrollIntoView(); }));
                 if (can('roles.delete')) actions.append(button('Retire', async () => { if (!confirm('Revoke this role and all delegations depending on it?')) return; await request('/api/roles/' + role.id, 'DELETE'); await reload(); }, true));
             });
@@ -80,8 +95,8 @@
     }
     async function reload() {
         const reads = await Promise.all([
-            can('users.view') ? request('/api/users') : Promise.resolve({data: []}),
-            can('roles.view') ? request('/api/roles') : Promise.resolve({data: []}),
+            can('users.view') ? request('/api/users' + (showDeletedUsers ? '?include_deleted=1' : '')) : Promise.resolve({data: []}),
+            can('roles.view') ? request('/api/roles' + (showDeletedRoles ? '?include_deleted=1' : '')) : Promise.resolve({data: []}),
             can('organizations.view') ? request('/api/organizations') : Promise.resolve({data: [{id: config.user.organization_id, name: config.user.organization}]})
         ]);
         users = reads[0].data; roles = reads[1].data; organizations = reads[2].data;
@@ -94,6 +109,10 @@
     }
     selection.onchange = () => { editingRole = null; if (byId('role-form')) byId('role-form').reset(); draw(); };
     if (userOrganization) userOrganization.onchange = () => roleOptions(byId('new-user-role'), '', userOrganization.value);
+    const showDeletedUsersBox = byId('show-deleted-users');
+    if (showDeletedUsersBox) showDeletedUsersBox.onchange = () => { showDeletedUsers = showDeletedUsersBox.checked; reload().catch(error => message(error.message, true)); };
+    const showDeletedRolesBox = byId('show-deleted-roles');
+    if (showDeletedRolesBox) showDeletedRolesBox.onchange = () => { showDeletedRoles = showDeletedRolesBox.checked; reload().catch(error => message(error.message, true)); };
     const checkboxContainer = byId('permission-checkboxes');
     if (checkboxContainer) {
         let previousGroup, column;

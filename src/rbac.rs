@@ -322,6 +322,12 @@ pub fn required(method: &Method, path: &str) -> Option<&'static str> {
                 ("DELETE", ["api", "users", id]) if ObjectId::parse_str(id).is_ok() => {
                     Some("users.delete")
                 }
+                ("POST", ["api", "users", id, "restore"]) if ObjectId::parse_str(id).is_ok() => {
+                    Some("users.delete")
+                }
+                ("DELETE", ["api", "users", id, "purge"]) if ObjectId::parse_str(id).is_ok() => {
+                    Some("users.delete")
+                }
                 ("POST", ["api", "users", id, "password-reset"])
                     if ObjectId::parse_str(id).is_ok() =>
                 {
@@ -334,6 +340,12 @@ pub fn required(method: &Method, path: &str) -> Option<&'static str> {
                     Some("roles.edit")
                 }
                 ("DELETE", ["api", "roles", id]) if ObjectId::parse_str(id).is_ok() => {
+                    Some("roles.delete")
+                }
+                ("POST", ["api", "roles", id, "restore"]) if ObjectId::parse_str(id).is_ok() => {
+                    Some("roles.delete")
+                }
+                ("DELETE", ["api", "roles", id, "purge"]) if ObjectId::parse_str(id).is_ok() => {
                     Some("roles.delete")
                 }
                 ("GET", ["reviews", name] | ["api", "reviews", name]) if !name.is_empty() => {

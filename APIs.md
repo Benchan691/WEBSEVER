@@ -31,16 +31,20 @@ Disabling an organization prevents its members from signing in or using existing
 | Method | Endpoint | Permission / body |
 | --- | --- | --- |
 | GET | `/api/permissions` | `roles.view`; fixed grouped catalog including global-only flags |
-| GET | `/api/users` | `users.view`; organization-scoped account metadata; no password hashes or tokens |
+| GET | `/api/users` | `users.view`; organization-scoped account metadata; no password hashes or tokens. Retired accounts are hidden unless `?include_deleted=1` |
 | POST | `/api/users` | `users.create`; `username`, required `email` and `organization_id`, optional custom `role_id`; assigning a role additionally requires `users.assign_roles` |
 | PUT | `/api/users/{id}` | `users.edit`; valid `email` and/or boolean `disabled` |
 | DELETE | `/api/users/{id}` | `users.delete`; retires account without removing its records |
+| POST | `/api/users/{id}/restore` | `users.delete`; empty object `{}`; reactivates a retired account with its previous role and invalidates its stale sessions; rejects the reserved superadmin and accounts that are not retired |
+| DELETE | `/api/users/{id}/purge` | `users.delete`; permanently removes a retired account record; only accounts with `deleted_at` can be purged |
 | POST | `/api/users/{id}/password-reset` | `users.reset_password`; empty object `{}`; emails a random temporary password to the account; rotates credentials/sessions only after SMTP acceptance |
 | PUT | `/api/users/{id}/role` | `users.assign_roles`; `role_id` for a custom role, or empty string to remove access |
-| GET | `/api/roles` | `roles.view`; roles within current organization |
+| GET | `/api/roles` | `roles.view`; roles within current organization. Retired roles are hidden unless `?include_deleted=1` |
 | POST | `/api/roles` | `roles.create`; `name`, `permissions` array from catalog, `organization_id` |
 | PUT | `/api/roles/{id}` | `roles.edit`; `name` and `permissions`; immutable organization and delegation parent |
 | DELETE | `/api/roles/{id}` | `roles.delete`; retires a custom role and revokes dependent authority |
+| POST | `/api/roles/{id}/restore` | `roles.delete`; empty object `{}`; reactivates a retired role, restoring its permissions and delegations; rejects roles that are not retired |
+| DELETE | `/api/roles/{id}/purge` | `roles.delete`; permanently removes a retired custom role; assigned accounts revert to the no-access default; only retired roles can be purged |
 
 Account creation requires an explicit active `organization_id`; tenant administrators can only submit their own BSON ObjectId. Provisioning/reset always require a valid account email and SMTP delivery. Successful responses return `success`, `id`, `email`, `temporary_password_sent: true` and `expires_in_hours: 24`, never plaintext passwords. Responses use `Cache-Control: no-store`. SMTP failures return JSON 503 with `code: credential_email_failed`. A failed reset leaves the previous password/session version unchanged. If the account changes during reset delivery, JSON 409 instructs the administrator to retry. First-login sessions can only change their password, view Settings, or sign out.
 
