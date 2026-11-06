@@ -2,6 +2,10 @@
 
 Rust implementation of the security newsletter portal. The new authentication store is `web.accounts`; the legacy `web.auth` and `web.subscriptions` collections are never read or migrated.
 
+For the complete architecture, module map, database models, authentication and delivery flows, HTTP endpoints, configuration, development, deployment, and troubleshooting reference, see the [System and Developer Documentation](docs/DEVELOPER_GUIDE.md).
+
+繁體中文版本：[系統與開發者文件](docs/DEVELOPER_GUIDE.zh-Hant.md)。
+
 ## Interactive server setup
 
 Copy `setup.sh` to the Linux server, then run:
