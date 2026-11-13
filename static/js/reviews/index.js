@@ -161,15 +161,12 @@
         };
     }
 
-    function ensureVendorProductFilter() {
+    function ensureFilterReady() {
         if (vendorProductImportBusy) {
             showError(t('Wait for CSV validation to finish before applying the filter.'));
             return false;
         }
-        if (hasVendorProductFilter()) return true;
-        showError(t('Upload a vendor/product CSV filter before searching review documents.'));
-        vendorProductFile.focus();
-        return false;
+        return true;
     }
 
     function importVendorProductCsv(file) {
@@ -209,11 +206,14 @@
     }
 
     function buildFilterPayload() {
-        const payload = {
-            vendor_product_filter: Object.assign({}, vendorProductFilter, {
+        const payload = {};
+        const search = document.getElementById('filter-search').value.trim();
+        if (search) payload.search = search;
+        if (hasVendorProductFilter()) {
+            payload.vendor_product_filter = Object.assign({}, vendorProductFilter, {
                 include_possible_matches: includePossibleMatches.checked,
-            }),
-        };
+            });
+        }
         const statuses = Array.from(document.querySelectorAll('input[name="status"]:checked'))
             .map(function (input) { return input.value.trim(); })
             .filter(Boolean);
@@ -519,7 +519,7 @@
     });
 
     function runSearch(page) {
-        if (!ensureVendorProductFilter()) return;
+        if (!ensureFilterReady()) return;
         activeFilters = buildFilterPayload();
         activeFilters.page = page;
         activeFilters.page_size = Number(pageSize.value);
@@ -599,7 +599,7 @@
 
     autoSelectButton.addEventListener('click', function () {
         const payload = buildAutoSelectPayload();
-        if (!ensureVendorProductFilter()) return;
+        if (!ensureFilterReady()) return;
         activeFilters = payload;
         if (!payload.count || payload.count < 1 || payload.count > 500) {
             showError(t('Auto-select count must be between 1 and 500.'));

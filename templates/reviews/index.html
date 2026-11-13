@@ -29,20 +29,25 @@
     <form id="global-filter-form" class="card shadow-sm border-0 mb-4 review-filter-card">
         <div class="card-body">
             <div class="row g-3">
+                <div class="col-12">
+                    <label for="filter-search" class="form-label">{{ t('Search keyword') }}</label>
+                    <input id="filter-search" name="search" class="form-control" placeholder="{{ t('Search by CVE, title, vendor, or product') }}" aria-describedby="filter-search-help">
+                    <div id="filter-search-help" class="form-text">{{ t('Match any word. Combine with severity, dates, or an optional CSV to narrow results.') }}</div>
+                </div>
                 <div class="col-12 col-xl-4">
                     <div class="review-filter-group">
                         <div class="review-filter-group-title">
                             <i class="bi bi-filetype-csv text-primary"></i>
                             <span>{{ t('Vendor/product CSV filter') }}</span>
                         </div>
-                        <label for="filter-vendor-product-file" class="form-label">{{ t('Vendor/product CSV (required)') }}</label>
+                        <label for="filter-vendor-product-file" class="form-label">{{ t('Vendor/product CSV (optional)') }}</label>
                         <div class="d-flex flex-wrap gap-2">
                             <input id="filter-vendor-product-file" class="form-control" type="file" accept=".csv,text/csv" aria-describedby="filter-vendor-product-help">
                             <a id="filter-vendor-product-template" class="btn btn-outline-secondary text-nowrap" href="#" download>
                                 <i class="bi bi-download me-1"></i>{{ t('Download CSV template') }}
                             </a>
                         </div>
-                        <div id="filter-vendor-product-help" class="form-text">{{ t('Upload a CSV with vendor and product rows before filtering. All review collections will be searched.') }}</div>
+                        <div id="filter-vendor-product-help" class="form-text">{{ t('Upload a CSV to limit results to your products, or search without one.') }}</div>
                         <div id="filter-vendor-product-status" class="alert small py-2 mt-2 mb-0 d-none" role="status" aria-live="polite"></div>
                         <div id="filter-vendor-product-summary" class="small text-muted mt-2">{{ t('No vendor/product CSV loaded.') }}</div>
                         <div class="form-check mt-2">
@@ -239,5 +244,5 @@
     'vendorProductTemplateUrl': url_for('subscription.vendor_product_template'),
 }|tojson }}</script>
 <script src="{{ url_for('static', filename='js/reviews/email-preview.js', v='20260921-2') }}"></script>
-<script src="{{ url_for('static', filename='js/reviews/index.js', v='20260922-1') }}"></script>
+<script src="{{ url_for('static', filename='js/reviews/index.js', v='20261113-1') }}"></script>
 {% endblock %}

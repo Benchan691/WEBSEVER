@@ -566,6 +566,9 @@
     "Automatic monthly reset is off.": "每月自动重置已关闭。",
     "Newsletter records reset. Email delivery is unchanged.": "通讯记录已重置。邮件投递设置不变。",
     "Unable to reset newsletter records.": "无法重置通讯记录。",
-    "No emails in this period": "此期间没有邮件"
+    "No emails in this period": "此期间没有邮件",
+    "Vendor/product CSV (optional)": "厂商／产品 CSV（可选）",
+    "Upload a CSV to limit results to your products, or search without one.": "上传 CSV 可按您的产品缩小结果，也可不上传直接搜索。",
+    "Match any word. Combine with severity, dates, or an optional CSV to narrow results.": "匹配任一关键词。可结合严重程度、日期或可选 CSV 缩小结果。"
   }
 }

@@ -10,6 +10,9 @@ use regex::Regex;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 
+#[cfg(test)]
+mod search_tests;
+
 const LEGACY_SOURCES: &[&str] = &[
     "avd",
     "cnvd",
@@ -120,6 +123,7 @@ fn filter_arg(ctx: &ReqCtx, key: &str) -> String {
                 .map(str::to_owned)
                 .or_else(|| value.as_i64().map(|number| number.to_string()))
                 .or_else(|| value.as_u64().map(|number| number.to_string()))
+                .or_else(|| value.as_bool().map(|value| value.to_string()))
         })
         .unwrap_or_default()
 }
@@ -139,7 +143,7 @@ fn filter_args(ctx: &ReqCtx, key: &str) -> Vec<String> {
     }
 }
 
-fn required_vendor_product_filter(ctx: &ReqCtx) -> Result<Value, String> {
+fn optional_vendor_product_filter(ctx: &ReqCtx) -> Result<Option<Value>, String> {
     let value = if ctx.method == Method::GET {
         let raw = ctx.arg("vendor_product_filter");
         if raw.trim().is_empty() {
@@ -155,23 +159,7 @@ fn required_vendor_product_filter(ctx: &ReqCtx) -> Result<Value, String> {
             .unwrap_or(Value::Null)
     };
     vendor_matcher::validate(&value)?;
-    let rows = value
-        .get("rows")
-        .and_then(Value::as_array)
-        .filter(|rows| !rows.is_empty());
-    if value.get("enabled") != Some(&Value::Bool(true)) || rows.is_none() {
-        return Err("Upload a vendor/product CSV filter before searching review documents.".into());
-    }
-    Ok(value)
-}
-
-fn reject_keyword_search(ctx: &ReqCtx) -> Result<(), String> {
-    if !filter_arg(ctx, "search").trim().is_empty() {
-        return Err(
-            "Keyword search has been replaced by the required vendor/product CSV filter.".into(),
-        );
-    }
-    Ok(())
+    Ok((value.get("enabled") == Some(&Value::Bool(true))).then_some(value))
 }
 
 fn filter(ctx: &ReqCtx) -> Result<Document, String> {
@@ -207,6 +195,54 @@ fn filter(ctx: &ReqCtx) -> Result<Document, String> {
         if !value.trim().is_empty() {
             clauses.push(Bson::Document(doc! {"$or": fields.iter().map(|field| regex_clause(field, value.trim())).collect::<Vec<_>>() }));
         }
+    }
+    let search = filter_arg(ctx, "search");
+    if !search.trim().is_empty() {
+        let fields = [
+            "_id",
+            "code",
+            "cve",
+            "cve_code",
+            "cve_codes",
+            "cve_ids",
+            "title",
+            "severity",
+            "affected",
+            "affected_products",
+            "description",
+            "impacts",
+            "recommendation",
+            "vendor",
+            "product",
+            "details.cve_id",
+            "details.cve_ids",
+            "details.cveCode",
+            "details.cveId",
+            "details.title",
+            "details.advisory_title",
+            "details.description",
+            "details.descriptions.value",
+            "details.summary",
+            "details.affected.vendor",
+            "details.affected.product",
+            "details.affected.packageName",
+            "details.affected_products",
+            "details.affected_software",
+            "details.vulnerable_products",
+            "details.products",
+            "details.vulnerability_identifiers.cve_id",
+            "details.cna.title",
+            "details.cna.descriptions.value",
+            "details.cna.affected.vendor",
+            "details.cna.affected.product",
+            "details.containers.cna.title",
+            "details.containers.cna.descriptions.value",
+            "details.containers.cna.affected.vendor",
+            "details.containers.cna.affected.product",
+        ];
+        clauses.push(Bson::Document(doc! {"$or": search.split_whitespace()
+        .flat_map(|term| fields.iter().map(move |field| regex_clause(field, term)))
+        .collect::<Vec<_>>() }));
     }
     let statuses = filter_args(ctx, "status");
     if statuses
@@ -608,20 +644,30 @@ async fn filtered_rows(
     state: &AppState,
     names: &[String],
     filter: Document,
-    vendor_product_filter: &Value,
+    vendor_product_filter: Option<&Value>,
+    stop_after: Option<usize>,
 ) -> Result<Vec<(String, Document)>, mongodb::error::Error> {
     let mut rows = Vec::new();
     for name in names {
-        let (total, _) = query_rows(state, name, filter.clone(), 0, 1).await?;
-        if total == 0 {
+        let Some(collection) = canonical_name(state, name) else {
             continue;
+        };
+        let collection = db::collection(&state.vuln, &collection);
+        let mut request = collection
+            .find(filter.clone())
+            .sort(doc! {"observed_at": -1, "_id": -1});
+        if vendor_product_filter.is_none()
+            && let Some(limit) = stop_after
+        {
+            request = request.limit(limit as i64);
         }
-        let limit = total.min(i64::MAX as u64) as i64;
-        let (_, documents) = query_rows(state, name, filter.clone(), 0, limit).await?;
-        for mut document in documents {
-            if let Some(matched) =
-                vendor_matcher::classify(&db::bson_json(&document), vendor_product_filter)
-            {
+        let mut cursor = request.await?;
+        while let Some(mut document) = cursor.try_next().await? {
+            if let Some(inventory) = vendor_product_filter {
+                let Some(matched) = vendor_matcher::classify(&db::bson_json(&document), inventory)
+                else {
+                    continue;
+                };
                 if db::string(&document, "vendor").trim().is_empty()
                     && let Some(vendor) = matched["matched_vendor"].as_str()
                 {
@@ -632,7 +678,10 @@ async fn filtered_rows(
                 {
                     document.insert("product", product);
                 }
-                rows.push((name.clone(), document));
+            }
+            rows.push((name.clone(), document));
+            if stop_after.is_some_and(|limit| rows.len() >= limit) {
+                return Ok(rows);
             }
         }
     }
@@ -676,26 +725,58 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         return Some(view::json_response(StatusCode::OK, json!({"data":data})));
     }
     if ctx.path == "/api/reviews/search" && matches!(ctx.method, Method::GET | Method::POST) {
-        let vendor_product_filter = match required_vendor_product_filter(ctx) {
+        let vendor_product_filter = match optional_vendor_product_filter(ctx) {
             Ok(value) => value,
             Err(error) => return Some(view::error(StatusCode::BAD_REQUEST, &error)),
         };
-        if let Err(error) = reject_keyword_search(ctx) {
-            return Some(view::error(StatusCode::BAD_REQUEST, &error));
-        }
         let filter = match filter(ctx) {
             Ok(v) => v,
             Err(e) => return Some(view::error(StatusCode::BAD_REQUEST, &e)),
         };
-        let names = views(state).await.unwrap_or_default();
+        let names = match views(state).await {
+            Ok(names) => names,
+            Err(_) => {
+                return Some(view::error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Unable to connect to the vulnerabilities database.",
+                ));
+            }
+        };
         let page = filter_arg(ctx, "page").parse::<u64>().unwrap_or(1).max(1);
         let size = filter_arg(ctx, "page_size")
             .parse::<u64>()
             .unwrap_or(25)
             .clamp(1, 100);
         let offset = (page - 1).saturating_mul(size);
-        let mut rows = match filtered_rows(state, &names, filter, &vendor_product_filter).await {
-            Ok(rows) => rows,
+        let page_result = if vendor_product_filter.is_none() {
+            match names.first() {
+                Some(name) => query_rows(state, name, filter, offset, size as i64)
+                    .await
+                    .map(|(total, rows)| {
+                        (
+                            total,
+                            rows.into_iter()
+                                .map(|row| (name.clone(), row))
+                                .collect::<Vec<_>>(),
+                        )
+                    }),
+                None => Ok((0, Vec::new())),
+            }
+        } else {
+            filtered_rows(state, &names, filter, vendor_product_filter.as_ref(), None)
+                .await
+                .map(|rows| {
+                    (
+                        rows.len() as u64,
+                        rows.into_iter()
+                            .skip(offset as usize)
+                            .take(size as usize)
+                            .collect::<Vec<_>>(),
+                    )
+                })
+        };
+        let (total, rows) = match page_result {
+            Ok(page) => page,
             Err(_) => {
                 return Some(view::error(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -703,14 +784,8 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 ));
             }
         };
-        let total = rows.len() as u64;
-        rows.sort_by(|a, b| {
-            format!("{:?}", b.1.get("observed_at")).cmp(&format!("{:?}", a.1.get("observed_at")))
-        });
         let data: Vec<Value> = rows
             .into_iter()
-            .skip(offset as usize)
-            .take(size as usize)
             .map(|(name, document)| response_row(&name, "news", &document))
             .collect();
         return Some(view::json_response(
@@ -726,26 +801,33 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 "Select between 1 and 500 vulnerability records.",
             ));
         }
-        if let Err(error) = reject_keyword_search(ctx) {
-            return Some(view::error(StatusCode::BAD_REQUEST, &error));
-        }
         let filter = match filter(ctx) {
             Ok(v) => v,
             Err(e) => return Some(view::error(StatusCode::BAD_REQUEST, &e)),
         };
-        let vendor_product_filter = match required_vendor_product_filter(ctx) {
+        let vendor_product_filter = match optional_vendor_product_filter(ctx) {
             Ok(value) => value,
             Err(error) => return Some(view::error(StatusCode::BAD_REQUEST, &error)),
         };
-        let names = views(state).await.unwrap_or_default();
-        let mut rows = match filtered_rows(state, &names, filter, &vendor_product_filter).await {
-            Ok(documents) => documents
-                .into_iter()
-                .map(|(name, document)| {
-                    let (selection_score, patch_priority, severity, cve_id) = score(&document);
-                    json!({"collection":name,"selection_id":db::id_string(&document),"selection_score":selection_score,"patch_priority":patch_priority,"severity":severity,"cve_id":cve_id})
-                })
-                .collect::<Vec<_>>(),
+        let names = match views(state).await {
+            Ok(names) => names,
+            Err(_) => {
+                return Some(view::error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Unable to connect to the vulnerabilities database.",
+                ));
+            }
+        };
+        let candidates = match filtered_rows(
+            state,
+            &names,
+            filter,
+            vendor_product_filter.as_ref(),
+            Some(2001),
+        )
+        .await
+        {
+            Ok(documents) => documents,
             Err(_) => {
                 return Some(view::error(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -753,13 +835,17 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                 ));
             }
         };
-        if rows.len() > 2000 {
+        if candidates.len() > 2000 {
             return Some(view::error(
                 StatusCode::BAD_REQUEST,
                 "Filter matched too many documents. Narrow your filters and try again.",
             ));
         }
-        let matched = rows.len();
+        let matched = candidates.len();
+        let mut rows = candidates.into_iter().map(|(name, document)| {
+            let (selection_score, patch_priority, severity, cve_id) = score(&document);
+            json!({"collection":name,"selection_id":db::id_string(&document),"selection_score":selection_score,"patch_priority":patch_priority,"severity":severity,"cve_id":cve_id})
+        }).collect::<Vec<_>>();
         rows.sort_by(|a, b| {
             b["selection_score"]
                 .as_i64()
@@ -925,14 +1011,20 @@ mod tests {
     }
 
     #[test]
-    fn review_filter_rejects_keyword_search() {
-        assert!(reject_keyword_search(&filter_context(vec![("search", "openssl")])).is_err());
+    fn review_filter_supports_literal_keywords_and_ignores_whitespace() {
+        let blank = filter(&filter_context(vec![("search", "  \t ")])).unwrap();
+        assert_eq!(blank, filter(&filter_context(Vec::new())).unwrap());
+        let query = filter(&filter_context(vec![("search", "OpenSSL Widget+")])).unwrap();
+        let serialized = serde_json::to_string(&query).unwrap();
+        assert!(serialized.contains("OpenSSL"));
+        assert!(serialized.contains("Widget\\\\+"));
+        assert!(serialized.contains("details.affected.product"));
     }
 
     #[test]
-    fn review_search_requires_vendor_product_filter() {
+    fn review_search_accepts_optional_inventory_and_validates_enabled_inventory() {
         let missing = filter_context(Vec::new());
-        assert!(required_vendor_product_filter(&missing).is_err());
+        assert!(optional_vendor_product_filter(&missing).unwrap().is_none());
 
         let mut valid = filter_context(Vec::new());
         valid.method = Method::POST;
@@ -944,7 +1036,14 @@ mod tests {
                 "rows": [{"vendor": "Acme", "product": "Widget", "vendor_aliases": [], "product_aliases": []}]
             }
         });
-        assert!(required_vendor_product_filter(&valid).is_ok());
+        assert!(optional_vendor_product_filter(&valid).unwrap().is_some());
+        valid.json["vendor_product_filter"]["enabled"] = json!(false);
+        valid.json["vendor_product_filter"]["rows"] = json!([]);
+        assert!(optional_vendor_product_filter(&valid).unwrap().is_none());
+        valid.json["vendor_product_filter"]["enabled"] = json!(true);
+        assert!(optional_vendor_product_filter(&valid).is_err());
+        valid.json["vendor_product_filter"] = Value::Null;
+        assert!(optional_vendor_product_filter(&valid).unwrap().is_none());
     }
 
     #[test]

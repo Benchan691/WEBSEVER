@@ -99,6 +99,15 @@ been verified.
 
 After a successful Zimbra `AuthRequest`, the service ensures the configured `news` folder with `GetFolderRequest`/`CreateFolderRequest`, then stores the mailbox credential encrypted with AES-256-GCM. Passwords are never returned to a browser or written to logs. All notification and scheduled email is sent through the configured SMTP transport.
 
+## Vulnerability Reviews
+
+In **Vulnerability Reviews**, use **Search keyword** to find advisory identifiers,
+titles, descriptions, vendors or products. Keywords match any entered word,
+without case sensitivity, and combine with severity and scrape-date filters.
+The vendor/product CSV is optional; uploading one further narrows the results.
+Search and auto-selection both work without a CSV. The page waits for **Apply
+Filter** instead of searching automatically when opened.
+
 ## Subscriptions
 
 Each Zimbra account receives one protected, owner-scoped `sub_account` record when it first signs in (and existing accounts are backfilled at startup). Its newsletter and report profiles start disabled, so the user can enable and configure delivery without waiting for a separate subscription record. Zimbra users can add more subscriptions and view or manage only their own records; the automatic record cannot be deleted by the Zimbra user, while user-created records can be deleted. Zimbra users can edit the To, CC, and BCC recipients on their own subscriptions, including external addresses without including their own mailbox. The local administrator can manage every subscription and may enter multiple external recipients. New delivery history includes `subscription_id`, so records from older deployments cannot suppress delivery for a new subscription.

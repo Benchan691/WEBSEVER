@@ -528,7 +528,7 @@ The system uses two related but distinct paths:
 
 | Path | Main implementation | Behavior |
 | --- | --- | --- |
-| Administrator review search | `reviews::filter()` + `filtered_rows()` | Requires an enabled inventory; supports review scrape-time ranges and client pagination after matching |
+| Administrator review search | `reviews::filter()` + `query_rows()` / `filtered_rows()` | Keyword, severity and scrape-time filters; optional inventory; database pagination without inventory |
 | Subscription/report matching | `subscriptions::profile_filter()` + `match_profile*()` | Uses saved profile/provider conditions and optional inventory; powers preview and scheduler |
 
 Do not assume that every filter accepted by one path has identical semantics in the other.
@@ -537,11 +537,13 @@ Profile filters include provider scope, case-insensitive escaped text clauses, s
 
 The current profile query builder does **not** apply custom `start`/`end` bounds, despite storing these values and exposing a custom choice in the editor. Review filtering does implement custom bounds. Treat subscription custom ranges as an implementation gap; use the implemented daily/week modes when a bounded profile is required.
 
-Review search supports `all`, `daily`, `week`, compatibility values `24h`, `7d`, `30d`, and `custom`. Custom timestamps accept RFC3339 or a local `YYYY-MM-DDTHH:MM[:SS]` interpreted in HKT. The start is inclusive and the end exclusive. Nonempty free-text `search` is rejected in the review search/auto-selection endpoints because an inventory is required instead.
+Review search supports `all`, `daily`, `week`, compatibility values `24h`, `7d`, `30d`, and `custom`. Custom timestamps accept RFC3339 or a local `YYYY-MM-DDTHH:MM[:SS]` interpreted in HKT. The start is inclusive and the end exclusive. Free-text `search` matches any whitespace-separated word, case-insensitively, as literal text across identifiers, titles, severity, descriptions, affected systems, vendors and products, including structured source fields. Keyword matches combine with other active filters using AND.
+
+Inventory is optional for search and auto-selection: omitted/null inventory and a valid disabled inventory apply no CSV restriction. An enabled inventory still requires valid, nonempty rows. Without inventory, search uses MongoDB count/sort/skip/limit with `observed_at` descending and `_id` descending for ties. With inventory, the matching cursor preserves that order before pagination. Auto-selection stops after 2,001 matching candidates and rejects more than 2,000, with or without inventory; the selected count remains 1–500. Page opening does not automatically launch a search.
 
 Known severity labels are Critical, High, Medium, and Low. Profile severity matching accepts an optional `Risk` suffix. An empty severity selection normally includes known severities; unknown data requires `include_unknown`, with a compatibility exception for the Zimbra feed's missing severity.
 
-For review JSON requests, `filter_arg()` currently reads strings/numbers rather than JSON booleans. A direct caller needing unknown severity should send `"include_unknown":"true"`; the browser currently sends a boolean, which this path does not interpret as true. This quirk does not apply to the saved subscription profile boolean.
+Review JSON requests accept booleans as well as strings/numbers for filter arguments, so the browser's `"include_unknown":true` is recognized. GET callers can continue to use `include_unknown=true`.
 
 ### 8.2 Inventory import and export
 
@@ -944,9 +946,9 @@ Use ObjectId strings returned by the subscription list as `{id}`. Some legacy em
 | Method | Path | Input/output |
 | --- | --- | --- |
 | GET | `/api/reviews` | Unified collection metadata and record count |
-| GET / POST | `/api/reviews/search` | Required enabled inventory; filters and pagination; normalized rows |
+| GET / POST | `/api/reviews/search` | Keyword and other filters, optional inventory, pagination; normalized rows |
 | GET | `/api/reviews/{collection}` | Direct collection browser; database filters/pagination; inventory is not required by this path |
-| POST | `/api/reviews/auto-select` | Required enabled inventory and `count` 1–500; scored/deduplicated selections |
+| POST | `/api/reviews/auto-select` | Keyword/other filters, optional inventory, `count` 1–500; scored/deduplicated selections |
 | POST | `/api/reviews/export-json` | `selections`; attachment of up to 500 raw source records |
 | GET | `/generated-newsletters/{provider}/{selection_id}/preview` | Render source record using its actual stored provider and saved template settings |
 

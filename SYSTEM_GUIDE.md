@@ -158,14 +158,14 @@ Report profile 用來篩選 CVE 記錄及設定報告排程。預覽會顯示匹
 
 ### 搜尋公告
 
-1. 在 **Vendor/product CSV filter** 載入產品清單。這個頁面的搜尋必須先載入有效 CSV。
-2. 使用 **Download CSV template** 取得範本，填入廠商和產品後上傳。
+1. 在 **Search keyword** 輸入 CVE、標題、廠商或產品等關鍵字；多個詞中任一詞符合便匹配，也可留空。
+2. **Vendor/product CSV filter** 為可選。如要依產品清單縮小結果，使用 **Download CSV template** 取得範本，填入廠商和產品後上傳。
 3. 選擇 **Severity**，並決定是否勾選 **Include unknown severity**。
 4. 在 **Time window** 選擇全部時間、今天、最近七天或自訂日期範圍。
 5. 如要納入缺少結構化廠商資料的可能匹配，勾選 **Include product-only possible matches when structured vendor data is missing**。
 6. 按 **Apply Filter** 查看結果。
 
-結果表格可調整每頁筆數，並使用 **Previous** 和 **Next** 翻頁。太多或沒有結果時，調整產品清單、嚴重程度或時間範圍後再搜尋。
+結果表格可調整每頁筆數，並使用 **Previous** 和 **Next** 翻頁。太多或沒有結果時，調整關鍵字、可選產品清單、嚴重程度或時間範圍後再搜尋。開啟頁面不會自動執行搜尋。
 
 ### 預覽及選取記錄
 

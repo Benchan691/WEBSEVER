@@ -536,7 +536,7 @@ API 序列化日期及部分巢狀 ID 時使用 BSON JSON 格式。公開的訂�
 
 | 流程 | 主要實作 | 行為 |
 | --- | --- | --- |
-| 管理員審閱搜尋 | `reviews::filter()` + `filtered_rows()` | 必須提供已啟用的產品清單；支援審閱擷取時間範圍，匹配後再由前端分頁 |
+| 管理員審閱搜尋 | `reviews::filter()` + `query_rows()` / `filtered_rows()` | 關鍵字、嚴重程度及擷取時間範圍；產品清單可選，不使用清單時直接由資料庫分頁 |
 | 訂閱／報告比對 | `subscriptions::profile_filter()` + `match_profile*()` | 使用已儲存的設定檔／來源條件及可選產品清單；供預覽及排程器使用 |
 
 不能假設其中一條流程接受的所有篩選條件，在另一條流程中有相同意義。
@@ -545,11 +545,13 @@ API 序列化日期及部分巢狀 ID 時使用 BSON JSON 格式。公開的訂�
 
 目前設定檔查詢器**不會套用自訂 `start`／`end` 範圍**，即使編輯器會保存和顯示這些值。審閱篩選有實作自訂時間範圍。訂閱自訂範圍目前屬於實作缺口；若需要有界時間範圍，請使用已實作的 `daily` 或 `week`。
 
-審閱搜尋支援 `all`、`daily`、`week`、相容值 `24h`、`7d`、`30d` 及 `custom`。自訂時間接受 RFC3339，或以香港時間解讀的本機格式 `YYYY-MM-DDTHH:MM[:SS]`。開始時間包含在範圍內，結束時間不包含。審閱搜尋／自動選取端點會拒絕非空自由文字 `search`，因為此處要求使用產品清單。
+審閱搜尋支援 `all`、`daily`、`week`、相容值 `24h`、`7d`、`30d` 及 `custom`。自訂時間接受 RFC3339，或以香港時間解讀的本機格式 `YYYY-MM-DDTHH:MM[:SS]`。開始時間包含在範圍內，結束時間不包含。`search` 以空白分詞，不區分大小寫，任一詞符合公告識別碼、標題、描述、廠商、產品或受影響系統等欄位便匹配。特殊字元按一般文字處理；關鍵字結果與其他篩選條件取交集。
+
+搜尋及自動選取的產品清單改為可選：省略、null 或合法的停用清單都不套用 CSV 限制；啟用時仍須提供有效且非空的資料列。不使用清單時，以 MongoDB count/sort/skip/limit 分頁，依 `observed_at` 及同時間的 `_id` 降冪排序。使用清單時保留同一順序再分頁。自動選取最多收集 2,001 筆匹配候選，超過 2,000 筆便要求縮小範圍；選取數量仍為 1–500。開啟頁面不會自動搜尋。
 
 已知嚴重程度為 Critical、High、Medium、Low。設定檔比對也接受後綴為 `Risk` 的值。未選嚴重程度時通常包含所有已知級別；未知嚴重程度要明確設為 `include_unknown`，但 Zimbra 來源沒有嚴重程度的情況有相容性例外。
 
-審閱 JSON 請求中的 `filter_arg()` 目前會讀取字串／數字，而非 JSON 布林值。直接呼叫並需要包含未知嚴重程度時，請傳入 `"include_unknown":"true"`；目前瀏覽器會傳布林值，而此路徑不會將其識別為 true。此問題不影響已儲存訂閱設定檔中的布林值。
+審閱 JSON 請求的篩選參數接受布林值、字串或數字，因此會正確識別瀏覽器傳入的 `"include_unknown":true`。GET 仍可使用 `include_unknown=true`。
 
 ### 8.2 匯入與匯出產品清單
 
@@ -957,9 +959,9 @@ LLM 請求會送往 `<ENRICHED_LLM_BASE_URL>/chat/completions`，temperature 設
 | 方法 | 路徑 | 輸入／輸出 |
 | --- | --- | --- |
 | GET | `/api/reviews` | 統一集合資訊及記錄數量 |
-| GET / POST | `/api/reviews/search` | 必須提供已啟用的產品清單；篩選、分頁及正規化結果 |
+| GET / POST | `/api/reviews/search` | 關鍵字與其他篩選、可選產品清單、分頁及正規化結果 |
 | GET | `/api/reviews/{collection}` | 直接瀏覽集合；使用資料庫篩選／分頁；此路徑不要求產品清單 |
-| POST | `/api/reviews/auto-select` | 必須提供產品清單及 `count` 1–500；回傳評分／去重後結果 |
+| POST | `/api/reviews/auto-select` | 關鍵字與其他篩選、可選產品清單及 `count` 1–500；回傳評分／去重後結果 |
 | POST | `/api/reviews/export-json` | 傳入 `selections`；最多附加 500 筆原始來源記錄 |
 | GET | `/generated-newsletters/{provider}/{selection_id}/preview` | 讀取來源記錄後，依記錄實際來源及已存範本設定呈現 |
 

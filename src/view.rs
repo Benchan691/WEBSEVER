@@ -214,7 +214,7 @@ mod tests {
             .unwrap();
         assert!(reviews_html.contains("href=\"&#x2f;reviews\""));
         assert!(reviews_html.contains("filter-vendor-product-file"));
-        assert!(!reviews_html.contains("filter-search"));
+        assert!(reviews_html.contains("filter-search"));
         assert!(reviews_html.contains("document-email-frame"));
         assert!(!reviews_html.contains("document-json"));
         let collection_html = env
