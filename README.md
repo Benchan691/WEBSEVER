@@ -137,6 +137,19 @@ the scheduler sends on the 1st at 09:00 HKT, catches up a missed run, and record
 each recipient's completed month to avoid resending on subsequent ticks or
 restarts. New subscriptions begin with their signup month.
 
+**Operations → Newsletter records** shows delivery counts and the latest email
+for the current display period. Use **Reset records** for one subscription or
+**Reset all records** to start a fresh display period. Only the displayed records
+reset: delivery cursors, queued emails, saved receipts, duplicate-send protection,
+and monthly statistics are preserved.
+
+By default, displayed records start a new period on the first day of every month
+at **00:00 Hong Kong time**, even when the email scheduler is disabled. A manual
+reset applies until the next monthly boundary. Set
+`newsletter_records.reset_monthly` to `false` in the app configuration, or set
+`NEWSLETTER_RECORDS_RESET_MONTHLY=false`, to keep the display period until the
+next manual reset.
+
 ## Checks
 
 ```sh

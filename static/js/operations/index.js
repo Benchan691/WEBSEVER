@@ -3,6 +3,8 @@
     const refreshMs = 20000;
     let templatesLoaded = false;
     let sourceListLoaded = false;
+    let resettingNewsletterRecords = false;
+    let newsletterRowCount = 0;
     const editorState = { data: null, currentSource: '', dirty: false, previewToken: 0, commonBound: false };
 
     function showMessage(text, type) {
@@ -24,7 +26,7 @@
             .replace(/"/g, '&quot;');
     }
 
-    function formatTime(value) {
+    function formatTime(value, timeZone) {
         if (!value) return '—';
 
         // MongoDB's extended JSON represents BSON dates as either
@@ -51,7 +53,7 @@
             const fallback = typeof value === 'string' ? value : JSON.stringify(value);
             return escapeHtml(fallback || '—');
         }
-        return escapeHtml(date.toLocaleString());
+        return escapeHtml(date.toLocaleString(undefined, timeZone ? { timeZone: timeZone } : undefined));
     }
 
     function requestJson(url, options) {
@@ -147,6 +149,8 @@
     }
 
     function renderNewsletters(rows) {
+        newsletterRowCount = rows.length;
+        document.getElementById('reset-all-newsletter-records').disabled = resettingNewsletterRecords || !rows.length;
         const body = document.getElementById('newsletter-rows');
         const empty = document.getElementById('newsletters-empty');
         body.innerHTML = '';
@@ -173,7 +177,7 @@
                     : (row.last_success_at
                         ? '<div class="text-success mt-1">' + t('Last successful delivery:') + ' ' + formatTime(row.last_success_at) + '</div>'
                         : '')) + '</td>' +
-                '<td class="small">' + escapeHtml(row.cve_delivery_cutoff || '—') + '</td>' +
+                '<td class="small">' + formatTime(row.records_since, 'Asia/Hong_Kong') + '</td>' +
                 '<td>' + escapeHtml(row.total_delivered != null ? row.total_delivered : 0) + '</td>';
             const latestCell = document.createElement('td');
             latestCell.className = 'small operations-latest-email';
@@ -181,8 +185,7 @@
             actionCell.className = 'text-end';
             const latest = row.latest_delivery;
             if (!latest) {
-                latestCell.innerHTML = '<span class="text-muted">' + t('No email sent') + '</span>';
-                actionCell.innerHTML = '<span class="text-muted">—</span>';
+                latestCell.innerHTML = '<span class="text-muted">' + t('No emails in this period') + '</span>';
             } else {
                 latestCell.innerHTML =
                     '<div class="fw-semibold text-truncate" title="' + escapeHtml(latest.title || latest.source_collection || '') + '">' +
@@ -199,12 +202,57 @@
                         openNewsletterPreview(latest, row);
                     });
                     actionCell.appendChild(button);
-                } else {
-                    actionCell.innerHTML = '<span class="text-muted">—</span>';
                 }
+            }
+            if (row.subscription_id) {
+                const reset = document.createElement('button');
+                reset.type = 'button';
+                reset.className = 'btn btn-outline-secondary btn-sm ms-2';
+                reset.dataset.newsletterReset = row.subscription_id;
+                reset.textContent = t('Reset records');
+                reset.setAttribute('aria-label', t('Reset records for {name}', {name: row.username || row.email || ''}));
+                reset.disabled = resettingNewsletterRecords;
+                reset.addEventListener('click', function () {
+                    resetNewsletterRecords({subscription_id: row.subscription_id});
+                });
+                actionCell.appendChild(reset);
             }
             tr.append(latestCell, actionCell);
             body.appendChild(tr);
+        });
+    }
+
+    function renderNewsletterRecordSchedule(settings) {
+        const schedule = document.getElementById('newsletter-records-schedule');
+        schedule.textContent = settings.monthly_reset_enabled
+            ? t('Resets on the first day of each month at 00:00 (Hong Kong time).')
+            : t('Automatic monthly reset is off.');
+    }
+
+    function setNewsletterRecordResetBusy(busy) {
+        resettingNewsletterRecords = busy;
+        document.getElementById('reset-all-newsletter-records').disabled = busy || !newsletterRowCount;
+        document.querySelectorAll('[data-newsletter-reset]').forEach(function (button) {
+            button.disabled = busy;
+        });
+    }
+
+    function resetNewsletterRecords(scope) {
+        if (resettingNewsletterRecords) return;
+        clearMessage();
+        setNewsletterRecordResetBusy(true);
+        requestJson(pageConfig.resetNewsletterRecordsUrl, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(scope)
+        }).then(function () {
+            return loadHealth(true).then(function () {
+                showMessage(t('Newsletter records reset. Email delivery is unchanged.'), 'success');
+            });
+        }).catch(function (error) {
+            showMessage(error.message || t('Unable to reset newsletter records.'), 'danger');
+        }).finally(function () {
+            setNewsletterRecordResetBusy(false);
         });
     }
 
@@ -461,16 +509,18 @@
         if (data.sources && data.sources.length) renderEditor(data);
     }
 
-    function loadHealth() {
+    function loadHealth(propagateError) {
         return requestJson(pageConfig.healthUrl)
             .then(function (body) {
                 clearMessage();
                 renderScheduler(body.scheduler || {});
                 renderReports(body.reports || []);
                 renderNewsletters(body.newsletters || []);
+                renderNewsletterRecordSchedule(body.newsletter_records || {});
             })
             .catch(function (error) {
                 showMessage(error.message || t('Unable to load scheduler health.'), 'danger');
+                if (propagateError === true) throw error;
             });
     }
 
@@ -524,6 +574,9 @@
         }
     });
     document.getElementById('save-template-btn').addEventListener('click', saveEditor);
+    document.getElementById('reset-all-newsletter-records').addEventListener('click', function () {
+        resetNewsletterRecords({all: true});
+    });
     setupNewsletterPreview();
     loadHealth();
     setInterval(loadHealth, refreshMs);

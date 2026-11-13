@@ -6,6 +6,9 @@
     "vulnerabilities_collection": "news"
   },
   "newsletter_root": "newsletters",
+  "newsletter_records": {
+    "reset_monthly": true
+  },
   "web_auth": {
     "bootstrap_username": "admin"
   },

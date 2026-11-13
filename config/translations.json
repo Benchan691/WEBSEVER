@@ -475,7 +475,6 @@
     "Next / due": "下次 / 到期",
     "Last run": "上次运行",
     "Delivery": "投递",
-    "Error": "错误",
     "No subscriptions found.": "未找到订阅。",
     "Newsletters": "通讯",
     "Delivery cursor": "投递游标",
@@ -556,6 +555,17 @@
     "Unable to start report translation.": "无法启动报告翻译。",
     "Unable to load report job.": "无法加载报告任务。",
     "Completed report not found.": "未找到已完成的报告。",
-    "Invalid report language.": "无效的报告语言。"
+    "Invalid report language.": "无效的报告语言。",
+    "Newsletter records": "通讯记录",
+    "Reset displayed counts and latest emails. Email delivery continues normally.": "重置显示的数量和最新邮件记录。邮件投递照常进行。",
+    "Reset all records": "重置所有记录",
+    "Records since": "记录起始时间",
+    "Reset records": "重置记录",
+    "Reset records for {name}": "重置 {name} 的记录",
+    "Resets on the first day of each month at 00:00 (Hong Kong time).": "每月第一天 00:00（香港时间）自动重置。",
+    "Automatic monthly reset is off.": "每月自动重置已关闭。",
+    "Newsletter records reset. Email delivery is unchanged.": "通讯记录已重置。邮件投递设置不变。",
+    "Unable to reset newsletter records.": "无法重置通讯记录。",
+    "No emails in this period": "此期间没有邮件"
   }
 }

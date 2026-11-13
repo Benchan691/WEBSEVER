@@ -975,11 +975,28 @@ All these report endpoints require administrator access, including jobs created 
 | Method | Path | Behavior |
 | --- | --- | --- |
 | GET | `/api/operations/health` | Heartbeat and per-subscription report/newsletter state |
+| POST | `/api/operations/newsletter-records/reset` | Top admin; reset one subscription (`{"subscription_id":"..."}`) or all (`{"all":true}`) displayed newsletter records |
 | GET | `/api/operations/newsletter-templates` | Latest source record metadata per provider |
 | GET | `/api/operations/source-list` | Provider and canonical `source.url` from latest records |
 | GET | `/api/operations/newsletter-editor` | Common settings, provider samples, selected fields, field catalog |
 | PUT | `/api/operations/newsletter-editor` | Replace common/provider editor settings |
 | POST | `/api/operations/newsletter-editor/preview` | `source_collection`, `selection_id`, optional `config`; return `{html,subject}` without saving/sending |
+
+Newsletter display resets set only the subscription's top-level
+`newsletter_records_reset_at` and `newsletter_records_reset_by` fields. They do
+not change `newsletter_profile.delivery_cursor`, enabled state, filters, delivery
+receipts, queued emails, or monthly statistics. The health response includes
+`newsletter_records` schedule information, and each newsletter row includes its
+`subscription_id` and effective `records_since`.
+
+Displayed counts and latest-email queries use the later of the manual reset and
+the current month boundary in Hong Kong time. The month boundary is inclusive;
+a manual reset excludes receipts at the exact reset timestamp. Historical receipts
+remain available to the scheduler's duplicate checks and statistics. Monthly
+rollover is calculated when reading health, so it also works after downtime or
+with the scheduler disabled. It defaults on; configure
+`newsletter_records.reset_monthly=false` or
+`NEWSLETTER_RECORDS_RESET_MONTHLY=false` to use manual resets only.
 
 ### 13.6 Retired administration endpoints
 

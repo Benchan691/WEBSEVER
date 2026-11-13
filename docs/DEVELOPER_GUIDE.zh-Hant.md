@@ -988,11 +988,23 @@ GET 搜尋可把產品清單 JSON 放在 `vendor_product_filter`，並重複傳�
 | 方法 | 路徑 | 行為 |
 | --- | --- | --- |
 | GET | `/api/operations/health` | 心跳及各訂閱的報告／電子報狀態 |
+| POST | `/api/operations/newsletter-records/reset` | 最高管理員；以 `{"subscription_id":"..."}` 重設單一訂閱，或以 `{"all":true}` 重設全部顯示的電子報記錄 |
 | GET | `/api/operations/newsletter-templates` | 各來源最近一筆記錄的中繼資料 |
 | GET | `/api/operations/source-list` | 最近記錄中的來源及標準 `source.url` |
 | GET | `/api/operations/newsletter-editor` | 共用設定、來源範例、欄位選取及欄位目錄 |
 | PUT | `/api/operations/newsletter-editor` | 取代共用設定／來源編輯器設定 |
 | POST | `/api/operations/newsletter-editor/preview` | 傳入 `source_collection`、`selection_id`、可選 `config`；回傳 `{html,subject}`，不儲存／不寄信 |
+
+顯示記錄的重設只更新訂閱根層的 `newsletter_records_reset_at` 及
+`newsletter_records_reset_by`。不更改投遞游標、啟用狀態、篩選條件、排隊郵件、
+投遞收據或每月統計。Health 回應新增 `newsletter_records` 排程資訊；每筆電子報
+資料新增 `subscription_id` 及有效的 `records_since`。
+
+顯示數量及最新郵件以手動重設時間和香港本月月初兩者較新者為下界。月初包含
+相同時間的收據；手動重設則排除重設時間當下的收據。歷史收據會保留供重複投遞
+檢查及統計使用。每月自動重設在讀取 Health 時計算，因此停機後或排程器關閉時
+仍然有效。預設啟用；可設定 `newsletter_records.reset_monthly=false` 或
+`NEWSLETTER_RECORDS_RESET_MONTHLY=false`，改為只使用手動重設。
 
 ### 13.6 已退役的管理端點
 

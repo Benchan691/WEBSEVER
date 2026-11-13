@@ -98,6 +98,9 @@ pub fn environment(root: &Path) -> Environment<'static> {
                     "/api/operations/newsletter-templates".into()
                 }
                 "operations.get_source_list" => "/api/operations/source-list".into(),
+                "operations.reset_newsletter_records" => {
+                    "/api/operations/newsletter-records/reset".into()
+                }
                 "operations.get_newsletter_editor" => "/api/operations/newsletter-editor".into(),
                 "operations.preview_newsletter_editor" => {
                     "/api/operations/newsletter-editor/preview".into()
