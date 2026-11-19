@@ -31,14 +31,12 @@ async fn search(state: &AppState, body: Value) -> Value {
     value
 }
 
-#[tokio::test]
-#[ignore = "requires REVIEW_SEARCH_TEST_MONGO_URI for a disposable database"]
-async fn keyword_search_optional_csv_pagination_and_auto_selection() {
+async fn test_state() -> AppState {
     let uri = std::env::var("REVIEW_SEARCH_TEST_MONGO_URI").unwrap();
     let client = Client::with_uri_str(&uri).await.unwrap();
     let database = client.database(&format!("review_search_test_{}", ObjectId::new()));
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let state = AppState {
+    AppState {
         cfg: crate::config::Config {
             root: root.clone(),
             file: json!({}),
@@ -62,7 +60,14 @@ async fn keyword_search_optional_csv_pagination_and_auto_selection() {
         vuln: database.clone(),
         templates: Arc::new(crate::view::environment(&root)),
         http: reqwest::Client::new(),
-    };
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires REVIEW_SEARCH_TEST_MONGO_URI for a disposable database"]
+async fn keyword_search_optional_csv_pagination_and_auto_selection() {
+    let state = test_state().await;
+    let database = state.vuln.clone();
     let now = DateTime::parse_from_rfc3339("2026-11-13T09:30:00Z")
         .unwrap()
         .with_timezone(&Utc);
@@ -258,4 +263,275 @@ async fn keyword_search_optional_csv_pagination_and_auto_selection() {
     );
     assert_eq!(news.count_documents(doc! {}).await.unwrap(), 2006);
     database.drop().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires REVIEW_SEARCH_TEST_MONGO_URI for a disposable database"]
+async fn wiz_catalog_search_previews_exports_and_newsletter_matching() {
+    let state = test_state().await;
+    db::collection(&state.vuln, "source_catalog")
+        .insert_one(doc! {"_id":"active", "providers":["wiz","cve"]})
+        .await
+        .unwrap();
+
+    async fn sources(state: &AppState) -> Value {
+        let mut ctx = request("/api/subscriptions/collections", Value::Null);
+        ctx.method = Method::GET;
+        let response = crate::subscriptions::handle(state, &ctx).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap()).unwrap()
+    }
+    assert_eq!(
+        sources(&state).await["data"][0],
+        json!({"name":"wiz", "source":"wiz", "count":0})
+    );
+
+    let fixture: Value =
+        serde_json::from_str(include_str!("../../tests/fixtures/wiz.json")).unwrap();
+    let mut document = db::json_doc(&fixture).unwrap();
+    for field in ["observed_at", "published_at", "updated_at"] {
+        document.insert(
+            field,
+            mongodb::bson::DateTime::parse_rfc3339_str(fixture[field].as_str().unwrap()).unwrap(),
+        );
+    }
+    let mut second = document.clone();
+    second.insert("_id", "wiz:22222222-2222-4333-8444-555555555555");
+    second.insert("code", "22222222-2222-4333-8444-555555555555");
+    let third = doc! {
+        "_id":"wiz:33333333-2222-4333-8444-555555555555",
+        "code":"33333333-2222-4333-8444-555555555555",
+        "title":"Historical cloud research",
+        "observed_at": document.get_datetime("observed_at").unwrap(),
+        "source":{"provider":"wiz"},
+        "details":{"content":"Available historical metadata", "threat_type":"Research"},
+    };
+    let news = db::collection(&state.vuln, "news");
+    news.insert_many([
+        document,
+        second,
+        third,
+        doc! {
+            "_id":"cve:2026-12345", "code":"2026-12345", "severity":"High",
+            "source":{"provider":"cve"}, "observed_at":mongodb::bson::DateTime::now(),
+        },
+        doc! {
+            "_id":"cve:2026-10001", "code":"2026-10001", "severity":"Low",
+            "source":{"provider":"cve"}, "observed_at":mongodb::bson::DateTime::now(),
+        },
+        doc! {
+            "_id":"cve:2026-10002", "code":"2026-10002",
+            "source":{"provider":"cve"}, "observed_at":mongodb::bson::DateTime::now(),
+        },
+    ])
+    .await
+    .unwrap();
+    assert_eq!(sources(&state).await["data"][0]["count"], 3);
+    assert_eq!(search(&state, json!({"source":"wiz"})).await["total"], 3);
+    for include_unknown in [false, true] {
+        assert_eq!(
+            search(
+                &state,
+                json!({"source":"wiz", "status":["Critical"], "include_unknown":include_unknown})
+            )
+            .await["total"],
+            3
+        );
+    }
+    assert_eq!(
+        search(&state, json!({"status":["Critical"]})).await["total"],
+        3
+    );
+    assert_eq!(search(&state, json!({"status":["High"]})).await["total"], 4);
+    assert_eq!(search(&state, json!({})).await["total"], 5);
+    assert_eq!(
+        search(&state, json!({"include_unknown":true})).await["total"],
+        6
+    );
+    assert_eq!(
+        search(&state, json!({"source":"cve", "status":["Critical"]})).await["total"],
+        0
+    );
+    assert_eq!(
+        search(
+            &state,
+            json!({"source":"wiz", "search":"unmatched-keyword"})
+        )
+        .await["total"],
+        0
+    );
+    assert_eq!(search(&state, json!({"source":"wiz", "time_window":"custom", "start":"2026-11-19T00:00:00Z", "end":"2026-11-20T00:00:00Z"})).await["total"], 0);
+    for keyword in [
+        "credentials",
+        "Example Actor",
+        "public-facing",
+        "exfiltration",
+        "Credential Access",
+        "Widget",
+        "Finalized",
+        "CVE-2026-54321",
+    ] {
+        assert_eq!(
+            search(&state, json!({"source":"wiz", "search":keyword})).await["total"],
+            2,
+            "{keyword}"
+        );
+    }
+    let results = search(&state, json!({"source":"wiz"})).await;
+    assert_eq!(results["total"], 3);
+    let row = results["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["selection_id"] == fixture["_id"])
+        .unwrap();
+    assert_eq!(row["document"]["code"], fixture["code"]);
+    assert_eq!(row["document"]["cve"], "CVE-2026-12345");
+    assert_eq!(row["document"]["published_at"], "2026-10-21T00:00:00Z");
+    assert_eq!(row["document"]["details"], fixture["details"]);
+    assert!(row["document"].get("severity").is_none());
+    assert!(
+        row["preview_url"]
+            .as_str()
+            .unwrap()
+            .contains("wiz%3A11111111")
+    );
+    assert!(
+        resolve(&state, "wiz", fixture["_id"].as_str().unwrap())
+            .await
+            .is_some()
+    );
+
+    let preview_ctx = request("/generated-newsletters/wiz/preview", Value::Null);
+    let response = crate::newsletters::preview(
+        &state,
+        &preview_ctx,
+        "wiz",
+        fixture["_id"].as_str().unwrap(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = String::from_utf8(
+        to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html.contains("Additional incident details appear here.</p>"));
+    assert!(html.contains("Editorial status"));
+    assert!(!html.contains("Severity:"));
+    assert!(html.contains("2026-10-21T00:00:00Z"));
+    assert!(html.contains("example-cloud-campaign"));
+
+    let mut profile = json!({"enabled":true,"filters":{"collections_mode":"selected", "collections":["news"], "sources":["wiz"]}});
+    let after = DateTime::parse_from_rfc3339("2026-11-17T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let batch = crate::subscriptions::match_profile_after(&state, &profile, after, 100)
+        .await
+        .unwrap();
+    assert_eq!(batch.items.len(), 3);
+    assert!(
+        batch
+            .items
+            .iter()
+            .all(|item| item["source_collection"] == "wiz")
+    );
+    assert_eq!(
+        batch.items[0]["document"]["observed_at"],
+        "2026-11-18T03:00:00Z"
+    );
+    for (sources, mode, expected) in [
+        (vec!["wiz"], "selected", 3),
+        (vec!["wiz", "cve"], "selected", 3),
+        (vec!["cve"], "selected", 0),
+        (vec![], "selected", 0),
+        (vec![], "all", 3),
+    ] {
+        let mut filtered = profile.clone();
+        filtered["filters"]["sources"] = json!(sources);
+        filtered["filters"]["collections_mode"] = json!(mode);
+        filtered["filters"]["status"] = json!(["Critical"]);
+        filtered["filters"]["severity_threshold"] = json!("Critical");
+        assert_eq!(
+            crate::subscriptions::match_profile_after(&state, &filtered, after, 100)
+                .await
+                .unwrap()
+                .items
+                .len(),
+            expected,
+            "{sources:?}, {mode}"
+        );
+    }
+    for (field, value) in [
+        ("search", "public-facing"),
+        ("search", "stole"),
+        ("affected", "Cloud Widget"),
+    ] {
+        let mut filtered = profile.clone();
+        filtered["filters"][field] = json!(value);
+        assert_eq!(
+            crate::subscriptions::match_profile_after(&state, &filtered, after, 100)
+                .await
+                .unwrap()
+                .items
+                .len(),
+            2,
+            "{field}: {value}"
+        );
+    }
+    profile["filters"]["vendor_product_filter"] =
+        json!({"enabled":true,"rows":[{"vendor":"Acme", "product":"Cloud Widget"}]});
+    assert_eq!(
+        crate::subscriptions::match_profile_after(&state, &profile, after, 100)
+            .await
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
+    profile["filters"]["include_unknown"] = json!(false);
+    profile["filters"]["status"] = json!(["Critical"]);
+    profile["filters"]["severity_threshold"] = json!("Critical");
+    assert_eq!(
+        crate::subscriptions::match_profile_after(&state, &profile, after, 100)
+            .await
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
+
+    let (status, selected) = api(
+        &state,
+        request(
+            "/api/reviews/auto-select",
+            json!({"count":5, "source":"wiz", "status":["Critical"]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(selected["matched"], 3);
+    assert_eq!(selected["selected"], 3);
+    let selections: Vec<Value> = selected["selections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| json!({"collection":"news", "selection_id":row["selection_id"]}))
+        .collect();
+    let (status, exported) = api(
+        &state,
+        request("/api/reviews/export-json", json!({"selections":selections})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(exported.as_array().unwrap().len(), 3);
+    assert!(
+        exported.as_array().unwrap().iter().any(
+            |row| row["_id"] == fixture["_id"] && row["published_at"] == "2026-10-21T00:00:00Z"
+        )
+    );
+    state.vuln.drop().await.unwrap();
 }

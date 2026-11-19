@@ -320,7 +320,7 @@
         addHeader(t('Description'));
         addHeader(t('Vendor'));
         addHeader(t('Product'));
-        addHeader(t('Action'));
+        addHeader(t('Action')).classList.add('review-action-heading');
     }
 
     function renderRelatedButtonCell(row, item) {
@@ -415,7 +415,7 @@
             viewButton.addEventListener('click', function () {
                 showDocument(relatedItem.collection + ' ' + t('Document'), relatedItem, { fromRelatedModal: true });
             });
-            actionCell.append(viewButton);
+            appendReviewActions(actionCell, viewButton, relatedItem.preview_url);
             row.append(actionCell);
             relatedBody.append(row);
         });
@@ -492,7 +492,7 @@
             viewButton.addEventListener('click', function () {
                 showDocument((item.source || item.collection) + ' ' + t('Document'), item);
             });
-            actionCell.append(viewButton);
+            appendReviewActions(actionCell, viewButton, item.preview_url);
             row.append(actionCell);
             resultsBody.append(row);
         });

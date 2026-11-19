@@ -1,0 +1,33 @@
+{
+  "_id": "wiz:11111111-2222-4333-8444-555555555555",
+  "schema_version": 2,
+  "code": "11111111-2222-4333-8444-555555555555",
+  "title": "Example Cloud Campaign",
+  "observed_at": "2026-11-18T03:00:00Z",
+  "published_at": "2026-10-21T00:00:00Z",
+  "updated_at": "2026-10-29T09:31:00Z",
+  "cve_ids": ["CVE-2026-12345", "CVE-2026-54321"],
+  "source": {
+    "provider": "wiz",
+    "url": "https://threats.wiz.io/",
+    "detail_url": "https://threats.wiz.io/11111111222243338444555555555555"
+  },
+  "details": {
+    "content": "Attackers exploited Acme Cloud Widget and stole credentials.\nAdditional incident details appear here.",
+    "summary": "Attackers stole cloud credentials.",
+    "article_url": "https://threats.wiz.io/all-incidents/example-cloud-campaign",
+    "threat_type": "Campaign",
+    "actors": ["Example Actor"],
+    "initial_access": ["Exploitation of public-facing application"],
+    "impact": ["Data exfiltration"],
+    "observed_techniques": ["Credential Access"],
+    "targeted_technologies": ["Acme Cloud Widget"],
+    "source_status": "Finalized",
+    "reference_links": [
+      "https://threats.wiz.io/11111111222243338444555555555555",
+      "https://threats.wiz.io/all-incidents/example-cloud-campaign",
+      "https://www.wiz.io/blog/example-cloud-campaign"
+    ],
+    "author": "threat.hunters@wiz.io (Wiz Threat Research)"
+  }
+}

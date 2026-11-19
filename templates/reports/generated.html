@@ -74,7 +74,7 @@
         {% if newsletter.show_severity %}
         <div class="newsletter-section">
             <p class="newsletter-section-title">{{ item_labels.severity or 'Severity:' }}</p>
-            <ul>{% for value in newsletter.severity or [] %}<li>{{ value }}</li>{% endfor %}</ul>
+            <ul>{% for value in newsletter.severity or [] %}<li>{{ value }}</li>{% else %}<li>{{ item_labels.not_specified or 'Not specified' }}</li>{% endfor %}</ul>
         </div>
         {% endif %}
         {% if newsletter.show_impacts %}

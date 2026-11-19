@@ -436,7 +436,7 @@ flowchart TD
 
 這些關聯由應用程式維護，並非資料庫外鍵。刪除不會在所有集合間級聯執行。例如，刪除訂閱不會清除電子報歷史；刪除報告也不會連帶刪除其獨立的翻譯工作。
 
-API 序列化日期及部分巢狀 ID 時使用 BSON JSON 格式。公開的訂閱／工作根文件會把 ObjectId `_id` 轉成 `id` 字串，並移除部分內部欄位。不要假設所有回應日期都是一般 ISO 字串；瀏覽器輔助程式也會處理 Extended JSON 日期。
+新聞回應及匯出會把頂層 `observed_at`、`published_at`、`updated_at` 的 BSON 日期轉成 ISO 8601 UTC 字串。其他 API 日期及部分巢狀 ID 使用 BSON JSON 格式。公開的訂閱／工作根文件會把 ObjectId `_id` 轉成 `id` 字串，並移除部分內部欄位。不要假設所有回應日期都是一般 ISO 字串；瀏覽器輔助程式也會處理 Extended JSON 日期。
 
 <a id="section-7"></a>
 ## 7. 訂閱模型與生命週期
@@ -549,7 +549,7 @@ API 序列化日期及部分巢狀 ID 時使用 BSON JSON 格式。公開的訂�
 
 搜尋及自動選取的產品清單改為可選：省略、null 或合法的停用清單都不套用 CSV 限制；啟用時仍須提供有效且非空的資料列。不使用清單時，以 MongoDB count/sort/skip/limit 分頁，依 `observed_at` 及同時間的 `_id` 降冪排序。使用清單時保留同一順序再分頁。自動選取最多收集 2,001 筆匹配候選，超過 2,000 筆便要求縮小範圍；選取數量仍為 1–500。開啟頁面不會自動搜尋。
 
-已知嚴重程度為 Critical、High、Medium、Low。設定檔比對也接受後綴為 `Risk` 的值。未選嚴重程度時通常包含所有已知級別；未知嚴重程度要明確設為 `include_unknown`，但 Zimbra 來源沒有嚴重程度的情況有相容性例外。
+已知嚴重程度為 Critical、High、Medium、Low。設定檔比對也接受後綴為 `Risk` 的值。未選嚴重程度時通常包含所有已知級別；未知嚴重程度要明確設為 `include_unknown`。Wiz 在審閱及設定檔比對中不受嚴重程度篩選限制，來源選取及其他篩選仍然適用。設定檔也保留 Zimbra 來源沒有嚴重程度的相容性例外。
 
 審閱 JSON 請求的篩選參數接受布林值、字串或數字，因此會正確識別瀏覽器傳入的 `"include_unknown":true`。GET 仍可使用 `include_unknown=true`。
 
@@ -611,7 +611,7 @@ Microsoft,Windows Server,Microsoft Corporation,Windows Server 2019|Windows Serve
 
 搜尋預設第 1 頁、每頁 25 筆，頁面大小可設為 1 至 100。資料庫篩選後，Rust 程式才會執行產品清單比對。一般搜尋可能會先把所有候選資料載入記憶體再分頁，因此大型資料集應縮小搜尋條件。
 
-自動選取接受 1 至 500 筆的要求數量；匹配候選超過 2,000 筆便會拒絕。系統依重要性排序、按解析出的 CVE ID 去重，並排除沒有 CVE ID 的記錄。目前評分方式：
+自動選取接受 1 至 500 筆的要求數量；匹配候選超過 2,000 筆便會拒絕。系統依重要性排序。Wiz 事件按穩定文件 ID 去重，沒有 CVE 或共用同一 CVE 的事件也可獨立選取；其他來源按解析出的 CVE ID 去重，並排除沒有 CVE ID 的記錄。目前評分方式：
 
 - 基礎分數：Critical 45、High 35、Medium 22、Low 10、Unknown 8。
 - 已知遭利用旗標：加 25 分。
@@ -637,7 +637,9 @@ field_order, 顯示旗標及來源專屬欄位
 
 正規化器會擷取來源專屬描述、CVE ID、CVSS 值、受影響系統、結構化表格、修復建議及 URL。標題／概要缺失時會填入明確的預設文字。URL 會經過通訊協定篩選；HPE 和 Zimbra 只接受 HTTPS 連結。部分來源使用中文標籤，是因為來源格式本身為中文。
 
-目前明確處理的來源分支包括 AVD、Cisco、CNVD、CNNVD、NVD、CVE、GitHub Advisories、HKCERT、Huawei、GovCERT／InfoSec、Juniper、Palo Alto、Splunk、FortiGuard、QiAnXin、Hikvision、Ransomware.live、zero-day 記錄、HPE 及 Zimbra。未知來源使用通用備援格式。這些程式分支不等於爬蟲目前啟用的來源目錄。
+目前明確處理的來源分支包括 AVD、Cisco、CNVD、CNNVD、NVD、CVE、GitHub Advisories、HKCERT、Huawei、GovCERT／InfoSec、Juniper、Palo Alto、Splunk、Wiz、FortiGuard、QiAnXin、Hikvision、Ransomware.live、zero-day 記錄、HPE 及 Zimbra。未知來源使用通用備援格式。這些程式分支不等於爬蟲目前啟用的來源目錄。
+
+Wiz 顯示完整純文字文章、威脅資料、影響、目標技術標籤及頂層 CVE ID。Wiz 不受嚴重程度篩選限制，無須啟用「Include unknown severity」，預覽及電子報也不顯示嚴重程度區塊。詳見 [Wiz 整合契約及驗證](WIZ_INTEGRATION.md)。
 
 ### 9.2 範本選擇
 

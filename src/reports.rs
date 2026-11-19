@@ -142,8 +142,8 @@ fn template_report(records: &[Value]) -> Value {
         } else {
             severity
         };
-        let summary = first_text(details, &["summary", "description", "overview", "impacts"]);
-        let affected = [
+        let mut summary = first_text(details, &["summary", "description", "overview", "impacts"]);
+        let mut affected = [
             "affected",
             "affected_products",
             "systems_affected",
@@ -152,7 +152,7 @@ fn template_report(records: &[Value]) -> Value {
         .iter()
         .flat_map(|key| strings(&details[*key]))
         .collect::<Vec<_>>();
-        let refs = ["references", "reference_links", "related_links", "urls"]
+        let mut refs = ["references", "reference_links", "related_links", "urls"]
             .iter()
             .flat_map(|key| strings(&details[*key]))
             .collect::<Vec<_>>();
@@ -178,6 +178,14 @@ fn template_report(records: &[Value]) -> Value {
             newsletter["show_affected"] =
                 json!(!affected.is_empty() || newsletter["affected_table"].is_object());
         }
+        let mut source_link = first_text(&record["source"], &["detail_url", "url"]);
+        if record.pointer("/source/provider").and_then(Value::as_str) == Some("wiz") {
+            newsletter = crate::newsletter_normalizer::normalize(record, "wiz", &json!({}));
+            summary = first_text(&newsletter, &["overview"]);
+            affected = strings(&newsletter["affected"]);
+            refs = strings(&newsletter["references"]);
+            source_link = refs.first().cloned().unwrap_or_default();
+        }
         if !severity.is_empty() {
             with_severity += 1
         }
@@ -191,7 +199,7 @@ fn template_report(records: &[Value]) -> Value {
             with_reference += 1
         };
         recommendations.extend(recs.clone());
-        highlights.push(json!({"title":title,"code":code,"severity":severity,"summary":summary,"affected":affected,"references":refs,"source_link":first_text(&record["source"],&["detail_url","url"]),"newsletter":newsletter}));
+        highlights.push(json!({"title":title,"code":code,"severity":severity,"summary":summary,"affected":affected,"references":refs,"source_link":source_link,"newsletter":newsletter}));
     }
     let n = records.len();
     let summary = format!(
@@ -257,14 +265,14 @@ pub(crate) async fn run(state: AppState, id: ObjectId) {
             return;
         }
         let record = if let Ok(details) = item.get_document("details") {
-            let mut v = db::bson_json(&item);
+            let mut v = db::news_json(&item);
             v["details"] = db::bson_json(details);
             v
         } else {
             let source = db::string(&item, "source_collection");
             let selection_id = db::string(&item, "selection_id");
             match reviews::resolve(&state, &source, &selection_id).await {
-                Some(v) => db::bson_json(&v),
+                Some(v) => db::news_json(&v),
                 None => {
                     update(&state,id,doc!{"status":"failed","error":format!("Selected vulnerability not found: {selection_id}")}).await;
                     return;
@@ -868,6 +876,36 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn template_reports_preserve_wiz_incidents_and_real_cves() {
+        let mut record: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/wiz.json")).unwrap();
+        record["details"]["content"] = json!("<script>unsafe</script>\nFull incident text.");
+        let report = template_report(&[record.clone()]);
+        let highlight = &report["highlights"][0];
+        assert_eq!(highlight["code"], record["code"]);
+        assert_eq!(highlight["newsletter"]["cves"], record["cve_ids"]);
+        assert_eq!(highlight["source_link"], record["details"]["article_url"]);
+        assert_eq!(highlight["severity"], "");
+        assert_eq!(highlight["affected"], json!(["Acme Cloud Widget"]));
+        let html = view::environment(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+            .get_template("reports/generated.html")
+            .unwrap()
+            .render(json!({"html_language":"en", "labels":{}, "report":report}))
+            .unwrap();
+        assert!(html.contains("Full incident text.</p>"));
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(!html.contains("<script>unsafe"));
+        assert!(html.contains("Editorial status"));
+        assert!(!html.contains("Severity:"));
+        assert!(html.contains("Targeted technologies:"));
+        record.as_object_mut().unwrap().remove("cve_ids");
+        assert_eq!(
+            template_report(&[record])["highlights"][0]["newsletter"]["cves"],
+            json!([])
+        );
+    }
 
     #[test]
     fn template_reports_render_splunk_overview_and_product_tables() {

@@ -1,6 +1,6 @@
 {% extends 'layouts/base.html' %}
 {% block title %}{{ collection_name }}{% endblock %}
-{% block styles %}<link href="{{ url_for('static', filename='css/reviews.css', v='20260921-3') }}" rel="stylesheet">{% endblock %}
+{% block styles %}<link href="{{ url_for('static', filename='css/reviews.css', v='20261119-1') }}" rel="stylesheet">{% endblock %}
 
 {% block content %}
 <div class="container-fluid px-3 px-lg-4">
@@ -82,7 +82,7 @@
                         <th style="min-width:280px">{{ t('Title') }}</th>
                         <th style="min-width:130px">{{ t('Severity') }}</th>
                         <th style="min-width:300px">{{ t('Affected') }}</th>
-                        <th style="width:90px">{{ t('Action') }}</th>
+                        <th class="review-action-heading">{{ t('Action') }}</th>
                     </tr>
                 </thead>
                 <tbody id="document-rows"></tbody>
@@ -140,5 +140,6 @@
     'apiUrl': url_for('review.get_review_documents', collection_name=collection_name),
 }|tojson }}</script>
 <script src="{{ url_for('static', filename='js/reviews/email-preview.js', v='20260921-2') }}"></script>
-<script src="{{ url_for('static', filename='js/reviews/collection.js', v='20260921-2') }}"></script>
+<script src="{{ url_for('static', filename='js/reviews/copy-news.js', v='20261119-1') }}"></script>
+<script src="{{ url_for('static', filename='js/reviews/collection.js', v='20261119-1') }}"></script>
 {% endblock %}

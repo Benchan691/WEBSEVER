@@ -45,7 +45,7 @@ pub async fn preview(
             "Newsletter source document not found.",
         );
     };
-    let record = db::bson_json(&document);
+    let record = db::news_json(&document);
     let source = record
         .pointer("/source/provider")
         .and_then(Value::as_str)

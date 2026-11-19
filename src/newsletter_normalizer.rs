@@ -4,6 +4,9 @@ use std::collections::HashSet;
 
 mod splunk;
 
+#[cfg(test)]
+mod wiz;
+
 const ORDER: [&str; 12] = [
     "title",
     "collection",
@@ -890,6 +893,43 @@ pub fn normalize(document: &Value, source: &str, config: &Value) -> Value {
             }
             affected_table = splunk::product_status(details);
         }
+        "wiz" => {
+            overview = first(details, &null, &["content", "summary"]);
+            // Wiz impact and editorial status describe the incident, not its severity.
+            severity = values(&document["severity"]);
+            show_severity = false;
+            affected = values(&details["targeted_technologies"]);
+            show_affected = !affected.is_empty();
+            recommendations.clear();
+            show_recommendations = false;
+            let blocks: Vec<Value> = overview
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(|line| json!({"kind":"paragraph", "text":line}))
+                .collect();
+            extras.insert("overview_blocks".into(), json!(blocks));
+            let rows: Vec<Value> = [
+                ("Threat type", &details["threat_type"]),
+                ("Actors", &details["actors"]),
+                ("Initial access", &details["initial_access"]),
+                ("Observed techniques", &details["observed_techniques"]),
+                ("Editorial status", &details["source_status"]),
+                ("Author", &details["author"]),
+                ("Published (UTC)", &document["published_at"]),
+                ("Updated (UTC)", &document["updated_at"]),
+                ("Observed (UTC)", &document["observed_at"]),
+            ]
+            .into_iter()
+            .filter_map(|(label, value)| {
+                let value = values(value).join(", ");
+                (!value.is_empty()).then(|| json!([label, value]))
+            })
+            .collect();
+            if !rows.is_empty() {
+                table = json!({"headers":["Threat information", "Details"], "rows":rows});
+            }
+        }
         "fortiguard" => {
             if !text(&details["summary"]).is_empty() {
                 overview = text(&details["summary"]);
@@ -1120,6 +1160,11 @@ pub fn normalize(document: &Value, source: &str, config: &Value) -> Value {
     if !detail_url.is_empty() {
         reference_values.insert(0, detail_url);
     }
+    if source == "wiz" {
+        // Prefer the current article slug while retaining the permanent GUID URL.
+        let article_urls = urls(&values(&details["article_url"]), true);
+        reference_values.splice(0..0, article_urls);
+    }
     let source_url = text(&source_urls["url"]);
     if !source_url.is_empty() {
         related_values.insert(0, source_url);
@@ -1152,11 +1197,19 @@ pub fn normalize(document: &Value, source: &str, config: &Value) -> Value {
         }
         show_impacts = true;
     }
+    if source == "wiz" {
+        impacts = values(&details["impact"]);
+        show_impacts = !impacts.is_empty();
+    }
     if source == "hpe" {
         score.clear();
     }
     let chinese = matches!(source, "cnvd" | "cnnvd" | "huawei_sa" | "qianxin");
-    let labels = labels(chinese);
+    let mut labels = labels(chinese);
+    if source == "wiz" {
+        labels["overview"] = json!("Article:");
+        labels["affected"] = json!("Targeted technologies:");
+    }
     if title.is_empty() {
         title = "Security Advisory".into();
     }
@@ -1209,6 +1262,7 @@ pub fn normalize(document: &Value, source: &str, config: &Value) -> Value {
             | "qianxin"
             | "ransomwarelive"
             | "splunk"
+            | "wiz"
             | "zeroday"
             | "zimbra"
     ) {

@@ -430,7 +430,7 @@ flowchart TD
 
 These are application-managed references, not database foreign keys. Deletion does not cascade across all related collections. In particular, subscription deletion does not remove newsletter history, and report deletion does not recursively remove separate translation jobs.
 
-API serialization uses BSON's JSON representation for dates and some nested IDs. Public subscription/job roots convert ObjectId `_id` into an `id` string and remove selected internal fields. Do not assume every date in every response is a plain ISO string; browser helpers also handle Extended JSON dates.
+News responses and exports serialize top-level `observed_at`, `published_at`, and `updated_at` BSON dates as ISO 8601 UTC strings. Other API serialization uses BSON's JSON representation for dates and some nested IDs. Public subscription/job roots convert ObjectId `_id` into an `id` string and remove selected internal fields. Do not assume every date in every response is a plain ISO string; browser helpers also handle Extended JSON dates.
 
 ## 7. Subscription model and lifecycle
 
@@ -541,7 +541,7 @@ Review search supports `all`, `daily`, `week`, compatibility values `24h`, `7d`,
 
 Inventory is optional for search and auto-selection: omitted/null inventory and a valid disabled inventory apply no CSV restriction. An enabled inventory still requires valid, nonempty rows. Without inventory, search uses MongoDB count/sort/skip/limit with `observed_at` descending and `_id` descending for ties. With inventory, the matching cursor preserves that order before pagination. Auto-selection stops after 2,001 matching candidates and rejects more than 2,000, with or without inventory; the selected count remains 1–500. Page opening does not automatically launch a search.
 
-Known severity labels are Critical, High, Medium, and Low. Profile severity matching accepts an optional `Risk` suffix. An empty severity selection normally includes known severities; unknown data requires `include_unknown`, with a compatibility exception for the Zimbra feed's missing severity.
+Known severity labels are Critical, High, Medium, and Low. Profile severity matching accepts an optional `Risk` suffix. An empty severity selection normally includes known severities; unknown data requires `include_unknown`. Wiz bypasses severity filtering in reviews and profiles, while source scope and all other filters still apply. Profile filtering also retains a compatibility exception for the Zimbra feed's missing severity.
 
 Review JSON requests accept booleans as well as strings/numbers for filter arguments, so the browser's `"include_unknown":true` is recognized. GET callers can continue to use `include_unknown=true`.
 
@@ -603,7 +603,7 @@ Review responses include the physical collection, provider, stable `selection_id
 
 Search defaults to page 1 with 25 rows and accepts page sizes 1–100. Inventory matching happens in Rust after database filtering. The general search can materialize all candidates before paginating, so narrow filters on large datasets.
 
-Auto-selection accepts 1–500 requested records, rejects more than 2,000 matched candidates, sorts by importance, deduplicates by extracted CVE ID, and excludes records without a CVE ID. The current scoring formula is:
+Auto-selection accepts 1–500 requested records, rejects more than 2,000 matched candidates, and sorts by importance. Wiz incidents are deduplicated by their stable document IDs, including incidents without CVEs or sharing a CVE. Other providers are deduplicated by extracted CVE ID and exclude records without a CVE ID. The current scoring formula is:
 
 - Base: Critical 45, High 35, Medium 22, Low 10, Unknown 8.
 - Known-exploited flag: +25.
@@ -628,7 +628,9 @@ field_order, visibility flags, and provider-specific extras
 
 It extracts source-specific descriptions, CVE IDs, CVSS values, affected systems, structured tables, remediation, and URLs. Missing titles/overviews receive explicit fallback text. URL extraction filters acceptable schemes; HPE and Zimbra paths require HTTPS links. Some provider labels remain Chinese because those source formats have their own language presentation.
 
-Current explicit provider branches cover AVD, Cisco, CNVD, CNNVD, NVD, CVE, GitHub advisories, HKCERT, Huawei, GovCERT/InfoSec, Juniper, Palo Alto, Splunk, FortiGuard, QiAnXin, Hikvision, Ransomware.live, zero-day records, HPE, and Zimbra. Unknown providers use the generic fallback. These branches do not define the active crawler catalog.
+Current explicit provider branches cover AVD, Cisco, CNVD, CNNVD, NVD, CVE, GitHub advisories, HKCERT, Huawei, GovCERT/InfoSec, Juniper, Palo Alto, Splunk, Wiz, FortiGuard, QiAnXin, Hikvision, Ransomware.live, zero-day records, HPE, and Zimbra. Unknown providers use the generic fallback. These branches do not define the active crawler catalog.
+
+Wiz uses full plain-text articles, threat metadata, impact and targeted-technology labels, and real top-level CVE IDs. It bypasses severity filters without requiring `include_unknown`, and its previews/newsletters omit the severity section. See the [Wiz integration contract and checks](WIZ_INTEGRATION.md).
 
 ### 9.2 Template selection
 

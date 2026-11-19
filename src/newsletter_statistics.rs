@@ -56,6 +56,7 @@ fn source_name(source: &str) -> String {
         "paloalto" => "Palo Alto Networks",
         "qianxin" => "QiAnXin",
         "splunk" => "Splunk",
+        "wiz" => "Wiz Cloud Threat Landscape",
         "zimbra" => "Zimbra",
         _ => source,
     }
@@ -424,6 +425,19 @@ mod tests {
             MonthPeriod::previous(utc("2027-01-01T01:00:00Z")).key,
             "2026-12"
         );
+    }
+
+    #[test]
+    fn wiz_statistics_use_the_source_display_name() {
+        let value = statistics(
+            "reader@example.com",
+            "Cloud threats",
+            &MonthPeriod::previous(utc("2026-12-01T01:00:00Z")),
+            &["wiz".into()],
+            &BTreeMap::from([("wiz".into(), 2)]),
+        );
+        assert_eq!(value["by_source"][0]["name"], "Wiz Cloud Threat Landscape");
+        assert_eq!(value["by_source"][0]["count"], 2);
     }
 
     #[test]

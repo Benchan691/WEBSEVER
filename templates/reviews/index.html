@@ -1,6 +1,6 @@
 {% extends 'layouts/base.html' %}
 {% block title %}{{ t('Vulnerability Reviews') }}{% endblock %}
-{% block styles %}<link href="{{ url_for('static', filename='css/reviews.css', v='20260921-3') }}" rel="stylesheet">{% endblock %}
+{% block styles %}<link href="{{ url_for('static', filename='css/reviews.css', v='20261119-1') }}" rel="stylesheet">{% endblock %}
 
 {% block content %}
 <div class="container-fluid px-3 px-lg-4">
@@ -244,5 +244,6 @@
     'vendorProductTemplateUrl': url_for('subscription.vendor_product_template'),
 }|tojson }}</script>
 <script src="{{ url_for('static', filename='js/reviews/email-preview.js', v='20260921-2') }}"></script>
-<script src="{{ url_for('static', filename='js/reviews/index.js', v='20261113-1') }}"></script>
+<script src="{{ url_for('static', filename='js/reviews/copy-news.js', v='20261119-1') }}"></script>
+<script src="{{ url_for('static', filename='js/reviews/index.js', v='20261119-1') }}"></script>
 {% endblock %}

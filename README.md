@@ -81,6 +81,16 @@ filters the unified `news` collection by `source.provider`, including sources
 that do not currently have news records. The UI displays provider IDs without
 the legacy `_review` suffix.
 
+Wiz Cloud Threat Landscape records (`source.provider = "wiz"`) use this same
+collection and catalog. The portal supports their full article text, threat
+properties, CVEs, canonical links, reviews, newsletter previews/delivery, and
+fixed-template reports. Wiz bypasses severity filters in reviews and
+subscriptions; no **Include unknown severity** setting is needed for Wiz.
+Incident GUIDs remain incident identifiers, and separate Wiz incidents remain
+separate selections even when they mention the same CVE. News dates are exposed
+as ISO 8601 UTC strings. See [Wiz integration](docs/WIZ_INTEGRATION.md) for the
+data contract and verification steps.
+
 Before switching an existing deployment, run the crawler migration as a dry
 run and then perform the validated cutover:
 

@@ -187,6 +187,8 @@ fn segments(document: &Value) -> Vec<(String, String)> {
         &["details", "description"],
         &["details", "descriptions"],
         &["details", "summary"],
+        &["details", "content"],
+        &["details", "targeted_technologies"],
         &["details", "containers", "cna", "descriptions"],
     ];
     fn push(value: &Value, source: &str, out: &mut Vec<(String, String)>) {
@@ -443,6 +445,25 @@ mod tests {
         assert_eq!(
             classify(&matched, &filter).unwrap()["confidence"],
             "confirmed"
+        );
+    }
+
+    #[test]
+    fn wiz_article_and_technology_labels_supply_text_evidence() {
+        let mut filter = json!({"enabled":true,"include_possible_matches":false,"rows":[{"vendor":"Acme","product":"Cloud Widget"}]});
+        for field in ["content", "targeted_technologies"] {
+            let document =
+                json!({"source":{"provider":"wiz"},"details":{field:["Acme Cloud Widget"]}});
+            let matched = classify(&document, &filter).unwrap();
+            assert_eq!(matched["confidence"], "probable");
+            assert_eq!(matched["evidence"]["source"], format!("details.{field}"));
+        }
+        let document = json!({"source":{"provider":"wiz"},"details":{"targeted_technologies":["Cloud Widget"]}});
+        assert!(classify(&document, &filter).is_none());
+        filter["include_possible_matches"] = json!(true);
+        assert_eq!(
+            classify(&document, &filter).unwrap()["confidence"],
+            "possible"
         );
     }
 }

@@ -112,7 +112,7 @@
             button.type = 'button';
             button.dataset.index = index;
             button.innerHTML = '<i class="bi bi-eye me-1"></i>' + t('View');
-            action.append(button);
+            appendReviewActions(action, button, item.preview_url);
             tr.append(action);
             rows.append(tr);
         });

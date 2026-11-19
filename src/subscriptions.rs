@@ -1284,6 +1284,14 @@ fn profile_filter(filters: &Value, physical_collection: &str) -> Document {
                 "details.description",
                 "details.descriptions.value",
                 "details.summary",
+                "details.content",
+                "details.threat_type",
+                "details.actors",
+                "details.initial_access",
+                "details.observed_techniques",
+                "details.targeted_technologies",
+                "details.source_status",
+                "details.author",
                 "impacts",
                 "details.impact",
                 "details.impacts",
@@ -1325,6 +1333,7 @@ fn profile_filter(filters: &Value, physical_collection: &str) -> Document {
                 "details.affected_software",
                 "details.systems_affected",
                 "details.affected_systems",
+                "details.targeted_technologies",
             ],
         ),
         (
@@ -1382,6 +1391,8 @@ fn profile_filter(filters: &Value, physical_collection: &str) -> Document {
     }
     if !accepted.is_empty() {
         let mut ors=accepted.iter().map(|s|Bson::Document(doc!{"severity":{"$regex":format!("^{}(?:\\s+Risk)?$",regex::escape(s)),"$options":"i"}})).collect::<Vec<_>>();
+        // Provider scope and other filters still apply; severity never excludes Wiz.
+        ors.push(Bson::Document(doc! {"source.provider":"wiz"}));
         if include_unknown {
             ors.push(Bson::Document(doc! {"severity":{"$exists":false}}));
             ors.push(Bson::Document(doc! {"severity":Bson::Null}));
@@ -1535,7 +1546,7 @@ pub(crate) async fn match_profile_after(
         if !inventory_match(&document, filters) {
             continue;
         }
-        let value = db::bson_json(&document);
+        let value = db::news_json(&document);
         let source = value
             .pointer("/source/provider")
             .and_then(Value::as_str)
@@ -1590,7 +1601,7 @@ pub(crate) async fn match_profile(
         tracing::error!(%error, "Unable to read report records");
         "Unable to read the vulnerabilities database.".to_owned()
     })? {
-        let document = db::bson_json(&doc);
+        let document = db::news_json(&doc);
         let inventory = &filters["vendor_product_filter"];
         let matched = vendor_matcher::classify(&document, inventory);
         if inventory["enabled"] == true && matched.is_none() {
@@ -3342,10 +3353,10 @@ mod tests {
 
     #[test]
     fn source_catalog_accepts_provider_without_news_documents() {
-        let catalog = doc! {"_id":"active","providers":["fortiguard","cve"]};
+        let catalog = doc! {"_id":"active","providers":["fortiguard","cve","wiz"]};
         assert_eq!(
             parse_source_catalog(&catalog).unwrap(),
-            vec!["fortiguard", "cve"]
+            vec!["fortiguard", "cve", "wiz"]
         );
     }
 

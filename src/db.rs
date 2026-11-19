@@ -11,6 +11,17 @@ pub fn object_id(value: &str) -> Option<ObjectId> {
 pub fn bson_json(document: &Document) -> Value {
     serde_json::to_value(document).unwrap_or(json!({}))
 }
+pub fn news_json(document: &Document) -> Value {
+    let mut value = bson_json(document);
+    for field in ["observed_at", "published_at", "updated_at"] {
+        if let Ok(date) = document.get_datetime(field)
+            && let Some(date) = chrono::DateTime::from_timestamp_millis(date.timestamp_millis())
+        {
+            value[field] = json!(date.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true));
+        }
+    }
+    value
+}
 pub fn json_doc(value: &Value) -> Result<Document, String> {
     bson::to_document(value).map_err(|e| e.to_string())
 }
@@ -77,4 +88,26 @@ pub fn public_id(mut value: Value) -> Value {
         value.as_object_mut().unwrap().remove("_id");
     }
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn news_dates_are_iso_utc_and_incident_identity_is_preserved() {
+        let document = bson::doc! {
+            "_id": "wiz:11111111-2222-4333-8444-555555555555",
+            "observed_at": bson::DateTime::parse_rfc3339_str("2026-11-18T11:00:00.123+08:00").unwrap(),
+            "published_at": bson::DateTime::from_millis(-1),
+            "details": {"future_field":"preserved"},
+        };
+        let value = news_json(&document);
+        assert_eq!(value["_id"], document.get_str("_id").unwrap());
+        assert_eq!(value["observed_at"], "2026-11-18T03:00:00.123Z");
+        assert_eq!(value["published_at"], "1969-12-31T23:59:59.999Z");
+        assert!(value.get("updated_at").is_none());
+        assert_eq!(value["details"]["future_field"], "preserved");
+        assert!(bson_json(&document)["observed_at"].is_object());
+    }
 }

@@ -188,6 +188,7 @@ fn filter(ctx: &ReqCtx) -> Result<Document, String> {
                 "details.affected_software",
                 "details.vulnerable_products",
                 "details.products",
+                "details.targeted_technologies",
             ][..],
         ),
     ] {
@@ -223,6 +224,15 @@ fn filter(ctx: &ReqCtx) -> Result<Document, String> {
             "details.description",
             "details.descriptions.value",
             "details.summary",
+            "details.content",
+            "details.threat_type",
+            "details.actors",
+            "details.initial_access",
+            "details.impact",
+            "details.observed_techniques",
+            "details.targeted_technologies",
+            "details.source_status",
+            "details.author",
             "details.affected.vendor",
             "details.affected.product",
             "details.affected.packageName",
@@ -270,6 +280,8 @@ fn filter(ctx: &ReqCtx) -> Result<Document, String> {
             .iter()
             .map(|value| regex_clause("severity", value))
             .collect::<Vec<_>>();
+        // Wiz incidents participate regardless of severity selections.
+        severity.push(Bson::Document(doc! {"source.provider":"wiz"}));
         if include_unknown {
             severity.extend([
                 Bson::Document(doc! {"severity":{"$exists":false}}),
@@ -358,6 +370,18 @@ fn severity(document: &Document) -> String {
 }
 pub(crate) fn cve_id(document: &Document) -> String {
     let value = db::bson_json(document);
+    if value.pointer("/source/provider").and_then(Value::as_str) == Some("wiz") {
+        // A Wiz code is a UUID, whose numeric groups can resemble a bare CVE.
+        let re = Regex::new(r"(?i)^CVE-\d{4}-\d{4,}$").unwrap();
+        return value["cve_ids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .find(|id| re.is_match(id))
+            .map(str::to_ascii_uppercase)
+            .unwrap_or_default();
+    }
     let re = Regex::new(r"(?i)\b(?:CVE-)?(\d{4}-\d{4,})\b").unwrap();
     for key in ["code", "_id", "title", "cve", "cve_ids"] {
         if let Some(v) = value.get(key) {
@@ -461,7 +485,7 @@ fn unique_join(values: impl IntoIterator<Item = String>) -> Option<String> {
 }
 
 fn normalized_document(document: &Document) -> Value {
-    let mut data = db::bson_json(document);
+    let mut data = db::news_json(document);
     let provider = data
         .pointer("/source/provider")
         .and_then(Value::as_str)
@@ -581,19 +605,8 @@ fn normalized_document(document: &Document) -> Value {
         }
     }
     if is_blank(object.get("cve")) {
-        let code = text_value(object.get("code")).or_else(|| {
-            rendered
-                .get("cves")
-                .and_then(Value::as_array)
-                .and_then(|values| values.first())
-                .and_then(|value| text_value(Some(value)))
-        });
-        if let Some(code) = code {
-            let cve = if code.to_ascii_uppercase().starts_with("CVE-") {
-                code.to_ascii_uppercase()
-            } else {
-                format!("CVE-{code}")
-            };
+        let cve = cve_id(document);
+        if !cve.is_empty() {
             object.insert("cve".into(), Value::String(cve));
         }
     }
@@ -844,7 +857,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         let matched = candidates.len();
         let mut rows = candidates.into_iter().map(|(name, document)| {
             let (selection_score, patch_priority, severity, cve_id) = score(&document);
-            json!({"collection":name,"selection_id":db::id_string(&document),"selection_score":selection_score,"patch_priority":patch_priority,"severity":severity,"cve_id":cve_id})
+            json!({"collection":name,"source":document_source(&document),"selection_id":db::id_string(&document),"selection_score":selection_score,"patch_priority":patch_priority,"severity":severity,"cve_id":cve_id})
         }).collect::<Vec<_>>();
         rows.sort_by(|a, b| {
             b["selection_score"]
@@ -855,6 +868,9 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
         let selected: Vec<Value> = rows
             .into_iter()
             .filter(|r| {
+                if r["source"] == "wiz" {
+                    return seen.insert(r["selection_id"].as_str().unwrap_or("").to_owned());
+                }
                 let id = r["cve_id"].as_str().unwrap_or("");
                 !id.is_empty() && seen.insert(id.to_owned())
             })
@@ -908,7 +924,7 @@ pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
                     "Selected document was not found.",
                 ));
             };
-            documents.push(db::bson_json(&document));
+            documents.push(db::news_json(&document));
         }
         let filename = format!(
             "vulnerability-export-{}.json",
@@ -1106,6 +1122,31 @@ mod tests {
         );
         assert_eq!(normalized["affected"], json!(["Example Gateway"]));
         assert_eq!(normalized["severity"], "High");
+    }
+
+    #[test]
+    fn wiz_uuid_is_never_a_cve_and_editorial_status_is_not_severity() {
+        let mut document = doc! {
+            "_id":"wiz:11111111-2222-4333-8444-555555555555",
+            "code":"11111111-2222-4333-8444-555555555555",
+            "source":{"provider":"wiz"},
+            "details":{
+                "content":"Available incident text.",
+                "impact":["High business impact"],
+                "targeted_technologies":["Example Cloud"],
+                "source_status":"Finalized",
+            },
+        };
+        assert_eq!(cve_id(&document), "");
+        let value = normalized_document(&document);
+        assert!(value.get("cve").is_none());
+        assert!(value.get("severity").is_none());
+        assert!(value.get("classification").is_none());
+        assert_eq!(value["description"], "Available incident text.");
+        assert_eq!(value["affected"], json!(["Example Cloud"]));
+        document.insert("cve_ids", vec!["CVE-2026-12345", "CVE-2026-54321"]);
+        assert_eq!(cve_id(&document), "CVE-2026-12345");
+        assert_eq!(normalized_document(&document)["cve"], "CVE-2026-12345");
     }
 
     #[test]
