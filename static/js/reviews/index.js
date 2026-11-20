@@ -1,7 +1,8 @@
 (function () {
-    const {exportUrl, searchUrl, autoSelectUrl, vendorProductImportUrl, vendorProductTemplateUrl} = JSON.parse(
+    const {exportUrl, searchUrl, autoSelectUrl, vendorProductImportUrl, vendorProductTemplateUrl, reviewSources} = JSON.parse(
         document.getElementById('page-config').textContent
     );
+    const reviewSourcePicker = new CollectionPicker('review', {emptySelectionMeansAll: true});
     const error = document.getElementById('error-alert');
     const statusAlert = document.getElementById('status-alert');
     const refresh = document.getElementById('refresh-btn');
@@ -209,6 +210,8 @@
         const payload = {};
         const search = document.getElementById('filter-search').value.trim();
         if (search) payload.search = search;
+        const sources = reviewSourcePicker.selectedValues();
+        if (sources.length) payload.source_provider = sources;
         if (hasVendorProductFilter()) {
             payload.vendor_product_filter = Object.assign({}, vendorProductFilter, {
                 include_possible_matches: includePossibleMatches.checked,
@@ -557,12 +560,15 @@
     });
     clearFilter.addEventListener('click', function () {
         filterForm.reset();
+        reviewSourcePicker.render(reviewSources, []);
         vendorProductFilter = {enabled: false, schema_version: 1, include_possible_matches: false, rows: []};
         showVendorProductStatus('', 'info');
         updateVendorProductSummary();
         updateCustomWindow();
         runSearch(1);
     });
+    reviewSourcePicker.wire();
+    reviewSourcePicker.render(reviewSources, []);
     vendorProductTemplate.href = vendorProductTemplateUrl;
     vendorProductFile.addEventListener('change', function () {
         importVendorProductCsv(vendorProductFile.files && vendorProductFile.files[0]);

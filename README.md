@@ -112,8 +112,9 @@ After a successful Zimbra `AuthRequest`, the service ensures the configured `new
 ## Vulnerability Reviews
 
 In **Vulnerability Reviews**, use **Search keyword** to find advisory identifiers,
-titles, descriptions, vendors or products. Keywords match any entered word,
-without case sensitivity, and combine with severity and scrape-date filters.
+titles, descriptions, vendors or products. Keywords match any entered word
+without case sensitivity. Use **Sources** to narrow search and auto-selection
+to any combination of providers. Source, severity and scrape-date filters can be combined.
 The vendor/product CSV is optional; uploading one further narrows the results.
 Search and auto-selection both work without a CSV. The page waits for **Apply
 Filter** instead of searching automatically when opened.

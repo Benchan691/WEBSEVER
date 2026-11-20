@@ -44,6 +44,25 @@ pub async fn views(state: &AppState) -> Result<Vec<String>, mongodb::error::Erro
     })
 }
 
+async fn source_options(state: &AppState) -> Vec<String> {
+    let collection = db::collection(&state.vuln, &state.cfg.vulnerabilities_collection);
+    let mut sources = match collection.distinct("source.provider", doc! {}).await {
+        Ok(values) => values
+            .into_iter()
+            .filter_map(|value| match value {
+                Bson::String(source) if !source.trim().is_empty() => Some(source),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        Err(error) => {
+            tracing::warn!(%error, "Unable to list review sources");
+            Vec::new()
+        }
+    };
+    sources.sort_unstable();
+    sources
+}
+
 fn canonical_name(state: &AppState, name: &str) -> Option<String> {
     let name = name.trim();
     if name == state.cfg.vulnerabilities_collection {
@@ -294,6 +313,16 @@ fn filter(ctx: &ReqCtx) -> Result<Document, String> {
     let source = filter_arg(ctx, "source");
     if !source.trim().is_empty() {
         clauses.push(regex_clause("source.provider", source.trim()));
+    }
+    let source_providers = filter_args(ctx, "source_provider")
+        .into_iter()
+        .map(|source| source.trim().to_owned())
+        .filter(|source| !source.is_empty())
+        .collect::<Vec<_>>();
+    if !source_providers.is_empty() {
+        clauses.push(Bson::Document(
+            doc! {"source.provider":{"$in":source_providers}},
+        ));
     }
     let window = filter_arg(ctx, "time_window");
     let now = Utc::now();
@@ -703,7 +732,12 @@ async fn filtered_rows(
 
 pub async fn handle(state: &AppState, ctx: &ReqCtx) -> Option<Response> {
     if ctx.path == "/reviews" && ctx.method == Method::GET {
-        return Some(render(state, ctx, "reviews/index.html", json!({})));
+        return Some(render(
+            state,
+            ctx,
+            "reviews/index.html",
+            json!({"sources":source_options(state).await}),
+        ));
     }
     if let Some(name) = ctx.path.strip_prefix("/reviews/") {
         if ctx.method == Method::GET {

@@ -55,6 +55,11 @@
 .review-results-table { table-layout: fixed; }
 .review-action-heading { width: 12rem; }
 
+.review-source-options {
+    max-height: 15rem;
+    overflow-y: auto;
+}
+
 .review-email-preview-scroll {
     max-height: min(70vh, 52rem);
     overflow: auto;

@@ -38,7 +38,8 @@
         updateLabel() {
             const checked = this.checkboxes().filter(function (input) { return input.checked; });
             const toggle = this.element('toggle');
-            toggle.textContent = this.allMode
+            const showsAll = this.allMode || (this.emptySelectionMeansAll && checked.length === 0);
+            toggle.textContent = showsAll
                 ? t('All sources')
                 : checked.length === 0 ? t('No sources')
                     : checked.length === 1 ? checked[0].value : t('{count} sources', {count: checked.length});

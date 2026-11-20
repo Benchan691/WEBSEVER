@@ -1,6 +1,6 @@
 {% extends 'layouts/base.html' %}
 {% block title %}{{ t('Vulnerability Reviews') }}{% endblock %}
-{% block styles %}<link href="{{ url_for('static', filename='css/reviews.css', v='20261119-1') }}" rel="stylesheet">{% endblock %}
+{% block styles %}<link href="{{ url_for('static', filename='css/reviews.css', v='20261120-2') }}" rel="stylesheet">{% endblock %}
 
 {% block content %}
 <div class="container-fluid px-3 px-lg-4">
@@ -29,10 +29,22 @@
     <form id="global-filter-form" class="card shadow-sm border-0 mb-4 review-filter-card">
         <div class="card-body">
             <div class="row g-3">
-                <div class="col-12">
+                <div class="col-12 col-lg-9">
                     <label for="filter-search" class="form-label">{{ t('Search keyword') }}</label>
                     <input id="filter-search" name="search" class="form-control" placeholder="{{ t('Search by CVE, title, vendor, or product') }}" aria-describedby="filter-search-help">
-                    <div id="filter-search-help" class="form-text">{{ t('Match any word. Combine with severity, dates, or an optional CSV to narrow results.') }}</div>
+                    <div id="filter-search-help" class="form-text">{{ t('Match any word. Combine with other filters to narrow results.') }}</div>
+                </div>
+                <div class="col-12 col-lg-3">
+                    <label for="review-collections-toggle" class="form-label">{{ t('Sources') }}</label>
+                    <div class="dropdown">
+                        <button id="review-collections-toggle" type="button" class="form-select text-start" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">{{ t('All sources') }}</button>
+                        <div id="review-collections-menu" class="dropdown-menu w-100 shadow-sm p-2">
+                            <input id="review-collections-search" type="search" class="form-control form-control-sm mb-2" aria-label="{{ t('Search sources...') }}" placeholder="{{ t('Search sources...') }}" autocomplete="off">
+                            <div id="review-collections-options" class="review-source-options"></div>
+                            <div class="dropdown-divider"></div>
+                            <button type="button" class="btn btn-link btn-sm px-1 collections-action" data-action="reset">{{ t('All sources') }}</button>
+                        </div>
+                    </div>
                 </div>
                 <div class="col-12 col-xl-4">
                     <div class="review-filter-group">
@@ -242,8 +254,10 @@
     'autoSelectUrl': url_for('review.auto_select_review_documents'),
     'vendorProductImportUrl': url_for('subscription.import_vendor_products'),
     'vendorProductTemplateUrl': url_for('subscription.vendor_product_template'),
+    'reviewSources': sources or [],
 }|tojson }}</script>
+<script src="{{ url_for('static', filename='js/shared/collection-picker.js', v='20261120-2') }}"></script>
 <script src="{{ url_for('static', filename='js/reviews/email-preview.js', v='20260921-2') }}"></script>
 <script src="{{ url_for('static', filename='js/reviews/copy-news.js', v='20261119-1') }}"></script>
-<script src="{{ url_for('static', filename='js/reviews/index.js', v='20261119-1') }}"></script>
+<script src="{{ url_for('static', filename='js/reviews/index.js', v='20261120-2') }}"></script>
 {% endblock %}

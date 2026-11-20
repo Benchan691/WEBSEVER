@@ -31,6 +31,63 @@ async fn search(state: &AppState, body: Value) -> Value {
     value
 }
 
+#[tokio::test]
+#[ignore = "requires REVIEW_SEARCH_TEST_MONGO_URI for a disposable database"]
+async fn review_source_picker_matches_exact_selected_providers() {
+    let state = test_state().await;
+    db::collection(&state.vuln, "news")
+        .insert_many([
+            doc! {"_id":"nvd:2026-12345", "code":"CVE-2026-12345", "source":{"provider":"nvd"}, "severity":"High"},
+            doc! {"_id":"cnvd:2026-12346", "code":"CVE-2026-12346", "source":{"provider":"cnvd"}, "severity":"High"},
+            doc! {"_id":"splunk:SVD-2026-1102", "code":"SVD-2026-1102", "source":{"provider":"splunk"}, "severity":"High"},
+        ])
+        .await
+        .unwrap();
+    let mut page = request("/reviews", Value::Null);
+    page.method = Method::GET;
+    let response = handle(&state, &page).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(html.contains("id=\"review-collections-toggle\""));
+    let (_, config) = html
+        .split_once("<script id=\"page-config\" type=\"application/json\">")
+        .unwrap();
+    let config: Value = serde_json::from_str(config.split_once("</script>").unwrap().0).unwrap();
+    assert_eq!(config["reviewSources"], json!(["cnvd", "nvd", "splunk"]));
+
+    let matches = search(&state, json!({"source_provider":"nvd"})).await;
+    assert_eq!(matches["total"], 1);
+    assert_eq!(matches["data"][0]["source"], "nvd");
+    let matches = search(&state, json!({"source_provider":["nvd", "splunk"]})).await;
+    assert_eq!(matches["total"], 2);
+    let sources = |rows: &Value| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["source"].as_str().unwrap().to_owned())
+            .collect::<HashSet<_>>()
+    };
+    let expected = HashSet::from(["nvd".to_owned(), "splunk".to_owned()]);
+    assert_eq!(sources(&matches["data"]), expected);
+    let (status, selected) = api(
+        &state,
+        request(
+            "/api/reviews/auto-select",
+            json!({"count":10,"source_provider":["nvd", "splunk"]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(selected["selected"], 2);
+    assert_eq!(sources(&selected["selections"]), expected);
+    assert_eq!(
+        search(&state, json!({"source_provider":[]})).await["total"],
+        3
+    );
+    state.vuln.drop().await.unwrap();
+}
+
 async fn test_state() -> AppState {
     let uri = std::env::var("REVIEW_SEARCH_TEST_MONGO_URI").unwrap();
     let client = Client::with_uri_str(&uri).await.unwrap();
